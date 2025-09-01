@@ -2,14 +2,14 @@ import type { RenderingEngine } from '@cornerstonejs/core';
 import type { IImageVolume } from '@cornerstonejs/core/dist/types/types';
 import { Niivue } from '@niivue/niivue';
 import { useEffect, useRef, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import NestedCheckBox from '../components/NestedCheckBox/NestedCheckBox';
 import OpacitySlider from '../components/OpacitySlider/OpacitySlider';
 import ReportScreen from '../components/ReportScreen/ReportScreen';
 import WindowingSlider from '../components/WindowingSlider/WindowingSlider';
 import { renderVisualization, setToolGroupOpacity, setVisibilities } from '../helpers/CornerstoneNifti';
 import { create3DVolume, updateGeneralOpacity, updateVisibilities } from '../helpers/NiiVueNifti';
-import { APP_CONSTANTS, segmentation_categories } from '../helpers/constants';
+import { API_BASE, APP_CONSTANTS, segmentation_categories } from '../helpers/constants';
 import { filenameToName } from '../helpers/utils';
 import { type CheckBoxData, type LastClicked, type NColorMap } from '../types';
 import './VisualizationPage.css';
@@ -24,7 +24,7 @@ function VisualizationPage() {
   const coronal_ref = useRef<HTMLDivElement>(null);
   const render_ref = useRef<HTMLCanvasElement>(null);
   const cmapRef = useRef<NColorMap>(null);
-  const TaskMenu_ref = useRef(null);
+  // const TaskMenu_ref = useRef(null);
   const VisualizationContainer_ref = useRef(null);
   const segmentationRef = useRef<IImageVolume>(null);
 //   const lastClickInfoRef = useRef(null);
@@ -35,7 +35,7 @@ function VisualizationPage() {
   const [checkState, setCheckState] = useState<boolean[]>([true]);
   const [segmentationRepresentationUIDs, setSegmentationRepresentationUIDs] = useState<string[] | null>(null);
   const [NV, setNV] = useState<Niivue | undefined>();
-  const [sessionKey, setSessionKey] = useState<string | undefined>(undefined);
+  const [sessionKey, _setSessionKey] = useState<string | undefined>(undefined);
   const [checkBoxData, setCheckBoxData] = useState<CheckBoxData[]>([]);
   const [opacityValue, setOpacityValue] = useState(APP_CONSTANTS.DEFAULT_SEGMENTATION_OPACITY * 100);
   const [windowWidth, setWindowWidth] = useState(400);
@@ -49,7 +49,7 @@ function VisualizationPage() {
 
 
   const navigate = useNavigate();
-  const location = useLocation();
+  // const location = useLocation();
 
 
   // Load and render visualization on first render
@@ -177,8 +177,7 @@ function VisualizationPage() {
   };
 
   const handleDownloadClick = async () => {
-    const backendUrl = "https://localhost:5001";
-    const response = await fetch(`${backendUrl}/api/download/${pantsCase}`);
+    const response = await fetch(`${API_BASE}/api/download/${pantsCase}`);
     const blob = await response.blob();
     const url = window.URL.createObjectURL(blob);
 
@@ -202,6 +201,13 @@ function VisualizationPage() {
     }
     navigate('/');
   };
+  const PREVIEW_IDS = [1, 17, 30, 35, 121];
+
+
+  if (PREVIEW_IDS.filter(id => id === Number(pantsCase)).length === 0) {
+    navigate("/");
+    return null;
+  }
 
   return (
     <div className="VisualizationPage" style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
@@ -302,7 +308,6 @@ function VisualizationPage() {
         <NestedCheckBox
           setCheckState={setCheckState}
           checkBoxData={checkBoxData}
-          innerRef={TaskMenu_ref}
           checkState={checkState}
           update={update}
           sessionId={sessionKey}

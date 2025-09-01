@@ -44,7 +44,7 @@ const toolGroupSpecificRepresentationConfig = {
   },
 };
 
-export async function renderVisualization(ref1: React.RefObject<HTMLDivElement | null>, ref2: React.RefObject<HTMLDivElement | null>, ref3: React.RefObject<HTMLDivElement | null>, sessionId: string, clabelId: string): Promise<VisualizationRenderReturnType | undefined> {
+export async function renderVisualization(ref1: React.RefObject<HTMLDivElement | null>, ref2: React.RefObject<HTMLDivElement | null>, ref3: React.RefObject<HTMLDivElement | null>, _sessionId: string, clabelId: string): Promise<VisualizationRenderReturnType | undefined> {
   cache.purgeCache();
   console.log(clabelId)
   csTools3dInit();

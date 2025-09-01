@@ -95,7 +95,7 @@ export async function create3DVolume(canvasRef: React.RefObject<HTMLCanvasElemen
 }
 
 
-export function updateVisibilities(nv: Niivue, checkState: boolean[], sessionId: string | undefined, cmapCopy: NColorMap | null) {
+export function updateVisibilities(nv: Niivue, checkState: boolean[], _sessionId: string | undefined, cmapCopy: NColorMap | null) {
   if (!(nv.volumes && checkState && cmapCopy)) {
     console.warn("❌ updateVisibilities skipped: volumes or checkState undefined");
     return;

@@ -17,7 +17,6 @@ type ChipBoxProps = {
 type Props = {
   setCheckState: React.Dispatch<React.SetStateAction<boolean[]>>;
   checkBoxData: CheckBoxData[];
-  innerRef: React.RefObject<null>;
   checkState: boolean[];
   update: (id: number, checked: boolean) => void;
   sessionId: string | undefined;
@@ -58,11 +57,11 @@ function ChipBox({ itemData, checkStateProp, update, rgbaVals, checkBoxData, isA
 }
 
 
-function NestedCheckBox({ setCheckState, checkBoxData, checkState, update, innerRef, sessionId, clabelId }: Props) {
+function NestedCheckBox({ setCheckState, checkBoxData, checkState, update, sessionId, clabelId }: Props) {
   const [searchText, setSearchText] = useState("");
   const [labelColorMap, setLabelColorMap] = useState<{ [key: number]: number[] }>({});
   const inputRef = useRef(null);
-  const chipContainerRef = useRef(null);
+  // const chipContainerRef = useRef(null);
 
   const cacheKey = `labelColorMap_${sessionId}`;
 

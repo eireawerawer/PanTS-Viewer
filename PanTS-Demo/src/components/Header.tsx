@@ -22,7 +22,7 @@ export default function Header({handleAboutClick}: Props)  {
 							<div
 								className="cursor-pointer hover:bg-gray-700 rounded p-0.5 text-base"
 								onClick={() =>
-									navigate(`/data?pg=${9000 / ITEMS_PER_DATA_PAGE + 1}`)
+									navigate(`/data?pg=${9000 / ITEMS_PER_DATA_PAGE}`)
 								}
 							>
 								Test

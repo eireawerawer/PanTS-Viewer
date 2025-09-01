@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import About from "../components/About";
 import Header from "../components/Header";
 import Preview from "../components/Preview";
@@ -13,7 +13,7 @@ export default function Homepage() {
 		[key: string]: PreviewType;
 	}>({});
 
-	const navigate = useNavigate();
+	// const navigate = useNavigate();
 
 	const aboutRef = useRef<HTMLDivElement>(null);
 
@@ -67,7 +67,7 @@ export default function Homepage() {
 						);
 					})}
 				</div>
-				<button className="w-1/6 !bg-blue-500 rounded p-2 hover:!bg-blue-600" onClick={() => navigate("/data")}>View all cases</button>
+				{/* <button className="w-1/6 !bg-blue-500 rounded p-2 hover:!bg-blue-600" onClick={() => navigate("/data")}>View all cases</button> */}
 			</div>
 			<hr className="w-full" />
 			<About aboutRef={aboutRef} />

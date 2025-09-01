@@ -12,7 +12,7 @@ export default function Preview({ id, previewMetadata }: Props) {
 	
 	// ! if image not preloaded in public folder
 
-	const [thumbnail, setThumbnail] = useState<string>("");
+	const [_thumbnail, setThumbnail] = useState<string>("");
 	useEffect(() => {
 		const getPreview = async () => {
 			try {
