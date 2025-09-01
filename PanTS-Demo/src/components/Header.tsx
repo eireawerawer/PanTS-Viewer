@@ -1,5 +1,4 @@
 import { useNavigate } from "react-router-dom";
-import { ITEMS_PER_DATA_PAGE } from "../helpers/constants";
 
 type Props = {
     handleAboutClick: () => void
@@ -15,14 +14,14 @@ export default function Header({handleAboutClick}: Props)  {
 						<div className="scale-0 flex flex-col rounded gap-2 p-2 w-full transition-all bg-gray-800 absolute top-8 origin-top group-hover:scale-100 duration-100">
 							<div
 								className="cursor-pointer hover:bg-gray-700 rounded p-0.5 text-base"
-								onClick={() => navigate("/data")}
+								// onClick={() => navigate("/data")}
 							>
 								Train
 							</div>
 							<div
 								className="cursor-pointer hover:bg-gray-700 rounded p-0.5 text-base"
 								onClick={() =>
-									navigate(`/data?pg=${9000 / ITEMS_PER_DATA_PAGE}`)
+									navigate(`/`)
 								}
 							>
 								Test
