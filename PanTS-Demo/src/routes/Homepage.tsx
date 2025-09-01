@@ -55,7 +55,7 @@ export default function Homepage() {
 			<Header handleAboutClick={handleAboutClick} />
 			<div className="flex flex-col gap-4 p-4 justify-center items-center w-screen">
 				<div className="text-2xl font-bold">Previews</div>
-				<hr className="w-full" />
+				<hr className="w-screen" />
 				<div className="flex gap-y-4 gap-x-8 p-4 flex-wrap justify-center items-center w-full">
 					{PREVIEW_IDS.map((el, idx) => {
 						return (
