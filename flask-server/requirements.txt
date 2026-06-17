@@ -31,7 +31,7 @@ setuptools==75.6.0
 SQLAlchemy==2.0.37
 typing_extensions==4.12.2
 tzlocal==5.2
-urllib3==2.2.3
+urllib3==2.7.0
 Werkzeug==3.0.3
 wheel==0.45.1
 # flupg
