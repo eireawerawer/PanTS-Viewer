@@ -23,7 +23,7 @@
     "@tabler/icons": "^3.34.1",
     "@tabler/icons-react": "^3.34.1",
     "@tailwindcss/vite": "^4.1.12",
-    "esbuild": "^0.25.9",
+    "esbuild": "^0.28.1",
     "jszip": "^3.10.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
