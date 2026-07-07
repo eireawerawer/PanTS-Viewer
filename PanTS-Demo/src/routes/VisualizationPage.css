@@ -859,3 +859,30 @@
   pointer-events: none;
   z-index: 9999;
 }
+
+@media (max-width: 768px) {
+  .VisualizationPage {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+  }
+
+  .sidebar {
+    max-width: 100%;
+  }
+
+  .visualization-container {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-auto-rows: 62vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .vp-sidebar {
+    width: min(90vw, 22rem) !important;
+  }
+
+  .vp-toolrow {
+    flex-wrap: wrap;
+  }
+}
