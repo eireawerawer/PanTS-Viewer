@@ -26,6 +26,7 @@ import { buildViewerActions } from "../components/AIAssistant/assistantActions";
 import SnakeGame from "../components/SnakeGame/SnakeGame";
 import WindowingSlider from "../components/WindowingSlider/WindowingSlider";
 import ZoomHandle from "../components/zoomHandle";
+import ScanReadout from "../components/ScanReadout/ScanReadout";
 import {
     API_BASE,
     APP_CONSTANTS,
@@ -889,6 +890,12 @@ const flaggedOrgans = useMemo(() => summarizeOutOfRange(statRows), [statRows]);
 											submitted={zoomLevel}
 											setSubmitted={setZoomLevel}
 											setZoomMode={setZoomMode}
+										/>
+										<ScanReadout
+											stats={organStats}
+											loading={statsLoading}
+											error={statsError}
+											onLoad={loadOrganStats}
 										/>
 									</>
 
