@@ -520,3 +520,38 @@
   text-align: center;
   padding: 0 16px;
 }
+
+
+@media (max-width: 768px) {
+   .upload-main {
+      padding: 24px 16px 48px;
+   }
+   .upload-card {
+      padding: 20px 18px 24px;
+      border-radius: 14px;
+   }
+   .dropzone {
+      padding: 44px 18px;
+   }
+   .pipeline-row {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 14px;
+   }
+   .pipeline-arrow {
+      padding: 0;
+      transform: rotate(90deg);
+      align-self: center;
+   }
+   .run-btn {
+      width: 100%;
+      padding: 14px 32px;
+   }
+   .action-bar .action-btn,
+   .result-btns .result-btn {
+      flex: 1 1 auto;
+   }
+   .ct-preview {
+      height: 240px;
+   }
+}
