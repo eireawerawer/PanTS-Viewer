@@ -30,7 +30,7 @@ export default function Header() {
 		>
 			{/* Logo */}
 			<div className={styles.logoPill} onClick={() => navigate("/dashboard")}>
-				<img src="/bodymaps-logo.svg" alt="" className={styles.logoImg} />
+				<img src="/favicon/favicon.svg" alt="BodyMaps logo" className={styles.logoImg} />
 				<div className={styles.logoTitle}>BodyMaps</div>
 			</div>
 
