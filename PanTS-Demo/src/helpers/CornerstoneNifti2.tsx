@@ -233,13 +233,13 @@ export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivEle
         getReferenceLineControllable,
         getReferenceLineDraggableRotatable,
         getReferenceLineSlabThicknessControlsOn,
-        // viewportIndicators: true,
+        showFullScaleReferenceLines: false,
         mobile: {
             enabled: false,
             opacity: 0.8,
             handleRadius: 16,
         },
-        handleRadius:8
+        handleRadius: 8
     })
     if (!_crosshairListenerRegistered) {
         eventTarget.addEventListener(cornerstoneTools.Enums.Events.CROSSHAIR_TOOL_CENTER_CHANGED, _handleCrosshairCenterChanged);

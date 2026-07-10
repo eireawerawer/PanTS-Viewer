@@ -13,7 +13,7 @@ import {
     IconSquareDashed,
     IconTrash
 } from "@tabler/icons-react";
-import React, { lazy, Suspense, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import React, { lazy, Suspense, useEffect, useMemo, useCallback, useRef, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { useParams } from "react-router-dom";
 import ErrorBoundary from "../components/ErrorBoundary";
@@ -175,6 +175,8 @@ function VisualizationPage() {
 	const [viewportIds, setViewportIds] = useState<string[]>([]);
 	const [volumeId, setVolumeId] = useState<string | null>(null);
 	const [showReportScreen, setShowReportScreen] = useState(false);
+	const preIsolateCheckStateRef = useRef<boolean[] | null>(null);
+	const [isolatedOrgan, setIsolatedOrgan] = useState<string | null>(null);
 	const [showStats, setShowStats] = useState(false);
 	const [showAISidebar, setShowAISidebar] = useState(false);
 	const [organStats, setOrganStats] = useState<OrganStat[] | null>(null);
@@ -321,13 +323,6 @@ function VisualizationPage() {
 		// resolve after the second and clobber state with the wrong case's result.
 		let cancelled = false;
 		const setup = async () => {
-			// const state = location.state;
-			// if (!state) {
-			// alert('No Nifti Files Uploaded!');
-			// navigate('/');
-			// return;
-			// }
-
 			const checkBoxData = segmentation_categories.map((filename, i) => ({
 				label: filenameToName(filename),
 				id: i + 1,
@@ -354,7 +349,6 @@ function VisualizationPage() {
 				!axial_ref.current ||
 				!sagittal_ref.current ||
 				!coronal_ref.current ||
-				// !render_ref.current ||
 				cmap.length === 0
 			) {
 				console.log("return", ctUrl, segUrl);
@@ -383,19 +377,6 @@ function VisualizationPage() {
 			setRenderingEngine(renderingEngine);
 			setViewportIds(viewportIds);
 			setVolumeId(volumeId);
-			// const { nv, cmapCopy } = await create3DVolume(
-			// 	render_ref,
-			// 	segUrl,
-			// 	labelColorMap,
-			// 	(mm) => moveCornerstoneCrosshairToMm(mm as [number, number, number])
-			// );
-			// cmapRef.current = cmapCopy;
-			// setNV(nv);
-
-			// // Cornerstone → NiiVue: when crosshair moves in any 2D view, sync to 3D
-			// subscribeToCrosshairChanges((mm) => {
-			// 	moveNiiVueCrosshairToMm(nv, mm);
-			// });
 		};
 
 		setup();
@@ -410,36 +391,6 @@ function VisualizationPage() {
 		segUrl,
 		labelColorMap,
 	]);
-	// Toggle checkbox state
-	//   useEffect(() => {
-	//   const fetchColorMap = async () => {
-	//     try {
-	//       // const cached = sessionStorage.getItem(cacheKey);
-	//       // if (cached) {
-	//       //   setLabelColorMap(JSON.parse(cached));
-	//       //   return;
-	//       // }
-	//       setProgress(0.15)
-	//       const response = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/get-label-colormap/${pantsCase}`);
-	//       const lut = await response.json();
-	//       const parsedMap: {[key: number]: Color}= {};
-	//       for (const labelId in lut) {
-	//         const color = lut[labelId];
-	//         if (color && color.R !== undefined) {
-	//           const arr: Color = [color.R, color.G, color.B, color.A ?? 255];
-	//           parsedMap[Number(labelId)] = arr;
-	//         }
-	//       }
-	//       setLabelColorMap(parsedMap);
-
-	//       setProgress(0.7)
-	//     } catch (err) {
-	//       console.warn("❗ Failed to fetch colormap:", err);
-	//     }
-	//   };
-
-	//   fetchColorMap();
-	// }, [pantsCase]);
 
 	// Update VOI (window/level) settings
 	const handleWindowChange = (
@@ -548,7 +499,6 @@ function VisualizationPage() {
 		if (!centroid) return; // organ not present in this scan
 		moveCornerstoneCrosshairToMm(centroid);
 		setCrosshairMm(centroid);
-		// if (NV) moveNiiVueCrosshairToMm(NV, centroid);
 		setCheckState((prev) => {
 			if (prev[label]) return prev;
 			const next = [...prev];
@@ -593,15 +543,18 @@ function VisualizationPage() {
 	};
 
 	const panelStyle = (panel: "axial" | "sagittal" | "coronal" | "3d"): React.CSSProperties => {
+		if (showReportScreen) {
+			return panel === "3d"
+			? { position: "absolute", inset: 0, zIndex: 20 }
+			: { display: "none" };
+		}
+
 		if (viewMode === "mpr") return {};
-		// 3D: overlay the render pane fullscreen but LEAVE the Cornerstone panes untouched
-		// in their grid cells. The render pane is the *last* grid item, so pulling it out of
-		// flow doesn't reflow the other three — their viewports stay valid, so switching back
-		// to MPR is instant (no resize/re-fit of the 2D views, no animation, correct sizes).
+
 		if (viewMode === "3d") {
 			return panel === "3d" ? { position: "absolute", inset: 0, zIndex: 20 } : {};
 		}
-		// 2D single view: collapse the grid to one cell and hide the rest.
+
 		return viewMode === panel ? {} : { display: "none" };
 	};
 
@@ -612,15 +565,6 @@ function VisualizationPage() {
 				true, // ID=0 background 永远可见
 				...checkBoxData.map((item) => !!checkState[item.id]),
 			];
-			// const visible = checkStateArr.map((item, idx) => item === true ? idx - 1 : null).filter((item) => item !== null);
-			// if (visible.length !== checkBoxData.length+1 && visible.length !== 1) {
-			// 	visible.splice(0, 1);
-			// 	console.log(visible.map((item) => segmentation_categories[item]));
-			// 	create3DVolumeFew(render_ref, labelColorMap, getPanTSId(pantsCase ?? "1"), visible);
-			// }
-			// else {
-			// updateVisibilities(NV, checkStateArr, sessionKey, cmapRef.current);
-			// }
 			setVisibilities(checkStateArr);
 		}
 	}, [
@@ -634,13 +578,11 @@ function VisualizationPage() {
 		const value = Number(event.target.value);
 		setOpacityValue(value);
 		setToolGroupOpacity(value / 100);
-		// updateGeneralOpacity(render_ref, value / 100);
 	};
 
 	const handleOpacityOnFormSubmit = (value: number) => {
 		setOpacityValue(value);
 		setToolGroupOpacity(value / 100);
-		// updateGeneralOpacity(render_ref, value / 100);
 	};
 
 	// Per-organ volume (cm³) + mean HU — the existing quantitative layer the backend
@@ -768,15 +710,56 @@ const flaggedOrgans = useMemo(() => summarizeOutOfRange(statRows), [statRows]);
 		});
 	};
 
+	const handleOrganHighlight = useCallback((organName: string, centroidMm?: [number, number, number]) => {
+		if (centroidMm) {
+			moveCornerstoneCrosshairToMm(centroidMm);
+			setCrosshairMm(centroidMm);
+		}
+		const idx = segmentation_categories.findIndex(
+			(cat) => cat === organName || cat.startsWith(organName)
+		);
+		if (idx === -1) return;
+		const labelId = idx + 1;
+		setCheckState((prev) => {
+			if (!preIsolateCheckStateRef.current) {
+				preIsolateCheckStateRef.current = prev;
+			}
+			const next = prev.map(() => false);
+			next[0] = true;
+			next[labelId] = true;
+			return next;
+		});
+		setIsolatedOrgan(organName);
+	}, []);
+
+	const handleClearIsolation = useCallback(() => {
+		if (preIsolateCheckStateRef.current) {
+			setCheckState(preIsolateCheckStateRef.current);
+			preIsolateCheckStateRef.current = null;
+		}
+		setIsolatedOrgan(null);
+	}, []);
+
+	const handleHideOrgans = useCallback((organNames: string[]) => {
+		setCheckState(prev => {
+			if (!preIsolateCheckStateRef.current) {
+				preIsolateCheckStateRef.current = [...prev];
+			}
+			const next = [...prev];
+			organNames.forEach(name => {
+				const idx = segmentation_categories.findIndex(
+					cat => cat === name || cat.startsWith(name)
+				);
+				if (idx >= 0) next[idx + 1] = false;
+			});
+			return next;
+		});
+	}, []);
+
+
 	const navBack = () => {
 		window.location.href = "/dashboard";
 	};
-	// const PREVIEW_IDS = [1, 17, 30, 35, 121];
-
-	// if (PREVIEW_IDS.filter((id) => id === Number(pantsCase)).length === 0) {
-	// 	navigate("/");
-	// 	return null;
-	// }
 
 	return (
 		<div
@@ -824,8 +807,6 @@ const flaggedOrgans = useMemo(() => summarizeOutOfRange(statRows), [statRows]);
 							className={`vp-sidebar w-64 h-dvh p-4 pt-16 gap-3 flex flex-col overflow-y-auto transition-all duration-300 ease-in-out origin-left ${showTaskDetails ? "translate-x-[-64rem]" : "translate-x-0"}`}
 							style={{ position: 'fixed', top: 0, left: 0, zIndex: 49 }}
 						>
-							{/* Toggle dropdown */}
-
 							{!showTaskDetails && (
 								<>
 									{zoomMode ? null : (
@@ -892,11 +873,7 @@ const flaggedOrgans = useMemo(() => summarizeOutOfRange(statRows), [statRows]);
 										/>
 									</>
 
-									{/* Report Download Zoom Buttons */}
-									{/* Opacity & Windowing Sliders */}
-									{/* {!zoomMode ? ( */}
 									<>
-
 										<div className="vp-toolrow">
 											<button
 												className={`vp-tool ${crosshairToolActive && !activeMeasureTool ? "vp-tool--active" : ""}`}
@@ -971,22 +948,6 @@ const flaggedOrgans = useMemo(() => summarizeOutOfRange(statRows), [statRows]);
 												)}
 												<span className="vp-tool__tip">{shareCopied ? "Link copied!" : "Share this view"}</span>
 											</button>
-											{/* <div className="group cursor-pointer rounded-md relative">
-													{!zoomMode ? (
-														<>
-															<div className="border-gray-500 hover:bg-gray-700 border rounded-md p-2">
-
-															<IconZoom
-																onClick={() => setZoomMode(true)}
-																className="w-6 h-6 text-white relative"
-																></IconZoom>
-															</div>
-															<span className="transition-all pointer-events-none duration-100 scale-0 group-hover:scale-100 absolute top-0 left-12 z-1 bg-gray-900 text-white rounded-md p-2">
-																Zoom
-															</span>
-														</>
-													) : null }
-												</div> */}
 
 											<button
 												className="vp-tool"
@@ -998,7 +959,11 @@ const flaggedOrgans = useMemo(() => summarizeOutOfRange(statRows), [statRows]);
 											</button>
 											<button
 												className="vp-tool"
-												onClick={() => setShowReportScreen(true)}
+												onClick={() => {
+													setShowTaskDetails(true);
+													setViewMode("3d");
+													setTimeout(() => setShowReportScreen(true), 400);
+												}}
 												aria-label="Open report"
 											>
 												<IconReport size={20} color="white" />
@@ -1032,24 +997,12 @@ const flaggedOrgans = useMemo(() => summarizeOutOfRange(statRows), [statRows]);
 											)}
 										</div>
 									</>
-									{/* ) : null} */}
 								</>
 							)}
 						</div>
 					</div>
 				</div>
 
-				{/* {
-          loading ?
-          <div className="flex z-3 absolute top-0 left-0 w-screen h-screen items-center justify-center">
-              <div role="status">
-                  <svg aria-hidden="true" className="w-8 h-8 text-gray-200 animate-spin dark:text-gray-600 fill-white" viewBox="0 0 100 101" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M100 50.5908C100 78.2051 77.6142 100.591 50 100.591C22.3858 100.591 0 78.2051 0 50.5908C0 22.9766 22.3858 0.59082 50 0.59082C77.6142 0.59082 100 22.9766 100 50.5908ZM9.08144 50.5908C9.08144 73.1895 27.4013 91.5094 50 91.5094C72.5987 91.5094 90.9186 73.1895 90.9186 50.5908C90.9186 27.9921 72.5987 9.67226 50 9.67226C27.4013 9.67226 9.08144 27.9921 9.08144 50.5908Z" fill="currentColor"/><path d="M93.9676 39.0409C96.393 38.4038 97.8624 35.9116 97.0079 33.5539C95.2932 28.8227 92.871 24.3692 89.8167 20.348C85.8452 15.1192 80.8826 10.7238 75.2124 7.41289C69.5422 4.10194 63.2754 1.94025 56.7698 1.05124C51.7666 0.367541 46.6976 0.446843 41.7345 1.27873C39.2613 1.69328 37.813 4.19778 38.4501 6.62326C39.0873 9.04874 41.5694 10.4717 44.0505 10.1071C47.8511 9.54855 51.7191 9.52689 55.5402 10.0491C60.8642 10.7766 65.9928 12.5457 70.6331 15.2552C75.2735 17.9648 79.3347 21.5619 82.5849 25.841C84.9175 28.9121 86.7997 32.2913 88.1811 35.8758C89.083 38.2158 91.5421 39.6781 93.9676 39.0409Z" fill="currentFill"/></svg>
-                  <span className="sr-only">Loading...</span>
-              </div>
-          </div>
-          :
-          null
-        } */}
 				{loading ? (
 					<>
 						{pantsCase && (
@@ -1258,7 +1211,14 @@ const flaggedOrgans = useMemo(() => summarizeOutOfRange(statRows), [statRows]);
 				showReportScreen && (
 					<ReportScreen
 						id={caseId}
-						onClose={() => setShowReportScreen(false)}
+						onClose={() => {
+							setShowReportScreen(false);
+							handleClearIsolation();
+						}}
+						onOrganHighlight={handleOrganHighlight}
+						onClearHighlight={handleClearIsolation}
+						onViewChange={(view) => setViewMode(view as ViewMode)}
+						onHideOrgans={handleHideOrgans}
 					/>
 				)
 			}

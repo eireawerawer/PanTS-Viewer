@@ -1,901 +1,887 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { APP_CONSTANTS } from '../../helpers/constants';
 import FindingsTimeline from './FindingsTimeline';
+import type { MeshManifest } from '../../types';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type Props = {
   id: string;
   onClose: () => void;
   onViewChange: (view: 'axial' | 'sagittal' | 'coronal' | '3d') => void;
   onOrganHighlight?: (organName: string, centroidMm?: [number, number, number]) => void;
+  onClearHighlight?: () => void;
+  onHideOrgans?: (organNames: string[]) => void;
+};
+
+interface OrganData {
+  volume: number;
+  mean_hu: number;
+  status?: 'normal' | 'check';
+  centroid_mm?: [number, number, number];
+  dimensions?: [number, number, number];
 }
 
 interface ReportData {
   case_id: string;
   patient: { age: number; sex: string };
   imaging: { study_type: string; contrast: string; spacing: number[]; shape: number[] };
-  organ_volumes: { [key: string]: { volume: number; mean_hu: number; status?: 'normal' | 'check'; centroid_mm?: [number, number, number] } };
-  lesions: { [key: string]: { voxels: number; volume: number } };
+  organ_volumes: { [k: string]: OrganData };
+  lesions: { [k: string]: { voxels: number; volume: number } };
   comments: string;
   impression: string[];
 }
 
-interface PanelPos { x: number; y: number; }
+type Lang = 'patient' | 'clinical';
+type Step = number;
 
-const cache: { [key: string]: ReportData } = {};
+const cache: { [k: string]: ReportData } = {};
 
-const KEYWORD_TO_ORGAN: Record<string, string> = {
-  'pancreas': 'pancreas', 'pancreatic': 'pancreas',
-  'liver': 'liver', 'hepatic': 'liver',
-  'spleen': 'spleen', 'splenic': 'spleen',
-  'kidney': 'kidney_left', 'renal': 'kidney_left',
-  'gallbladder': 'gall_bladder', 'bile': 'common_bile_duct',
-  'aorta': 'aorta', 'aortic': 'aorta',
-  'stomach': 'stomach', 'bowel': 'intestine', 'colon': 'colon',
-  'duodenum': 'duodenum', 'adrenal': 'adrenal_gland_left',
-  'bladder': 'bladder', 'lesion': 'pancreatic_lesion',
-  'lung': 'lung_left', 'femur': 'femur_left',
-};
+// ─── Styles ───────────────────────────────────────────────────────────────────
 
-const KEYWORD_COLORS: Record<string, string> = {
-  lesion: '#ff5555', mass: '#ff5555', tumor: '#ff5555', malignant: '#ff5555', nodule: '#ff7777',
-  normal: '#6dcaa5', unremarkable: '#6dcaa5', benign: '#6dcaa5',
-  pancreas: '#f9a8d4', pancreatic: '#f9a8d4',
-  liver: '#60a5fa', hepatic: '#60a5fa',
-  kidney: '#34d399', renal: '#34d399',
-  spleen: '#fb923c', splenic: '#fb923c',
-  aorta: '#f472b6', aortic: '#f472b6',
-  stomach: '#a78bfa', colon: '#86efac',
-  adrenal: '#fbbf24', bladder: '#67e8f9',
-  lung: '#93c5fd', enlarged: '#fbbf24',
-  hypodensity: '#ff9966', hyperdensity: '#ff6688',
-  dilated: '#fbbf24', dilation: '#fbbf24',
-};
+const STYLES = `
+@keyframes spin { from{transform:rotate(0)}to{transform:rotate(360deg)} }
+@keyframes slideR { from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:translateX(0)} }
+@keyframes slideL { from{opacity:0;transform:translateX(-24px)}to{opacity:1;transform:translateX(0)} }
+@keyframes riseIn { from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)} }
 
-const ORGAN_KEYWORDS = Object.keys(KEYWORD_COLORS).concat([
-  'atrophy', 'calcification', 'infiltration', 'obstructed',
-]);
+.rs-scroll::-webkit-scrollbar { width: 6px; }
+.rs-scroll::-webkit-scrollbar-track { background: transparent; }
+.rs-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 999px; }
 
-const DEFINABLE_TERMS = new Set([
-  'dilation', 'dilated', 'distension', 'attenuation', 'hypodensity', 'hyperdensity',
-  'stricture', 'obstruction', 'obstructed', 'mass', 'lesion', 'nodule', 'atrophy',
-  'infiltration', 'calcification', 'hydronephrosis', 'malignant', 'benign',
-  'unremarkable', 'cyst', 'ischemic', 'perfusion', 'enhancement', 'effusion',
-  'edema', 'necrosis',
-]);
+.rs-primary:hover { transform: translateY(-1px); background: rgba(255,255,255,0.16)!important; border-color: rgba(255,255,255,0.24)!important; }
+.rs-primary-amber:hover { transform: translateY(-1px); background: rgba(251,191,36,0.18)!important; border-color: rgba(251,191,36,0.34)!important; }
+.rs-secondary:hover { background: rgba(255,255,255,0.08)!important; color: rgba(255,255,255,0.9)!important; border-color: rgba(255,255,255,0.18)!important; }
+.rs-exit:hover { background: rgba(239,68,68,0.10)!important; border-color: rgba(239,68,68,0.36)!important; color: rgba(248,113,113,0.95)!important; }
+.rs-toggle:hover { background: rgba(255,255,255,0.08)!important; }
+.rs-link:hover { color: rgba(255,255,255,0.9)!important; }
+`;
 
-const SIDED_ORGANS: Record<string, { left: string; right: string }> = {
-  adrenal: { left: 'adrenal_gland_left', right: 'adrenal_gland_right' },
-  kidney: { left: 'kidney_left', right: 'kidney_right' },
-  renal: { left: 'kidney_left', right: 'kidney_right' },
-  lung: { left: 'lung_left', right: 'lung_right' },
-};
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function resolveSidedOrgan(lower: string, parts: string[], idx: number): string {
-  const base = SIDED_ORGANS[lower];
-  if (!base) return KEYWORD_TO_ORGAN[lower] || lower;
-
-  const windowText = parts.slice(Math.max(0, idx - 2), idx + 3).join(' ').toLowerCase();
-  if (/\bright\b/.test(windowText) && !/\bleft\b/.test(windowText)) return base.right;
-  if (/\bleft\b/.test(windowText) && !/\bright\b/.test(windowText)) return base.left;
-  return KEYWORD_TO_ORGAN[lower] || lower;
+function labelize(organ: string): string {
+  return organ
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase());
 }
 
-function highlightKeywords(
-  text: string,
-  onKeywordClick: (word: string, organName: string, el: HTMLElement) => void,
-  onTermClick?: (term: string) => void,
-): React.ReactNode[] {
-  const pattern = new RegExp(`\\b(${ORGAN_KEYWORDS.join('|')})\\b`, 'gi');
-  const parts = text.split(pattern);
-  return parts.map((part, i) => {
-    const lower = part.toLowerCase();
-    if (!ORGAN_KEYWORDS.map(k => k.toLowerCase()).includes(lower)) return part;
+function fmtVol(v: number) {
+  return v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
+}
 
-    const isOrganName = lower in KEYWORD_TO_ORGAN;
-    if (isOrganName) {
-      const color = KEYWORD_COLORS[lower] || '#a78bfa';
-      const organName = resolveSidedOrgan(lower, parts, i);
-      return <KeywordChip key={i} word={part} color={color} onClick={(e) => onKeywordClick(part, organName, e.currentTarget)} />;
-    }
-    if (DEFINABLE_TERMS.has(lower) && onTermClick) {
-      return <DefinableTerm key={i} word={part} onClick={() => onTermClick(lower)} />;
-    }
-    // Anything else (e.g. "enlarged") that isn't a real organ name and isn't
-    // in the definition dictionary just renders as plain text — no chip,
-    // no color, no click. Only actual organ names stay clickable.
-    return part;
+function getDetail(organ: string, comments: string): string | null {
+  if (!comments) return null;
+  const sentences = comments.split(/(?<=[.!?])\s+/).filter(s => s.trim());
+  const root = organ.replace(/_(gland|body|tail|head|left|right)$/, '').replace(/_/g, ' ').split(' ')[0];
+  const match = sentences.find(s => s.toLowerCase().includes(root.toLowerCase()));
+  if (!match) return null;
+  let d = match.trim().replace(/^(however|notably|additionally|furthermore|moreover|in addition),?\s+/i, '');
+  if (d.length) d = d[0].toUpperCase() + d.slice(1);
+  if (d.length > 210) d = d.slice(0, d.lastIndexOf(' ', 207)).trim() + '...';
+  return d.endsWith('.') || d.endsWith('...') ? d : d + '.';
+}
+
+
+function organRoot(organ: string): string {
+  if (organ.startsWith('pancreas')) return 'pancreas';
+  if (organ.startsWith('kidney')) return 'kidney';
+  return organ
+    .replace(/_(gland|body|tail|head|left|right)$/, '')
+    .replace(/_/g, ' ')
+    .split(' ')[0]
+    .toLowerCase();
+}
+
+function getReportSection(organ: string, comments: string): string | null {
+  if (!comments) return null;
+  const root = organRoot(organ);
+  const lines = comments.split(/\r?\n/);
+  const start = lines.findIndex(line => {
+    const cleaned = line.trim().replace(/:$/, '').toLowerCase();
+    return cleaned === root || cleaned === `${root}s` || cleaned.startsWith(`${root}:`);
   });
+  if (start === -1) return getDetail(organ, comments);
+
+  const collected: string[] = [];
+  for (let i = start; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (i > start && /^[A-Za-z][A-Za-z\s_/-]*:\s*$/.test(trimmed)) break;
+    if (i > start && /^IMPRESSION:\s*$/i.test(trimmed)) break;
+    if (trimmed) collected.push(trimmed);
+  }
+  return collected.join(' ').replace(/\s+/g, ' ').trim() || null;
 }
 
-interface TaggedSentence { text: string; organs: string[]; idx: number; }
-function tagSentencesByOrgan(text: string): TaggedSentence[] {
-  const rawSentences = text.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
-  return rawSentences.map((s, idx) => {
-    const lower = s.toLowerCase();
-    const organs = Object.keys(KEYWORD_TO_ORGAN).filter((kw) => new RegExp(`\\b${kw}\\b`).test(lower));
-    // Resolve sided organs (adrenal/kidney/lung) using this sentence's own
-    // left/right wording, instead of always defaulting to the unsided
-    // KEYWORD_TO_ORGAN mapping — otherwise every "adrenal" mention gets
-    // tagged as adrenal_gland_left even when the sentence says "right".
-    const mappedOrgans = Array.from(new Set(organs.map((kw) => {
-      const sided = SIDED_ORGANS[kw];
-      if (!sided) return KEYWORD_TO_ORGAN[kw];
-      const hasRight = /\bright\b/.test(lower);
-      const hasLeft = /\bleft\b/.test(lower);
-      const hasBilateral = /\bbilateral\b/.test(lower);
-      if (hasBilateral || (hasRight && hasLeft)) return KEYWORD_TO_ORGAN[kw];
-      if (hasRight) return sided.right;
-      if (hasLeft) return sided.left;
-      return KEYWORD_TO_ORGAN[kw];
-    })));
-    return { text: s, organs: mappedOrgans, idx };
-  });
+type ReportMeasurements = {
+  section: string | null;
+  volumeCc: number | null;
+  meanHu: number | null;
+  huSd: number | null;
+  sizeCm: string | null;
+};
+
+function getReportMeasurements(organ: string, comments: string): ReportMeasurements {
+  const section = getReportSection(organ, comments);
+  const volumeMatch = section?.match(/volume:\s*([\d.]+)\s*cc/i);
+  const huMatch = section?.match(/Mean HU value:\s*([\d.]+)(?:\s*\+\/\-\s*([\d.]+))?/i);
+  const sizeMatch = section?.match(/Size:\s*([^().]+?)\s*cm/i);
+
+  return {
+    section,
+    volumeCc: volumeMatch ? Number(volumeMatch[1]) : null,
+    meanHu: huMatch ? Number(huMatch[1]) : null,
+    huSd: huMatch?.[2] ? Number(huMatch[2]) : null,
+    sizeCm: sizeMatch ? sizeMatch[1].trim() : null,
+  };
 }
 
-// Returns a genuine, descriptive clinical detail about a given organ from
-// the radiologist's actual comments text — used to populate the Selected
-// Organ header with real substance, not a generic "finding detected"
-// label. Uses the full matched sentence rather than clipping to a single
-// clause: a one-clause fragment reads as too sparse to actually inform
-// someone, while clinical terms within it remain click-to-define if
-// unfamiliar. Caps only as a safety net for unusually long sentences.
-// Returns null if the organ isn't discussed in the text.
-function getOrganDetailLine(organName: string, comments: string): string | null {
-  const sentences = tagSentencesByOrgan(comments);
+function getImpressionText(data: ReportData | null): string {
+  if (!data?.impression?.length) return '';
+  return data.impression
+    .map(t => t.replace(/^\d+\.\s*/, '').replace(/^\[([^\]]+)\]:\s*/, '$1: '))
+    .join(' ');
+}
 
-  // Exact match first (e.g. "kidney_left" tagged directly).
-  let match = sentences.find((s) => s.organs.includes(organName));
+function patientFindingText(organ: string, detail: string | null): string {
+  const name = labelize(organ).toLowerCase();
+  const d = (detail || '').toLowerCase();
 
-  // Fallback A: many organ keys in this dataset are sub-regions of a more
-  // general organ the text actually names — e.g. "pancreas_body" and
-  // "pancreas_tail" both come from a sentence that just says "pancreas".
-  // Strip the _body/_tail/_left/_right suffix and try matching that base
-  // name instead, so sub-region organs can still surface real detail
-  // instead of always falling back to "no specific finding".
-  if (!match) {
-    const baseName = organName.replace(/_(body|tail|head|left|right)$/, '');
-    if (baseName !== organName) {
-      match = sentences.find((s) => s.organs.includes(baseName));
-    }
+  if (d.includes('enlarged')) return `The report says the ${name} appears enlarged.`;
+  if (d.includes('mass') || d.includes('lesion') || d.includes('tumor')) return `The report found a finding near the ${name}.`;
+  if (d.includes('widened') || d.includes('dilated')) return `The report says the ${name} appears widened.`;
+  if (d.includes('normal size')) return `The report mentions the ${name}.`;
+  return `The report found something in the ${name} that should be reviewed.`;
+}
+
+function useCountUp(target: number, duration = 750): number {
+  const [val, setVal] = useState(0);
+
+  useEffect(() => {
+    let start: number | null = null;
+    let raf = 0;
+    const tick = (ts: number) => {
+      if (!start) start = ts;
+      const progress = Math.min((ts - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setVal(Math.round(target * eased));
+      if (progress < 1) raf = requestAnimationFrame(tick);
+    };
+    setVal(0);
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, duration]);
+
+  return val;
+}
+
+// ─── Small UI pieces ──────────────────────────────────────────────────────────
+
+const glass: React.CSSProperties = {
+  background: 'linear-gradient(180deg, rgba(255,255,255,0.052), rgba(255,255,255,0.024))',
+  border: '1px solid rgba(255,255,255,0.08)',
+  borderRadius: 28,
+  backdropFilter: 'blur(28px)',
+  WebkitBackdropFilter: 'blur(28px)',
+  boxShadow: '0 30px 90px rgba(0,0,0,0.36), inset 0 1px 0 rgba(255,255,255,0.07)',
+};
+
+function PrimaryButton({ children, onClick, amber = false }: { children: React.ReactNode; onClick: () => void; amber?: boolean }) {
+  return (
+    <button
+      className={amber ? 'rs-primary-amber' : 'rs-primary'}
+      onClick={onClick}
+      style={{
+        padding: '13px 22px',
+        borderRadius: 999,
+        border: amber ? '1px solid rgba(251,191,36,0.30)' : '1px solid rgba(255,255,255,0.16)',
+        background: amber ? 'rgba(251,191,36,0.14)' : 'rgba(255,255,255,0.11)',
+        color: amber ? '#fbbf24' : 'rgba(255,255,255,0.94)',
+        fontSize: 15,
+        fontWeight: 750,
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        transition: 'all 0.22s cubic-bezier(0.22,1,0.36,1)',
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function SecondaryButton({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
+  return (
+    <button
+      className="rs-secondary"
+      onClick={onClick}
+      style={{
+        padding: '12px 18px',
+        borderRadius: 999,
+        border: '1px solid rgba(255,255,255,0.12)',
+        background: 'transparent',
+        color: 'rgba(255,255,255,0.62)',
+        fontSize: 14,
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        transition: 'all 0.2s',
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function StatPill({ tone, title, value, sub }: { tone: 'green' | 'amber'; title: string; value: string; sub: string }) {
+  const color = tone === 'green' ? '#6ee7b7' : '#fbbf24';
+  const bg = tone === 'green' ? 'rgba(110,231,183,0.08)' : 'rgba(251,191,36,0.08)';
+  const border = tone === 'green' ? 'rgba(110,231,183,0.20)' : 'rgba(251,191,36,0.22)';
+  return (
+    <div style={{ flex: 1, minWidth: 0, padding: '15px 16px', borderRadius: 20, background: bg, border: `1px solid ${border}` }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <span style={{ width: 22, height: 22, borderRadius: 999, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: bg, color, fontWeight: 850, fontSize: 13 }}>
+          {tone === 'green' ? '✓' : '!'}
+        </span>
+        <span style={{ color: 'rgba(255,255,255,0.78)', fontSize: 13, fontWeight: 720 }}>{title}</span>
+      </div>
+      <div style={{ color, fontSize: 28, lineHeight: 1, fontWeight: 820, letterSpacing: '-0.04em' }}>{value}</div>
+      <div style={{ color: 'rgba(255,255,255,0.54)', fontSize: 14, marginTop: 8 }}>{sub}</div>
+    </div>
+  );
+}
+
+function OrganList({ organs, max = 5 }: { organs: [string, OrganData][]; max?: number }) {
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll ? organs : organs.slice(0, max);
+  return (
+    <>
+      <div className="rs-scroll" style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: showAll ? 220 : 'none', overflowY: showAll ? 'auto' : 'visible', paddingRight: showAll ? 6 : 0 }}>
+        {visible.map(([organ], i) => (
+          <div key={organ} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 16, background: 'rgba(110,231,183,0.075)', border: '1px solid rgba(110,231,183,0.17)', animation: `riseIn 0.25s ease ${i * 26}ms both` }}>
+            <span style={{ width: 21, height: 21, borderRadius: 999, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(110,231,183,0.14)', color: '#6ee7b7', fontSize: 12, fontWeight: 850, flexShrink: 0 }}>✓</span>
+            <span style={{ color: 'rgba(255,255,255,0.84)', fontSize: 15, fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{labelize(organ)}</span>
+          </div>
+        ))}
+      </div>
+      {organs.length > max && (
+        <button
+          className="rs-link"
+          onClick={() => setShowAll(v => !v)}
+          style={{ marginTop: 12, background: 'transparent', border: 'none', padding: 0, color: 'rgba(110,231,183,0.78)', fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+        >
+          {showAll ? 'Show less' : `Show all ${organs.length} healthy organs`}
+        </button>
+      )}
+    </>
+  );
+}
+
+function MetricRow({ label, value, sub, tone = 'white' }: { label: string; value: string; sub?: string; tone?: 'white' | 'green' | 'amber' }) {
+  const color = tone === 'green' ? '#6ee7b7' : tone === 'amber' ? '#fbbf24' : 'rgba(255,255,255,0.92)';
+  return (
+    <div style={{ padding: '13px 0', borderBottom: '1px solid rgba(255,255,255,0.075)' }}>
+      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.42)', marginBottom: 5, letterSpacing: '0.03em' }}>{label}</div>
+      <div style={{ fontSize: 22, lineHeight: 1.08, fontWeight: 780, color, letterSpacing: '-0.03em' }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.38)', marginTop: 5, lineHeight: 1.42 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function EvidencePanel({
+  step,
+  lang,
+  flagged,
+  normal,
+  curOrgan,
+  curData,
+  data,
+  anim,
+}: {
+  step: Step;
+  lang: Lang;
+  flagged: [string, OrganData][];
+  normal: [string, OrganData][];
+  curOrgan: string | null;
+  curData: OrganData | null;
+  data: ReportData;
+  anim: string;
+}) {
+  const firstFinding = flagged[0]?.[0] ?? null;
+  const firstDetail = firstFinding ? getDetail(firstFinding, data.comments) : null;
+  const impression = getImpressionText(data);
+  const report = curOrgan ? getReportMeasurements(curOrgan, data.comments) : null;
+  const reportVolume = report?.volumeCc ?? null;
+  const counted = useCountUp(reportVolume ?? 0);
+
+  if (step === 1) {
+    // On the healthy-organs page, do not show the finding preview.
+    // The left panel is the story; the 3D model shifts right to balance the empty space.
+    return null;
   }
 
-  // Fallback B: the reverse direction — clicking the bare base organ
-  // itself (e.g. "pancreas", with no exact sentence tag for that literal
-  // key) should still find a sentence tagged with one of its sub-regions
-  // (e.g. "pancreas_body"), since that's the same real organ being
-  // discussed under a more specific key.
-  if (!match) {
-    match = sentences.find((s) =>
-      s.organs.some((o) => o !== organName && o.replace(/_(body|tail|head|left|right)$/, '') === organName)
+  if (step === 0) {
+    return (
+      <div style={{ ...glass, width: 330, padding: 24, animation: `${anim} 0.36s cubic-bezier(0.22,1,0.36,1) both` }}>
+        <div style={{ fontSize: 12, letterSpacing: '0.12em', textTransform: 'uppercase', color: flagged.length ? 'rgba(251,191,36,0.72)' : 'rgba(110,231,183,0.72)', fontWeight: 800, marginBottom: 18 }}>
+          {flagged.length ? 'Finding found' : 'No finding found'}
+        </div>
+        {flagged.length ? (
+          <>
+            <div style={{ fontSize: 34, lineHeight: 1.08, fontWeight: 830, letterSpacing: '-0.05em', color: '#fbbf24', marginBottom: 14 }}>
+              {labelize(firstFinding!)}
+            </div>
+            <p style={{ color: 'rgba(255,255,255,0.70)', fontSize: 16, lineHeight: 1.55, margin: 0 }}>
+              {lang === 'patient'
+                ? patientFindingText(firstFinding!, firstDetail)
+                : (firstDetail || impression || 'See the report finding for details.')}
+            </p>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 30, lineHeight: 1.1, fontWeight: 820, letterSpacing: '-0.045em', color: '#6ee7b7', marginBottom: 14 }}>
+              No abnormal finding was marked.
+            </div>
+            <p style={{ color: 'rgba(255,255,255,0.68)', fontSize: 16, lineHeight: 1.55, margin: 0 }}>
+              The report did not mark any organ for review.
+            </p>
+          </>
+        )}
+        <div style={{ marginTop: 22, paddingTop: 18, borderTop: '1px solid rgba(255,255,255,0.075)', color: 'rgba(255,255,255,0.46)', fontSize: 13, lineHeight: 1.5 }}>
+          {normal.length} healthy organ{normal.length === 1 ? '' : 's'} · {flagged.length} finding{flagged.length === 1 ? '' : 's'}
+        </div>
+      </div>
     );
   }
 
-  if (!match) return null;
+  if (step >= 2 && curOrgan && curData) {
+    const detail = getDetail(curOrgan, data.comments);
+    return (
+      <div style={{ ...glass, width: 350, padding: 24, animation: `${anim} 0.36s cubic-bezier(0.22,1,0.36,1) both` }}>
+        <div style={{ fontSize: 12, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'rgba(251,191,36,0.72)', fontWeight: 800, marginBottom: 18 }}>
+          Measurements
+        </div>
 
-  let detail = match.text.trim();
+        <MetricRow label="Organ" value={labelize(curOrgan)} tone="amber" />
 
-  // The sentence-splitter correctly isolates grammatically complete
-  // sentences, but some legitimately start with a transition word like
-  // "However," or "Notably," that only makes sense following the prior
-  // sentence — shown standalone, it reads as cut off mid-thought. Strip a
-  // leading transition word/phrase and re-capitalize what follows.
-  const leadingTransition = /^(however|notably|additionally|furthermore|moreover|in addition),?\s+/i;
-  detail = detail.replace(leadingTransition, (_m, _w, offset) => '');
-  if (detail.length > 0) {
-    detail = detail[0].toUpperCase() + detail.slice(1);
-  }
+        {reportVolume !== null ? (
+          <MetricRow label="Volume" value={`${reportVolume.toFixed(1).replace(/\.0$/, '')} cc`} tone="amber" sub="From the report text." />
+        ) : (
+          <MetricRow label="Volume" value="Not listed" sub="No report volume was found for this organ." />
+        )}
 
-  // Safety cap for unusually long sentences only — most real Impression
-  // sentences land well under this.
-  if (detail.length > 280) {
-    const cut = detail.slice(0, 270);
-    const lastSpace = cut.lastIndexOf(' ');
-    detail = (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trim() + '...';
-  }
-  return detail.endsWith('.') || detail.endsWith('...') ? detail : detail + '.';
-}
+        {lang === 'clinical' && report?.meanHu !== null && report?.meanHu !== undefined && (
+          <MetricRow
+            label="Mean HU"
+            value={`${Math.round(report.meanHu)}`}
+            sub={report.huSd !== null && report.huSd !== undefined ? `Report value: ${report.meanHu} +/- ${report.huSd}` : 'From the report text.'}
+          />
+        )}
 
-function KeywordChip({ word, color, onClick }: { word: string; color: string; onClick: (e: React.MouseEvent<HTMLSpanElement>) => void }) {
-  const [active, setActive] = useState(false);
-  const handleClick = (e: React.MouseEvent<HTMLSpanElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (active) return;
-    setActive(true);
-    onClick(e);
-    setTimeout(() => setActive(false), 700);
-  };
-  return (
-    <span
-      onClick={handleClick}
-      className="no-drag"
-      style={{
-        color,
-        background: active ? `${color}28` : `${color}12`,
-        border: `0.5px solid ${active ? color + 'bb' : color + '33'}`,
-        borderRadius: 4, padding: '0px 5px', cursor: 'pointer',
-        fontSize: 'inherit', fontWeight: 500, display: 'inline-block',
-        transition: 'all 0.18s ease',
-        boxShadow: active ? `0 0 12px ${color}55` : 'none',
-        transform: active ? 'scale(1.06)' : 'scale(1)',
-      }}
-    >
-      {word}
-    </span>
-  );
-}
+        {lang === 'clinical' && report?.sizeCm && (
+          <MetricRow label="Report size" value={`${report.sizeCm} cm`} sub="From the report text." />
+        )}
 
-function DefinableTerm({ word, onClick }: { word: string; onClick: () => void }) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <span
-      onClick={(e) => { e.preventDefault(); e.stopPropagation(); onClick(); }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      className="no-drag"
-      style={{
-        textDecoration: hovered ? 'underline solid rgba(160,200,255,0.9)' : 'underline dotted rgba(160,200,255,0.45)',
-        textDecorationThickness: '1px',
-        textUnderlineOffset: '2.5px',
-        color: hovered ? 'rgba(180,210,255,0.95)' : 'inherit',
-        cursor: 'help',
-        transition: 'color 0.15s ease',
-      }}
-    >
-      {word}
-    </span>
-  );
-}
+        {lang === 'clinical' && curData.dimensions && !report?.sizeCm && (
+          <MetricRow
+            label="Segmented dimensions"
+            value={`${curData.dimensions[0]} × ${curData.dimensions[1]} × ${curData.dimensions[2]} cm`}
+            sub="Computed from the segmented organ mask."
+          />
+        )}
 
-function RadarPing() {
-  return (
-    <div style={{ position: 'relative', width: 24, height: 24, flexShrink: 0 }}>
-      <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '1.5px solid rgba(255,100,100,0.7)', animation: 'radarPing 2s ease-out infinite' }} />
-      <div style={{ position: 'absolute', inset: 4, borderRadius: '50%', border: '1px solid rgba(255,100,100,0.4)', animation: 'radarPing 2s ease-out infinite 0.7s' }} />
-      <div style={{ position: 'absolute', inset: '50%', width: 6, height: 6, transform: 'translate(-50%, -50%)', borderRadius: '50%', background: '#ff6b6b', boxShadow: '0 0 8px rgba(255,100,100,0.9)' }} />
-    </div>
-  );
-}
+        {lang === 'clinical' && (
+          <div style={{ paddingTop: 14 }}>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.42)', marginBottom: 8 }}>Report text</div>
+            <p style={{ color: 'rgba(255,255,255,0.72)', fontSize: 14, lineHeight: 1.55, margin: 0 }}>
+              {report?.section || detail || impression || 'No report detail available.'}
+            </p>
+          </div>
+        )}
 
-function HUMiniChart({ color }: { color: string }) {
-  const bars = Array.from({ length: 10 }, (_, i) => {
-    const offset = (i - 4.5) * 22;
-    return Math.max(0.08, Math.exp(-(offset * offset) / 1600));
-  });
-  const max = Math.max(...bars);
-  return (
-    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 20, flexShrink: 0 }}>
-      {bars.map((v, i) => (
-        <div key={i} style={{ width: 3, borderRadius: '1px 1px 0 0', height: `${(v / max) * 100}%`, background: color, opacity: 0.35 + (v / max) * 0.55 }} />
-      ))}
-    </div>
-  );
-}
-
-function DraggablePanel({
-  children, initialPos, style, entranceDelay = 0, id, expanded, onToggleExpand,
-}: {
-  children: React.ReactNode;
-  initialPos: PanelPos;
-  style?: React.CSSProperties;
-  entranceDelay?: number;
-  id: string;
-  expanded?: boolean;
-  onToggleExpand?: (id: string) => void;
-}) {
-  const [pos, setPos] = useState(initialPos);
-  const [visible, setVisible] = useState(false);
-  const dragging = useRef(false);
-  const offset = useRef({ x: 0, y: 0 });
-
-  useEffect(() => {
-    const t = setTimeout(() => setVisible(true), entranceDelay);
-    return () => clearTimeout(t);
-  }, [entranceDelay]);
-
-  const onMouseDown = useCallback((e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('.no-drag')) return;
-    dragging.current = true;
-    offset.current = { x: e.clientX - pos.x, y: e.clientY - pos.y };
-    e.preventDefault();
-  }, [pos]);
-
-  useEffect(() => {
-    const onMove = (e: MouseEvent) => {
-      if (!dragging.current) return;
-      setPos({ x: e.clientX - offset.current.x, y: e.clientY - offset.current.y });
-    };
-    const onUp = () => { dragging.current = false; };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-  }, []);
-
-  return (
-    <div
-      onMouseDown={onMouseDown}
-      style={{
-        position: 'fixed',
-        left: pos.x, top: pos.y,
-        cursor: 'grab', userSelect: 'none', zIndex: expanded ? 10010 : 10000,
-        background: 'rgba(11, 13, 19, 0.58)',
-        backdropFilter: 'blur(28px)', WebkitBackdropFilter: 'blur(28px)',
-        border: '1px solid rgba(255,255,255,0.10)',
-        borderTop: '1px solid rgba(255,255,255,0.24)',
-        borderRadius: 16,
-        boxShadow: '0 8px 40px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08)',
-        opacity: visible ? 1 : 0,
-        transform: visible ? 'translateY(0px)' : 'translateY(14px)',
-        transition: 'opacity 0.4s ease, transform 0.4s ease, width 0.3s ease, height 0.3s ease, max-height 0.3s ease',
-        overflow: 'hidden',
-        ...style,
-      }}
-    >
-      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 1, background: 'linear-gradient(135deg, rgba(255,255,255,0.025) 0%, transparent 55%)' }} />
-      <div style={{ position: 'relative', zIndex: 2, height: '100%' }}>{children}</div>
-      {onToggleExpand && (
-        <button
-          className="no-drag"
-          onClick={(e) => { e.stopPropagation(); onToggleExpand(id); }}
-          style={{
-            position: 'absolute', top: 10, right: 10, zIndex: 5,
-            background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(255,255,255,0.12)',
-            color: 'rgba(255,255,255,0.5)', borderRadius: 5, padding: '2px 7px',
-            fontSize: 9, cursor: 'pointer',
-          }}
-        >
-          {expanded ? '↙ collapse' : '↗ expand'}
-        </button>
-      )}
-    </div>
-  );
-}
-
-function OrganMarker({ x, y, color, label, onDone }: { x: number; y: number; color: string; label: string; onDone: () => void }) {
-  const [phase, setPhase] = useState<'in' | 'hold' | 'out'>('in');
-
-  useEffect(() => {
-    const t1 = setTimeout(() => setPhase('hold'), 350);
-    const t2 = setTimeout(() => setPhase('out'), 2600);
-    const t3 = setTimeout(() => onDone(), 3000);
-    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
-  }, [onDone]);
-
-  return (
-    <div style={{
-      position: 'fixed', left: x, top: y, zIndex: 10005, pointerEvents: 'none',
-      transform: 'translate(-50%, -50%)',
-      opacity: phase === 'out' ? 0 : 1,
-      transition: 'opacity 0.4s ease',
-    }}>
-      <div style={{
-        position: 'absolute', left: '50%', top: '50%',
-        width: 50, height: 50, marginLeft: -25, marginTop: -25,
-        borderRadius: '50%', border: `1.5px solid ${color}`,
-        animation: phase !== 'out' ? 'markerRing 1.8s ease-out infinite' : 'none',
-        opacity: 0.7,
-      }} />
-      <div style={{
-        position: 'absolute', left: '50%', top: '50%',
-        width: 50, height: 50, marginLeft: -25, marginTop: -25,
-        borderRadius: '50%', border: `1px solid ${color}`,
-        animation: phase !== 'out' ? 'markerRing 1.8s ease-out infinite 0.6s' : 'none',
-        opacity: 0.5,
-      }} />
-      <div style={{
-        position: 'absolute', left: '50%', top: '50%',
-        width: 10, height: 10, marginLeft: -5, marginTop: -5,
-        borderRadius: '50%', background: color,
-        boxShadow: `0 0 14px ${color}, 0 0 4px ${color}`,
-      }} />
-      <div style={{ position: 'absolute', left: '50%', top: '50%', width: 24, height: 1, marginLeft: -12, background: `${color}88` }} />
-      <div style={{ position: 'absolute', left: '50%', top: '50%', width: 1, height: 24, marginTop: -12, background: `${color}88` }} />
-      <div style={{
-        position: 'absolute', left: '50%', top: -32, transform: 'translateX(-50%)',
-        background: 'rgba(10,12,18,0.85)', border: `0.5px solid ${color}66`,
-        borderRadius: 6, padding: '3px 9px', whiteSpace: 'nowrap',
-        color, fontSize: 10, fontWeight: 600, letterSpacing: '0.3px',
-        boxShadow: `0 2px 12px ${color}33`,
-      }}>
-        {label.replace(/_/g, ' ')}
+        {lang === 'patient' && (
+          <p style={{ color: 'rgba(255,255,255,0.58)', fontSize: 14, lineHeight: 1.55, margin: '18px 0 0' }}>
+            This panel shows the key measurement from the report. Your doctor can explain what it means for you.
+          </p>
+        )}
       </div>
+    );
+  }
+
+  return (
+    <div style={{ ...glass, width: 330, padding: 24, animation: `${anim} 0.36s cubic-bezier(0.22,1,0.36,1) both` }}>
+      <div style={{ fontSize: 12, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.44)', fontWeight: 800, marginBottom: 18 }}>
+        Final note
+      </div>
+      <p style={{ color: 'rgba(255,255,255,0.72)', fontSize: 16, lineHeight: 1.6, margin: 0 }}>
+        Bring this result to your doctor. They can interpret the finding with your symptoms, history, and any other tests.
+      </p>
     </div>
   );
 }
 
-const STYLES = `
-  @keyframes rspin { from { transform:rotate(0) } to { transform:rotate(360deg) } }
-  @keyframes radarPing { 0% { transform:scale(0.4); opacity:1; } 100% { transform:scale(2.4); opacity:0; } }
-  @keyframes severityPulse { 0%,100% { opacity:0.55; } 50% { opacity:0.85; } }
-  @keyframes markerRing { 0% { transform:scale(0.5); opacity:0.9; } 100% { transform:scale(1.6); opacity:0; } }
-  @keyframes loadingFadeIn { from { opacity:0; } to { opacity:1; } }
-  @keyframes loadingTextPulse { 0%,100% { opacity:0.45; } 50% { opacity:0.75; } }
-  @keyframes healthCardIn { from { opacity:0; transform: translateY(-4px); } to { opacity:1; transform: translateY(0); } }
-`;
+// ─── Main component ───────────────────────────────────────────────────────────
 
-const ReportScreen = ({ id, onClose, onViewChange, onOrganHighlight }: Props) => {
+export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlight, onClearHighlight, onHideOrgans }: Props) {
   const [data, setData] = useState<ReportData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeView, setActiveView] = useState<'axial' | 'sagittal' | 'coronal' | '3d'>('3d');
-  const [elapsed, setElapsed] = useState(0);
-  const [expandedPanel, setExpandedPanel] = useState<string | null>(null);
-  const [focusedOrgan, setFocusedOrgan] = useState<string | null>(null);
-  const [showAllNormal, setShowAllNormal] = useState(false);
-  const startTime = useRef(Date.now());
-  const findingsScrollRef = useRef<HTMLDivElement>(null);
-  const sentenceRefs = useRef<{ [idx: number]: HTMLSpanElement | null }>({});
+  const [step, setStep] = useState<Step>(0);
+  const [dir, setDir] = useState<'r' | 'l'>('r');
+  const [lang, setLang] = useState<Lang>('patient');
+  const [modePromptOpen, setModePromptOpen] = useState(false);
+  const [plain2, setPlain2] = useState<string[]>([]);
+  const [pLoad, setPLoad] = useState(false);
+  const [manifest, setManifest] = useState<MeshManifest | null>(null);
+  const elapsedRef = useRef(0);
+  const [elapsedDisplay, setElapsedDisplay] = useState(0);
+  const startRef = useRef(Date.now());
 
   useEffect(() => {
     if (cache[id]) { setData(cache[id]); setLoading(false); return; }
     fetch(`${APP_CONSTANTS.API_ORIGIN}/api/get-report-data/${id}`)
       .then(r => r.json())
-      .then(json => { cache[id] = json; setData(json); setLoading(false); startTime.current = Date.now(); })
+      .then(j => {
+        if (j.error) { setLoading(false); return; }
+        cache[id] = j;
+        setData(j);
+        setLoading(false);
+        startRef.current = Date.now();
+      })
       .catch(() => setLoading(false));
   }, [id]);
 
   useEffect(() => {
+    fetch(`${APP_CONSTANTS.API_ORIGIN}/api/cases/${id}/mesh-manifest`)
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (j) setManifest(j); })
+      .catch(() => {});
+  }, [id]);
+
+  useEffect(() => {
     if (!data) return;
-    const t = setInterval(() => setElapsed(Math.floor((Date.now() - startTime.current) / 1000)), 1000);
+    const t = setInterval(() => {
+      elapsedRef.current = Math.floor((Date.now() - startRef.current) / 1000);
+      setElapsedDisplay(elapsedRef.current);
+    }, 1000);
     return () => clearInterval(t);
   }, [data]);
 
-  // Plain-language version of whichever organ is currently selected.
-  // Fetched fresh on each organ click via the backend's translator (same
-  // endpoint the "Explain in plain language" Impression button uses) —
-  // a static trim/substitution wasn't enough to make dense radiology
-  // phrasing ("marked attenuation, suggesting possible ischemia or
-  // infarction") genuinely patient-readable.
-  const [organDetailPlain, setOrganDetailPlain] = useState<{ organ: string; text: string; loading: boolean } | null>(null);
-
-  const fetchOrganDetailPlain = useCallback(async (organName: string, clinicalLine: string | null) => {
-    if (!clinicalLine) { setOrganDetailPlain(null); return; }
-    setOrganDetailPlain({ organ: organName, text: '', loading: true });
+  const fetchPlain = useCallback(async () => {
+    if (plain2.length || !data) return;
+    setPLoad(true);
     try {
-      const res = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/explain-impressions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ impression: [clinicalLine] }),
-      });
-      const json = await res.json();
-      const text = Array.isArray(json.plain_language) && json.plain_language[0]
-        ? json.plain_language[0]
-        : 'Plain-language summary unavailable.';
-      setOrganDetailPlain({ organ: organName, text, loading: false });
-    } catch {
-      setOrganDetailPlain({ organ: organName, text: 'Plain-language summary unavailable right now.', loading: false });
-    }
-  }, []);
-
-  const handleKeywordClick = useCallback((word: string, organName: string, _el: HTMLElement) => {
-    // NOTE: the old screen-jitter OrganMarker flash (fake position, just
-    // for visual feedback) has been removed — the real centroid jump via
-    // onOrganHighlight below already shows exactly where the organ is on
-    // the actual CT/3D model, so the decorative marker was redundant and
-    // confusing (it showed a label at a fake location, not the real one).
-    const centroid = data?.organ_volumes?.[organName]?.centroid_mm;
-    if (onOrganHighlight) onOrganHighlight(organName, centroid);
-
-    // Also drives the Selected Organ header in Panel 1, so clicking an
-    // organ anywhere (Impression, Findings, Findings Explorer, Timeline)
-    // updates what's shown there with the real clinical detail line.
-    setFocusedOrgan(organName);
-
-    // Fetch the plain-language version of this organ's clinical sentence,
-    // so Selected Organ shows genuinely patient-readable text instead of
-    // dense radiology phrasing.
-    const clinicalLine = data ? getOrganDetailLine(organName, data.comments) : null;
-    fetchOrganDetailPlain(organName, clinicalLine);
-  }, [onOrganHighlight, data, fetchOrganDetailPlain]);
-
-  const [definition, setDefinition] = useState<{ term: string; text: string; loading: boolean } | null>(null);
-  const handleTermClick = useCallback(async (term: string) => {
-    setDefinition({ term, text: '', loading: true });
-    try {
-      const res = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/define-term?term=${encodeURIComponent(term.toLowerCase())}`);
-      const json = await res.json();
-      setDefinition({ term, text: json.definition || 'Definition unavailable.', loading: false });
-    } catch {
-      setDefinition({ term, text: 'Definition unavailable right now — try asking your doctor what this term means.', loading: false });
-    }
-  }, []);
-
-  const [plainLanguage, setPlainLanguage] = useState<{ items: string[]; loading: boolean } | null>(null);
-  const handleExplainImpressions = useCallback(async () => {
-    if (!data) return;
-    setPlainLanguage({ items: [], loading: true });
-    try {
-      const res = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/explain-impressions`, {
+      const r = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/explain-impressions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ impression: data.impression }),
       });
-      const json = await res.json();
-      setPlainLanguage({ items: json.plain_language || ['Plain-language summary unavailable.'], loading: false });
-    } catch {
-      setPlainLanguage({ items: ['Plain-language summary unavailable right now — please ask your doctor to walk through these findings with you.'], loading: false });
+      const j = await r.json();
+      setPlain2(j.plain_language || []);
+    } catch {} finally { setPLoad(false); }
+  }, [data, plain2]);
+
+  useEffect(() => { if (data) fetchPlain(); }, [data]);
+
+  const go = useCallback((s: Step) => {
+    setDir(s > step ? 'r' : 'l');
+    setStep(s);
+  }, [step]);
+
+  const all = React.useMemo(() => data ? Object.entries(data.organ_volumes).filter(([_, v]) => v.volume > 5) : [], [data]);
+  const flagged = React.useMemo(() => all.filter(([_, v]) => v.status === 'check'), [all]);
+  const normal = React.useMemo(() => all.filter(([_, v]) => v.status !== 'check'), [all]);
+  const totalSteps = 2 + flagged.length + 1;
+
+  const curOrganName = step >= 2 && step < 2 + flagged.length ? flagged[step - 2]?.[0] : null;
+  const curOrganData = step >= 2 && step < 2 + flagged.length ? flagged[step - 2]?.[1] : null;
+  const anim = dir === 'r' ? 'slideR' : 'slideL';
+
+  useEffect(() => {
+    if (!data) return;
+    onClearHighlight?.();
+    if (step === 1) {
+      onHideOrgans?.(flagged.map(([o]) => o));
+    } else if (step >= 2 && step < 2 + flagged.length) {
+      const highlightName = curOrganName === 'pancreas' ? 'pancreas_body' : curOrganName;
+      if (highlightName && curOrganData) onOrganHighlight?.(highlightName, curOrganData.centroid_mm);
     }
-  }, [data]);
+  }, [step, data]);
 
-  const taggedSentences = data ? tagSentencesByOrgan(data.comments) : [];
+  const leftContent = React.useMemo(() => {
+    if (!data) return null;
+    const curOrganLocal = step >= 2 && step < 2 + flagged.length ? flagged[step - 2]?.[0] : null;
+    const curDataLocal = step >= 2 && step < 2 + flagged.length ? flagged[step - 2]?.[1] : null;
+    const medLocal = curOrganLocal ? getDetail(curOrganLocal, data.comments) : null;
+    const patientLocal = curOrganLocal ? patientFindingText(curOrganLocal, medLocal) : '';
+    const impressionText = getImpressionText(data);
 
-  const handleTimelineFocus = useCallback((organ: string) => {
-    setFocusedOrgan(organ);
-    setExpandedPanel('findings');
-    setTimeout(() => {
-      const matchIdx = taggedSentences.findIndex((s) => s.organs.includes(organ));
-      if (matchIdx === -1) return;
-      const el = sentenceRefs.current[matchIdx];
-      if (el && findingsScrollRef.current) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-    }, 80);
-  }, [taggedSentences]);
+    if (step === 0) return (
+      <div style={{ animation: `${anim} 0.38s cubic-bezier(0.22,1,0.36,1) both` }}>
+        <div style={{ fontSize: 12, letterSpacing: '0.13em', color: 'rgba(255,255,255,0.42)', textTransform: 'uppercase', marginBottom: 18, fontWeight: 800 }}>CT Scan Review</div>
+        <h1 style={{ fontSize: 46, lineHeight: 1.02, letterSpacing: '-0.065em', color: '#fff', margin: '0 0 18px', fontWeight: 850 }}>
+          Your scan looks mostly healthy.
+        </h1>
+        <p style={{ fontSize: 18, color: 'rgba(255,255,255,0.68)', lineHeight: 1.55, margin: '0 0 26px' }}>
+          We found {normal.length} healthy organ{normal.length === 1 ? '' : 's'} and {flagged.length} finding{flagged.length === 1 ? '' : 's'} to explain.
+        </p>
+        <div style={{ display: 'flex', gap: 12, marginBottom: 28 }}>
+          <StatPill tone="green" title="Healthy" value={`${normal.length}`} sub={`organ${normal.length === 1 ? '' : 's'}`} />
+          <StatPill tone="amber" title="Finding" value={`${flagged.length}`} sub={flagged.length === 1 ? 'to explain' : 'to explain'} />
+        </div>
+        <PrimaryButton onClick={() => { setModePromptOpen(true); go(1); }}>Start review →</PrimaryButton>
+      </div>
+    );
 
-  const hasLesions = data ? Object.keys(data.lesions).length > 0 : false;
-  const topOrgans = data ? Object.entries(data.organ_volumes).filter(([_, v]) => v.volume > 5).sort((a, b) => b[1].volume - a[1].volume).slice(0, 6) : [];
+    if (step === 1) return (
+      <div style={{ animation: `${anim} 0.38s cubic-bezier(0.22,1,0.36,1) both` }}>
+        <div style={{ fontSize: 12, letterSpacing: '0.13em', color: 'rgba(110,231,183,0.72)', textTransform: 'uppercase', marginBottom: 16, fontWeight: 800 }}>Healthy organs</div>
+        <h1 style={{ fontSize: 40, lineHeight: 1.05, letterSpacing: '-0.06em', color: '#6ee7b7', margin: '0 0 14px', fontWeight: 850 }}>
+          {normal.length} organs look healthy.
+        </h1>
+        <p style={{ fontSize: 17, color: 'rgba(255,255,255,0.66)', lineHeight: 1.5, margin: '0 0 20px' }}>
+          These organs looked healthy on this scan.
+        </p>
+        <OrganList organs={normal} />
+        <div style={{ display: 'flex', gap: 10, marginTop: 24 }}>
+          <SecondaryButton onClick={() => go(0)}>← Back</SecondaryButton>
+          <PrimaryButton amber={flagged.length > 0} onClick={() => go(flagged.length > 0 ? 2 : totalSteps - 1)}>
+            {flagged.length > 0 ? 'Explain finding →' : 'Next →'}
+          </PrimaryButton>
+        </div>
+      </div>
+    );
 
-  const glassBase: React.CSSProperties = { padding: '16px 18px' };
-  const label: React.CSSProperties = { fontSize: 9, letterSpacing: '1.2px', color: 'rgba(255,255,255,0.25)', fontWeight: 600, marginBottom: 10, textTransform: 'uppercase' };
-  const elapsedStr = elapsed < 60 ? `${elapsed}s ago` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s ago`;
-  const vignetteColor = hasLesions ? 'rgba(220, 38, 38, 0.07)' : 'rgba(16, 185, 129, 0.05)';
+    if (step >= 2 && step < 2 + flagged.length && curOrganLocal && curDataLocal) return (
+      <div style={{ animation: `${anim} 0.38s cubic-bezier(0.22,1,0.36,1) both` }}>
+        <div style={{ fontSize: 12, letterSpacing: '0.13em', color: 'rgba(251,191,36,0.74)', textTransform: 'uppercase', marginBottom: 16, fontWeight: 800 }}>
+          Finding {step - 1} of {flagged.length}
+        </div>
+        <h1 style={{ fontSize: 44, lineHeight: 1.02, letterSpacing: '-0.065em', color: '#fbbf24', margin: '0 0 16px', fontWeight: 860 }}>
+          {labelize(curOrganLocal)}
+        </h1>
+        <p style={{ fontSize: 18, color: 'rgba(255,255,255,0.78)', lineHeight: 1.56, margin: '0 0 18px' }}>
+          {lang === 'patient' ? patientLocal : (medLocal || impressionText || 'This finding is listed in the report.')}
+        </p>
+        {lang === 'patient' && (
+          <p style={{ fontSize: 15, color: 'rgba(255,255,255,0.50)', lineHeight: 1.55, margin: '0 0 22px' }}>
+            Your doctor can explain what this means with your symptoms and medical history.
+          </p>
+        )}
+        {lang === 'clinical' && (
+          <p style={{ fontSize: 14, color: 'rgba(255,255,255,0.48)', lineHeight: 1.55, margin: '0 0 22px' }}>
+            Measurements and original report text are shown in the panel on the right.
+          </p>
+        )}
+        <div style={{ display: 'flex', gap: 10 }}>
+          <SecondaryButton onClick={() => go(step - 1)}>← Back</SecondaryButton>
+          <PrimaryButton onClick={() => go(step + 1)} amber={step < 1 + flagged.length}>
+            {step < 1 + flagged.length ? 'Next finding →' : 'Finish →'}
+          </PrimaryButton>
+        </div>
+      </div>
+    );
 
-  const isFindingsExpanded = expandedPanel === 'findings';
+    return (
+      <div style={{ animation: `${anim} 0.42s cubic-bezier(0.22,1,0.36,1) both`, textAlign: 'center' }}>
+        <div style={{ fontSize: 12, letterSpacing: '0.14em', color: 'rgba(255,255,255,0.44)', textTransform: 'uppercase', marginBottom: 18, fontWeight: 800 }}>Final impressions</div>
+        <h1 style={{ fontSize: 46, lineHeight: 1.02, letterSpacing: '-0.065em', color: '#fff', margin: '0 0 20px', fontWeight: 860 }}>
+          {data.impression?.length === 1 ? 'Final Impressions:' : 'Final findings.'}
+        </h1>
+        {data.impression?.length > 0 && (
+          <div style={{ padding: '20px 22px', borderRadius: 22, background: 'rgba(251,191,36,0.075)', border: '1px solid rgba(251,191,36,0.18)', margin: '0 0 22px', textAlign: 'left' }}>
+            <div style={{ fontSize: 12, color: 'rgba(251,191,36,0.72)', marginBottom: 10, letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 780 }}>Report impression</div>
+            <p style={{ fontSize: 21, color: 'rgba(255,255,255,0.90)', lineHeight: 1.45, margin: 0, fontWeight: 650 }}>
+              {getImpressionText(data)}
+            </p>
+          </div>
+        )}
+        <p style={{ fontSize: 15, color: 'rgba(255,255,255,0.55)', lineHeight: 1.55, margin: '0 auto 26px', maxWidth: 430 }}>
+          Final note: discuss this report with your doctor so they can interpret it with your symptoms, history, and other tests.
+        </p>
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+          <SecondaryButton onClick={() => go(step - 1)}>← Back</SecondaryButton>
+          <PrimaryButton onClick={() => go(0)}>Start over</PrimaryButton>
+        </div>
+      </div>
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, lang, data, plain2, pLoad]);
 
-  // Real clinical detail for whichever organ is currently selected, pulled
-  // from the actual radiologist comments text — not a generic status.
-  const selectedOrganDetail = data && focusedOrgan ? getOrganDetailLine(focusedOrgan, data.comments) : null;
-  const selectedOrganStatus = data && focusedOrgan ? data.organ_volumes?.[focusedOrgan]?.status : undefined;
+  if (!loading && !data) return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 9998, pointerEvents: 'none' }}>
+      <style>{STYLES}</style>
+      <style>{step === 0
+        ? `.render { filter: blur(12px) brightness(0.40) !important; transform: scale(0.96) !important; transition: filter 0.55s cubic-bezier(0.22,1,0.36,1), transform 0.55s cubic-bezier(0.22,1,0.36,1) !important; }`
+        : step === 1
+          ? `.render { filter: none !important; transform: translateX(180px) !important; transition: filter 0.45s cubic-bezier(0.22,1,0.36,1), transform 0.45s cubic-bezier(0.22,1,0.36,1) !important; }`
+          : step === totalSteps - 1
+            ? `.render { filter: blur(1.5px) brightness(0.55) !important; transform: scale(1.02) !important; transition: filter 0.45s cubic-bezier(0.22,1,0.36,1), transform 0.45s cubic-bezier(0.22,1,0.36,1) !important; }`
+            : `.render { filter: none !important; transform: translateX(0) !important; transition: filter 0.45s cubic-bezier(0.22,1,0.36,1), transform 0.45s cubic-bezier(0.22,1,0.36,1) !important; }`}</style>
+      <div style={{ position: 'fixed', inset: 0, zIndex: 10001, pointerEvents: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
+        <p style={{ color: 'rgba(255,255,255,0.4)', fontSize: 14, margin: 0 }}>Report unavailable.</p>
+        <button onClick={onClose} style={{ fontSize: 11, background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(255,255,255,0.12)', color: 'rgba(255,255,255,0.5)', borderRadius: 8, padding: '7px 20px', cursor: 'pointer', fontFamily: 'inherit' }}>Close</button>
+      </div>
+    </div>
+  );
 
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 9998, pointerEvents: 'none' }}>
       <style>{STYLES}</style>
+      <style>{step === 0
+        ? `.render { filter: blur(12px) brightness(0.40) !important; transform: scale(0.96) !important; transition: filter 0.55s cubic-bezier(0.22,1,0.36,1), transform 0.55s cubic-bezier(0.22,1,0.36,1) !important; }`
+        : step === 1
+          ? `.render { filter: none !important; transform: translateX(180px) !important; transition: filter 0.45s cubic-bezier(0.22,1,0.36,1), transform 0.45s cubic-bezier(0.22,1,0.36,1) !important; }`
+          : step === totalSteps - 1
+            ? `.render { filter: blur(1.5px) brightness(0.55) !important; transform: scale(1.02) !important; transition: filter 0.45s cubic-bezier(0.22,1,0.36,1), transform 0.45s cubic-bezier(0.22,1,0.36,1) !important; }`
+            : `.render { filter: none !important; transform: translateX(0) !important; transition: filter 0.45s cubic-bezier(0.22,1,0.36,1), transform 0.45s cubic-bezier(0.22,1,0.36,1) !important; }`}</style>
 
-      <div style={{
-        position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 9999,
-        background: `radial-gradient(ellipse at center, transparent 55%, ${vignetteColor} 100%)`,
-        animation: hasLesions ? 'severityPulse 3s ease-in-out infinite' : 'none',
-      }} />
-
-      <div style={{
-        position: 'fixed', top: 14, left: '50%', transform: 'translateX(-50%)',
-        zIndex: 10001, pointerEvents: 'auto',
-        background: 'rgba(10,12,18,0.65)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
-        border: '1px solid rgba(255,255,255,0.09)', borderTop: '1px solid rgba(255,255,255,0.2)',
-        borderRadius: 10, padding: '6px 16px', display: 'flex', alignItems: 'center', gap: 14,
-        boxShadow: '0 4px 24px rgba(0,0,0,0.35)',
-      }}>
-        <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 10, letterSpacing: '1px', fontWeight: 600 }}>BODYMAPS</span>
-        <span style={{ color: 'rgba(255,255,255,0.12)' }}>·</span>
-        <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: 10 }}>Case {id}{data ? ` · ${data.patient.sex} · ${data.patient.age}y` : ''}</span>
-        {data && <span style={{ color: 'rgba(255,255,255,0.2)', fontSize: 9, fontStyle: 'italic' }}>Generated {elapsedStr}</span>}
-        {hasLesions && (
-          <div style={{ background: 'rgba(255,60,60,0.15)', border: '0.5px solid rgba(255,60,60,0.3)', borderRadius: 6, padding: '2px 8px', display: 'flex', alignItems: 'center', gap: 5 }}>
-            <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#ff5555', boxShadow: '0 0 6px rgba(255,80,80,0.8)', animation: 'severityPulse 1.5s ease-in-out infinite' }} />
-            <span style={{ color: '#ffaaaa', fontSize: 9 }}>{data ? Object.keys(data.lesions).length : '?'} lesion detected</span>
-          </div>
-        )}
-        <button onClick={onClose} className="no-drag" style={{ background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.4)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontSize: 10, pointerEvents: 'auto' }}>close</button>
-      </div>
-
-      {loading ? (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 10001, pointerEvents: 'auto',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          background: 'rgba(5,6,9,0.45)',
-          animation: 'loadingFadeIn 0.4s ease',
-        }}>
-          <div style={{
-            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 18,
-          }}>
-            <div style={{ position: 'relative', width: 52, height: 52 }}>
-              <div style={{
-                position: 'absolute', inset: 0, borderRadius: '50%',
-                border: '2px solid rgba(255,255,255,0.06)',
-              }} />
-              <div style={{
-                position: 'absolute', inset: 0, borderRadius: '50%',
-                border: '2px solid transparent', borderTop: '2px solid rgba(120,170,255,0.85)',
-                animation: 'rspin 1.1s linear infinite',
-              }} />
-              <div style={{
-                position: 'absolute', inset: 8, borderRadius: '50%',
-                border: '1px solid transparent', borderTop: '1px solid rgba(120,170,255,0.35)',
-                animation: 'rspin 1.8s linear infinite reverse',
-              }} />
+      {loading && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 10001, pointerEvents: 'auto', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 20 }}>
+            <div style={{ position: 'relative', width: 48, height: 48 }}>
+              <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '1.5px solid rgba(255,255,255,0.06)' }} />
+              <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '1.5px solid transparent', borderTop: '1.5px solid rgba(255,255,255,0.55)', animation: 'spin 1s linear infinite' }} />
+              <div style={{ position: 'absolute', inset: 8, borderRadius: '50%', border: '1px solid transparent', borderTop: '1px solid rgba(255,255,255,0.2)', animation: 'spin 1.6s linear infinite reverse' }} />
             </div>
-            <span style={{
-              color: 'rgba(255,255,255,0.45)', fontSize: 12, letterSpacing: '0.4px',
-              animation: 'loadingTextPulse 2s ease-in-out infinite',
-            }}>
-              Preparing your report…
-            </span>
+            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', letterSpacing: '0.06em' }}>Preparing your report…</span>
           </div>
         </div>
-      ) : data ? (
-        <>
-          {/* ── PANEL 1 — Findings (expandable) ── */}
-          <DraggablePanel
-            id="findings"
-            initialPos={{ x: 16, y: 60 }}
-            style={{
-              width: isFindingsExpanded ? Math.min(680, window.innerWidth - 60) : 370,
-              maxHeight: isFindingsExpanded ? window.innerHeight - 140 : 420,
-              pointerEvents: 'auto',
-            }}
-            entranceDelay={0}
-            expanded={isFindingsExpanded}
-            onToggleExpand={(pid) => setExpandedPanel(prev => prev === pid ? null : pid)}
-          >
-            <div ref={findingsScrollRef} style={{ ...glassBase, overflowY: 'auto', maxHeight: isFindingsExpanded ? window.innerHeight - 172 : 388 }}>
-              {/* Header: shows the currently Selected Organ (real clinical
-                  detail line) when one is selected, otherwise falls back
-                  to the original lesion-status header. */}
-              {focusedOrgan ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12, paddingRight: 60 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-                    <div style={{
-                      width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-                      background: selectedOrganStatus === 'check' ? '#fbbf24' : '#1d9e75',
-                      boxShadow: selectedOrganStatus === 'check' ? '0 0 8px rgba(251,191,36,0.6)' : '0 0 8px rgba(29,158,117,0.6)',
-                    }} />
-                    <span style={{ fontSize: 9, letterSpacing: '1px', color: 'rgba(255,255,255,0.3)', textTransform: 'uppercase' }}>Selected organ</span>
-                  </div>
-                  <span style={{ color: '#fff', fontSize: 16, fontWeight: 600, textTransform: 'capitalize' }}>
-                    {focusedOrgan.replace(/_/g, ' ')}
-                  </span>
-                  <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: 10.5, lineHeight: 1.6 }}>
-                    {organDetailPlain?.organ === focusedOrgan
-                      ? (organDetailPlain.loading ? 'Translating finding…' : (organDetailPlain.text || selectedOrganDetail || 'No specific finding recorded for this structure in the report text.'))
-                      : (selectedOrganDetail || 'No specific finding recorded for this structure in the report text.')
-                    }
-                  </span>
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12, paddingRight: 60 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: 'rgba(255,255,255,0.15)', flexShrink: 0 }} />
-                    <span style={{ fontSize: 9, letterSpacing: '1px', color: 'rgba(255,255,255,0.3)', textTransform: 'uppercase' }}>Selected organ</span>
-                  </div>
-                  <span style={{ color: 'rgba(255,255,255,0.35)', fontSize: 16, fontWeight: 600 }}>N/A</span>
-                  <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10.5, lineHeight: 1.6, fontStyle: 'italic' }}>
-                    Click an organ name to see its details here.
-                  </span>
-                </div>
-              )}
+      )}
 
-              {hasLesions && (
-                <div style={{ borderTop: '0.5px solid rgba(255,255,255,0.06)', paddingTop: 12 }}>
-                  <div style={{ fontSize: 8, color: 'rgba(255,255,255,0.2)', letterSpacing: '1px', marginBottom: 8 }}>DETECTED LESIONS · click to mark location</div>
-                  {Object.entries(data.lesions).map(([organ, info]) => (
-                    <div key={organ} className="no-drag" onClick={(e) => handleKeywordClick(organ, organ, e.currentTarget)} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 7, padding: '7px 10px', background: 'rgba(255,60,60,0.07)', borderRadius: 8, border: '0.5px solid rgba(255,60,60,0.14)', cursor: 'pointer' }}>
-                      <span style={{ color: '#ffaaaa', fontSize: 10, fontWeight: 500 }}>{organ.replace(/_/g, ' ')}</span>
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                        <span style={{ color: 'rgba(255,160,160,0.45)', fontSize: 9 }}>{info.voxels.toLocaleString()} vx</span>
-                        <span style={{ background: 'rgba(255,60,60,0.14)', border: '0.5px solid rgba(255,60,60,0.22)', borderRadius: 5, padding: '2px 8px', color: 'rgba(255,160,160,0.9)', fontSize: 9, fontWeight: 600 }}>{info.volume.toFixed(1)} cc</span>
-                      </div>
-                    </div>
-                  ))}
+      {!loading && data && (
+        <>
+          {/* soft stage lighting behind the scan */}
+          <div style={{ position: 'fixed', inset: 0, zIndex: 10000, pointerEvents: 'none', background: 'radial-gradient(circle at 52% 50%, rgba(255,255,255,0.055), transparent 34%)' }} />
+
+          {/* Top bar */}
+          <div style={{ position: 'fixed', top: 0, left: 0, right: 0, height: 76, zIndex: modePromptOpen ? 10006 : 10001, pointerEvents: 'auto', background: 'rgba(6,8,12,0.88)', backdropFilter: 'blur(22px)', WebkitBackdropFilter: 'blur(22px)', borderBottom: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', padding: '0 28px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 270 }}>
+              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.36)', letterSpacing: '0.12em', fontWeight: 760 }}>BODYMAPS</span>
+              <span style={{ color: 'rgba(255,255,255,0.16)', fontSize: 11 }}>·</span>
+              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.52)' }}>Case {id} · {data.patient.sex} · {data.patient.age}y</span>
+            </div>
+
+            <div style={{ position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%, -50%)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 9 }}>
+              <span style={{ fontSize: 15, color: 'rgba(255,255,255,0.92)', letterSpacing: '0.025em', fontWeight: 720 }}>
+                {step === 0 ? 'Your CT Scan' : 'Understanding Your CT Scan'}
+              </span>
+              {step > 0 && (
+                <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+                  {Array.from({ length: totalSteps - 1 }).map((_, i) => {
+                    const progressIndex = i + 1;
+                    return (
+                      <button key={i} onClick={() => go(progressIndex)} style={{ height: 3, width: progressIndex === step ? 30 : 9, border: 'none', cursor: 'pointer', padding: 0, borderRadius: 999, transition: 'all 0.35s cubic-bezier(0.22,1,0.36,1)', background: progressIndex === step ? '#fbbf24' : progressIndex < step ? 'rgba(251,191,36,0.42)' : 'rgba(255,255,255,0.18)' }} />
+                    );
+                  })}
                 </div>
               )}
             </div>
-          </DraggablePanel>
 
-          {/* ── PANEL 2 — Impression ── */}
-          <DraggablePanel id="impression" initialPos={{ x: window.innerWidth - 370, y: 60 }} style={{ width: 340, pointerEvents: 'auto' }} entranceDelay={120}>
-            <div style={glassBase}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, gap: 8 }}>
-                <div style={label}>Impression</div>
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
+              {step > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', padding: 3, borderRadius: 999, background: modePromptOpen ? 'rgba(255,255,255,0.13)' : 'rgba(255,255,255,0.055)', border: modePromptOpen ? '1px solid rgba(255,255,255,0.32)' : '1px solid rgba(255,255,255,0.10)', boxShadow: modePromptOpen ? '0 0 0 6px rgba(255,255,255,0.06), 0 18px 60px rgba(0,0,0,0.42)' : 'none', transition: 'all 0.25s cubic-bezier(0.22,1,0.36,1)' }}>
+                  <button className="rs-toggle" onClick={() => { setLang('patient'); setModePromptOpen(false); }} style={{ padding: '8px 14px', borderRadius: 999, border: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 720, color: lang === 'patient' ? '#08090b' : 'rgba(255,255,255,0.58)', background: lang === 'patient' ? 'rgba(255,255,255,0.86)' : 'transparent', transition: 'all 0.2s' }}>Patient</button>
+                  <button className="rs-toggle" onClick={() => { setLang('clinical'); setModePromptOpen(false); }} style={{ padding: '8px 14px', borderRadius: 999, border: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 720, color: lang === 'clinical' ? '#08090b' : 'rgba(255,255,255,0.58)', background: lang === 'clinical' ? 'rgba(255,255,255,0.86)' : 'transparent', transition: 'all 0.2s' }}>Doctor</button>
+                </div>
+              )}
+              <button className="rs-exit" onClick={onClose} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'transparent', border: '1px solid rgba(239,68,68,0.24)', borderRadius: 12, padding: '9px 13px', cursor: 'pointer', fontFamily: 'inherit', color: 'rgba(239,68,68,0.78)', transition: 'all 0.2s' }}>
+                <span style={{ fontSize: 14, lineHeight: 1, fontWeight: 300 }}>✕</span>
+                <span style={{ fontSize: 11, letterSpacing: '0.04em' }}>Exit</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Intro: cinematic centered card */}
+          {step === 0 && (
+            <div style={{
+              position: 'fixed',
+              inset: '76px 0 0',
+              zIndex: 10001,
+              pointerEvents: 'none',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '24px',
+            }}>
+              <div style={{
+                ...glass,
+                pointerEvents: 'auto',
+                width: 560,
+                maxWidth: 'calc(100vw - 48px)',
+                padding: '38px 42px',
+                textAlign: 'center',
+                animation: `${anim} 0.42s cubic-bezier(0.22,1,0.36,1) both`,
+              }}>
+                <div style={{ fontSize: 12, letterSpacing: '0.14em', color: 'rgba(255,255,255,0.42)', textTransform: 'uppercase', marginBottom: 18, fontWeight: 800 }}>CT Scan Review</div>
+                <h1 style={{ fontSize: 48, lineHeight: 1.02, letterSpacing: '-0.065em', color: '#fff', margin: '0 0 18px', fontWeight: 860 }}>
+                  Your scan looks mostly healthy.
+                </h1>
+                <p style={{ fontSize: 18, color: 'rgba(255,255,255,0.70)', lineHeight: 1.55, margin: '0 auto 26px', maxWidth: 430 }}>
+                  {normal.length} organ{normal.length === 1 ? '' : 's'} look healthy. {flagged.length} finding{flagged.length === 1 ? '' : 's'} will be explained.
+                </p>
                 <button
-                  className="no-drag"
-                  onClick={handleExplainImpressions}
+                  className="rs-primary"
+                  onClick={() => { setModePromptOpen(true); go(1); }}
                   style={{
-                    background: 'rgba(120,170,255,0.1)', border: '0.5px solid rgba(120,170,255,0.25)',
-                    color: 'rgba(180,210,255,0.85)', borderRadius: 6, padding: '3px 9px',
-                    fontSize: 8.5, cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+                    padding: '14px 26px',
+                    borderRadius: 999,
+                    border: '1px solid rgba(255,255,255,0.16)',
+                    background: 'rgba(255,255,255,0.11)',
+                    color: 'rgba(255,255,255,0.94)',
+                    fontSize: 15,
+                    fontWeight: 760,
+                    cursor: 'pointer',
+                    fontFamily: 'inherit',
+                    transition: 'all 0.22s cubic-bezier(0.22,1,0.36,1)',
                   }}
                 >
-                  Explain in plain language
+                  Start walkthrough →
                 </button>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-                {data.impression.slice(0, 5).map((item, i) => (
-                  <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '8px 10px', background: 'rgba(255,255,255,0.025)', borderRadius: 9, border: '0.5px solid rgba(255,255,255,0.05)' }}>
-                    <div style={{ width: 18, height: 18, borderRadius: '50%', background: 'rgba(55,138,221,0.18)', border: '0.5px solid rgba(55,138,221,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                      <span style={{ color: 'rgba(100,160,255,0.9)', fontSize: 9, fontWeight: 700 }}>{i + 1}</span>
-                    </div>
-                    <span style={{ color: 'rgba(255,255,255,0.58)', fontSize: 10.5, lineHeight: 1.7 }}>{highlightKeywords(item.replace(/^\d+\.\s*/, ''), handleKeywordClick, handleTermClick)}</span>
-                  </div>
-                ))}
-              </div>
-
-              {definition && (
-                <div
-                  className="no-drag"
-                  style={{
-                    marginTop: 10, padding: '9px 11px', borderRadius: 9,
-                    background: 'rgba(120,170,255,0.07)', border: '0.5px solid rgba(120,170,255,0.18)',
-                    animation: 'healthCardIn 0.2s ease', position: 'relative',
-                  }}
-                >
-                  <button
-                    onClick={() => setDefinition(null)}
-                    style={{
-                      position: 'absolute', top: 6, right: 8, background: 'none', border: 'none',
-                      color: 'rgba(255,255,255,0.3)', fontSize: 13, cursor: 'pointer', padding: 2,
-                    }}
-                    aria-label="Close definition"
-                  >×</button>
-                  <div style={{ fontSize: 9.5, color: 'rgba(180,210,255,0.85)', fontWeight: 600, textTransform: 'capitalize', marginBottom: 4 }}>
-                    {definition.term}
-                  </div>
-                  <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.62)', lineHeight: 1.6 }}>
-                    {definition.loading ? 'Looking up definition…' : definition.text}
-                  </div>
-                </div>
-              )}
             </div>
-          </DraggablePanel>
-
-          {/* ── Plain Language Summary ── */}
-          {plainLanguage && (
-            <DraggablePanel id="plain-language" initialPos={{ x: window.innerWidth - 370, y: 320 }} style={{ width: 340, pointerEvents: 'auto' }} entranceDelay={0}>
-              <div style={glassBase}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-                  <div style={label}>Plain language summary</div>
-                  <button
-                    className="no-drag"
-                    onClick={() => setPlainLanguage(null)}
-                    style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', fontSize: 14, cursor: 'pointer', padding: 2 }}
-                    aria-label="Close plain language summary"
-                  >×</button>
-                </div>
-                {plainLanguage.loading ? (
-                  <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: 10.5, fontStyle: 'italic' }}>Translating findings…</div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-                    {plainLanguage.items.map((item, i) => (
-                      <div key={i} style={{ padding: '8px 10px', background: 'rgba(120,170,255,0.06)', borderRadius: 9, border: '0.5px solid rgba(120,170,255,0.14)' }}>
-                        <span style={{ color: 'rgba(255,255,255,0.62)', fontSize: 10.5, lineHeight: 1.7 }}>{item}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </DraggablePanel>
           )}
 
-          {/* ── PANEL 3 — Findings Explorer: abnormal organs first, normal
-              organs collapsed below. Clicking any organ selects it (same
-              handleKeywordClick path as Impression/Findings text), which
-              populates the Selected Organ header in Panel 1. ── */}
-          <DraggablePanel id="findings-explorer" initialPos={{ x: 16, y: window.innerHeight - 420 }} style={{ width: 300, pointerEvents: 'auto' }} entranceDelay={240}>
-            <div style={glassBase}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-                <div style={label}>Findings explorer</div>
-              </div>
-              {(() => {
-                const allOrgans = Object.entries(data.organ_volumes).filter(([_, v]) => v.volume > 5);
-                const abnormal = allOrgans.filter(([_, v]) => v.status === 'check');
-                const normal = allOrgans.filter(([_, v]) => v.status !== 'check');
-                return (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-                    {abnormal.length > 0 && (
-                      <div>
-                        <div style={{ fontSize: 8.5, color: 'rgba(251,191,36,0.6)', letterSpacing: '0.8px', marginBottom: 6, textTransform: 'uppercase' }}>Abnormal</div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                          {abnormal.map(([organ]) => (
-                            <div
-                              key={organ}
-                              className="no-drag"
-                              onClick={() => handleKeywordClick(organ, organ, document.body as unknown as HTMLElement)}
-                              style={{
-                                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                padding: '7px 10px', borderRadius: 8, cursor: 'pointer',
-                                background: focusedOrgan === organ ? 'rgba(251,191,36,0.14)' : 'rgba(251,191,36,0.06)',
-                                border: `0.5px solid ${focusedOrgan === organ ? 'rgba(251,191,36,0.4)' : 'rgba(251,191,36,0.16)'}`,
-                              }}
-                            >
-                              <span style={{ color: 'rgba(255,255,255,0.75)', fontSize: 10.5, textTransform: 'capitalize' }}>{organ.replace(/_/g, ' ')}</span>
-                              <span style={{ color: '#fbbf24', fontSize: 8.5 }}>review</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {normal.length > 0 && (
-                      <div>
-                        <div style={{ fontSize: 8.5, color: 'rgba(109,202,165,0.55)', letterSpacing: '0.8px', marginBottom: 6, marginTop: abnormal.length > 0 ? 4 : 0, textTransform: 'uppercase' }}>Normal</div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                          {(showAllNormal ? normal : normal.slice(0, 4)).map(([organ]) => (
-                            <div
-                              key={organ}
-                              className="no-drag"
-                              onClick={() => handleKeywordClick(organ, organ, document.body as unknown as HTMLElement)}
-                              style={{
-                                display: 'flex', alignItems: 'center',
-                                padding: '6px 10px', borderRadius: 8, cursor: 'pointer',
-                                background: focusedOrgan === organ ? 'rgba(109,202,165,0.1)' : 'transparent',
-                                border: `0.5px solid ${focusedOrgan === organ ? 'rgba(109,202,165,0.3)' : 'transparent'}`,
-                              }}
-                            >
-                              <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 10, textTransform: 'capitalize' }}>{organ.replace(/_/g, ' ')}</span>
-                            </div>
-                          ))}
-                          {normal.length > 4 && (
-                            <button
-                              className="no-drag"
-                              onClick={() => setShowAllNormal((v) => !v)}
-                              style={{
-                                background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)',
-                                fontSize: 9.5, cursor: 'pointer', padding: '4px 10px', textAlign: 'left',
-                              }}
-                            >
-                              {showAllNormal ? 'Show less' : `+ ${normal.length - 4} more`}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-            </div>
-          </DraggablePanel>
 
-          {/* ── PANEL 4 — Imaging detail ── */}
-          <DraggablePanel id="imaging" initialPos={{ x: window.innerWidth - 320, y: window.innerHeight - 290 }} style={{ width: 295, pointerEvents: 'auto' }} entranceDelay={360}>
-            <div style={glassBase}>
-              <div style={label}>Imaging detail</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {[
-                  ['Study', data.imaging.study_type || 'CT'],
-                  ['Contrast', data.imaging.contrast || 'N/A'],
-                  ['Spacing', data.imaging.spacing.map(s => s.toFixed(2)).join(' × ') + ' mm'],
-                  ['Dimensions', data.imaging.shape.join(' × ')],
-                  ['Patient', `${data.patient.sex} · ${data.patient.age}y`],
-                ].map(([k, v]) => (
-                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 7, borderBottom: '0.5px solid rgba(255,255,255,0.04)' }}>
-                    <span style={{ color: 'rgba(255,255,255,0.26)', fontSize: 9.5 }}>{k}</span>
-                    <span style={{ color: 'rgba(255,255,255,0.65)', fontSize: 9.5, textAlign: 'right', maxWidth: 160, fontWeight: 500 }}>{v}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </DraggablePanel>
+          {/* Coachmark: after Start walkthrough, point users to the existing Patient / Doctor toggle */}
+          {modePromptOpen && step > 0 && (
+            <>
+              <div style={{
+                position: 'fixed',
+                inset: 0,
+                zIndex: 10004,
+                pointerEvents: 'none',
+                background: 'rgba(0,0,0,0.48)',
+                backdropFilter: 'blur(18px)',
+                WebkitBackdropFilter: 'blur(18px)',
+                animation: 'riseIn 0.24s ease both',
+              }} />
 
-          {/* ── Findings Timeline ── */}
-          <FindingsTimeline
-            organStatuses={Object.entries(data.organ_volumes)
-              .filter(([_, v]) => v.volume > 5)
-              .filter(([organ]) => taggedSentences.some((s) => s.organs.includes(organ)))
-              .map(([organ, vals]) => ({
-                organ,
-                status: (vals.status as 'normal' | 'check') ?? 'normal',
-              }))}
-            comments={data.comments}
-            focusedOrgan={focusedOrgan}
-            onNodeTap={handleTimelineFocus}
-          />
-
-          {/* ── View switcher ── */}
-          <div style={{ position: 'fixed', bottom: 20, left: '50%', transform: 'translateX(-50%)', zIndex: 10001, pointerEvents: 'auto', display: 'flex', gap: 6, background: 'rgba(10,12,18,0.65)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.09)', borderTop: '1px solid rgba(255,255,255,0.18)', borderRadius: 12, padding: '6px 8px', boxShadow: '0 4px 24px rgba(0,0,0,0.35)' }}>
-            {(['axial', 'sagittal', 'coronal', '3d'] as const).map(view => (
-              <button key={view} onClick={() => { setActiveView(view); onViewChange(view); }} className="no-drag" style={{
-                background: activeView === view ? 'rgba(55,138,221,0.22)' : 'transparent',
-                border: activeView === view ? '0.5px solid rgba(55,138,221,0.45)' : '0.5px solid transparent',
-                color: activeView === view ? 'rgba(133,183,235,0.95)' : 'rgba(255,255,255,0.28)',
-                borderRadius: 8, padding: '5px 16px', cursor: 'pointer', fontSize: 10,
-                fontWeight: activeView === view ? 500 : 400, letterSpacing: '0.5px',
-                transition: 'all 0.15s ease', pointerEvents: 'auto',
+              <div style={{
+                position: 'fixed',
+                right: 112,
+                top: 94,
+                zIndex: 10007,
+                pointerEvents: 'none',
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 14,
+                animation: 'riseIn 0.26s ease both',
               }}>
-                {view === '3d' ? '3D' : view.charAt(0).toUpperCase() + view.slice(1)}
-              </button>
-            ))}
-          </div>
+                <div style={{
+                  width: 92,
+                  height: 54,
+                  borderTop: '2px solid rgba(255,255,255,0.78)',
+                  borderRight: '2px solid rgba(255,255,255,0.78)',
+                  borderTopRightRadius: 28,
+                  transform: 'translateY(4px) rotate(-8deg)',
+                  position: 'relative',
+                }}>
+                  <span style={{
+                    position: 'absolute',
+                    right: -6,
+                    top: -7,
+                    width: 12,
+                    height: 12,
+                    borderTop: '2px solid rgba(255,255,255,0.78)',
+                    borderRight: '2px solid rgba(255,255,255,0.78)',
+                    transform: 'rotate(45deg)',
+                  }} />
+                </div>
+
+                <div style={{
+                  ...glass,
+                  width: 330,
+                  padding: '22px 24px',
+                  boxShadow: '0 26px 90px rgba(0,0,0,0.46), inset 0 1px 0 rgba(255,255,255,0.08)',
+                }}>
+                  <div style={{
+                    fontSize: 12,
+                    letterSpacing: '0.14em',
+                    textTransform: 'uppercase',
+                    color: 'rgba(255,255,255,0.44)',
+                    fontWeight: 820,
+                    marginBottom: 10,
+                  }}>
+                    Choose your view
+                  </div>
+                  <div style={{
+                    fontSize: 27,
+                    lineHeight: 1.06,
+                    letterSpacing: '-0.045em',
+                    color: '#fff',
+                    fontWeight: 850,
+                    marginBottom: 10,
+                  }}>
+                    Are you a patient or a doctor?
+                  </div>
+                  <p style={{
+                    fontSize: 15,
+                    lineHeight: 1.48,
+                    color: 'rgba(255,255,255,0.64)',
+                    margin: 0,
+                  }}>
+                    Select the role that fits you best. You can switch views anytime.
+                  </p>
+                </div>
+              </div>
+            </>
+          )}
+
+
+          {/* LEFT story panel */}
+          {step > 0 && step < totalSteps - 1 && (
+            <div className="rs-scroll" style={{ ...glass, position: 'fixed', left: 64, top: 'calc(50% + 38px)', transform: 'translateY(-50%)', zIndex: 10001, pointerEvents: 'auto', width: 360, maxHeight: 'calc(100vh - 150px)', overflowY: 'auto', padding: 24 }}>
+              {leftContent}
+            </div>
+          )}
+
+          {/* FINAL centered impression panel */}
+          {step === totalSteps - 1 && (
+            <div style={{
+              position: 'fixed',
+              inset: '76px 0 0',
+              zIndex: 10001,
+              pointerEvents: 'none',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 24,
+            }}>
+              <div className="rs-scroll" style={{ ...glass, pointerEvents: 'auto', width: 560, maxWidth: 'calc(100vw - 48px)', maxHeight: 'calc(100vh - 150px)', overflowY: 'auto', padding: 34 }}>
+                {leftContent}
+              </div>
+            </div>
+          )}
+
+          {/* RIGHT evidence panel */}
+          {step > 1 && step < totalSteps - 1 && (
+            <div style={{ position: 'fixed', right: 72, top: 'calc(50% + 38px)', transform: 'translateY(-50%)', zIndex: 10001, pointerEvents: 'auto' }}>
+              <EvidencePanel
+                step={step}
+                lang={lang}
+                flagged={flagged}
+                normal={normal}
+                curOrgan={curOrganName}
+                curData={curOrganData}
+                data={data}
+                anim={anim}
+              />
+            </div>
+          )}
+
+          {step > 0 && step < totalSteps - 1 && (
+            <div style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', zIndex: 10001, pointerEvents: 'auto' }}>
+              <FindingsTimeline
+              organStatuses={flagged.map(([o, v]) => ({ organ: o, status: v.status || 'check' }))}
+              comments={data.comments}
+              focusedOrgan={curOrganName}
+              onNodeTap={organ => {
+                const fi = flagged.findIndex(([o]) => o === organ);
+                go(fi >= 0 ? 2 + fi : 1);
+              }}
+            />
+            </div>
+          )}
         </>
-      ) : null}
+      )}
     </div>
   );
-};
-
-export default ReportScreen;
+}
