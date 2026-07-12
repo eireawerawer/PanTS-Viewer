@@ -181,9 +181,9 @@ export default function LandingPage() {
         <nav className={`${styles.nav} ${styles.landingNav}`}>
           <button type="button" className={styles.logoPill} onClick={() => scrollToProgress(0)}>
             <img
-              src="/favicon/favicon.svg"
-              alt="BodyMaps logo"
-              className={styles.logoImg}
+              src="/jhu-shield.png"
+              alt="Johns Hopkins University logo"
+              className={`${styles.logoImg} ${styles.jhuLogoImg}`}
             />
             <div className={styles.logoTitle}>BodyMaps</div>
           </button>
@@ -212,11 +212,10 @@ export default function LandingPage() {
 
         <main className={styles.hero}>
           <section className={styles.heroCopy}>
-            <p className={styles.heroKicker}>OPEN ABDOMINAL CT ATLAS</p>
             <h1 className={styles.heroTitle}>
-              BODY
+              <span className={styles.heroTitleBody}>BODY</span>
               <br />
-              MAPS
+              <span className={styles.heroTitleMaps}>MAPS</span>
             </h1>
             <p className={styles.heroSubtitle}>The open library of labeled body CT scans</p>
 

@@ -1,6 +1,6 @@
 /* JHU axial CT landing hero */
 
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Playfair+Display:wght@700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 
 @keyframes fadeInUp {
   from {
@@ -111,6 +111,13 @@
   border-radius: 8px;
 }
 
+.jhuLogoImg {
+  width: 74px;
+  height: 42px;
+  border-radius: 6px;
+  background: var(--jhu-heritage);
+}
+
 .logoTitle {
   font-size: 18px;
   font-weight: 700;
@@ -193,25 +200,24 @@
   padding-bottom: 42px;
 }
 
-.heroKicker {
-  margin: 0 0 20px;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0;
-  color: var(--jhu-soft);
-  text-transform: uppercase;
-}
-
 .heroTitle {
   margin: 0;
-  color: var(--jhu-heritage);
   font-size: 7.8rem;
   font-weight: 700;
   letter-spacing: 0;
   line-height: 0.86;
   text-transform: uppercase;
   text-shadow: none;
+}
+
+.heroTitleBody {
+  color: #002d72;
+}
+
+.heroTitleMaps {
+  color: #68ace5;
+  font-family: 'Playfair Display', Georgia, serif;
+  font-weight: 800;
 }
 
 .heroSubtitle {
@@ -649,11 +655,6 @@
     min-height: 100dvh;
     padding: 116px 18px 30px;
     align-content: center;
-  }
-
-  .heroKicker {
-    margin-bottom: 12px;
-    font-size: 11px;
   }
 
   .heroTitle {
