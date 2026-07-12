@@ -1,6 +1,6 @@
 /* JHU axial CT landing hero */
 
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Playfair+Display:wght@700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Playfair+Display:ital,wght@1,400;1,500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 
 @keyframes fadeInUp {
   from {
@@ -112,10 +112,10 @@
 }
 
 .jhuLogoImg {
-  width: 74px;
+  width: 42px;
   height: 42px;
-  border-radius: 6px;
-  background: var(--jhu-heritage);
+  border-radius: 0;
+  background: transparent;
 }
 
 .logoTitle {
@@ -185,9 +185,9 @@
   z-index: 2;
   min-height: 100dvh;
   display: grid;
-  grid-template-columns: minmax(340px, 0.86fr) minmax(520px, 1.14fr);
+  grid-template-columns: minmax(360px, 0.72fr) minmax(720px, 1.28fr);
   align-items: center;
-  gap: 36px;
+  gap: 56px;
   padding: 138px 56px 132px;
   animation: fadeInUp 0.7s cubic-bezier(.2, .8, .2, 1) both;
 }
@@ -212,12 +212,15 @@
 
 .heroTitleBody {
   color: #002d72;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
 }
 
 .heroTitleMaps {
   color: #68ace5;
   font-family: 'Playfair Display', Georgia, serif;
-  font-weight: 800;
+  font-style: italic;
+  font-weight: 400;
 }
 
 .heroSubtitle {
@@ -239,7 +242,6 @@
 
 .btnPrimary,
 .btnSecondary,
-.depthCta,
 .sliceButton {
   display: inline-flex;
   align-items: center;
@@ -287,7 +289,6 @@
 
 .btnPrimary:active,
 .btnSecondary:active,
-.depthCta:active,
 .sliceButton:active {
   transform: translateY(1px);
 }
@@ -296,16 +297,16 @@
 .visualPanel {
   position: relative;
   z-index: 3;
-  min-height: 600px;
+  min-height: 720px;
   align-self: center;
 }
 
 .topoField {
   position: absolute;
-  left: 47%;
+  left: 50%;
   top: 52%;
-  width: 920px;
-  height: 920px;
+  width: 1120px;
+  height: 1120px;
   border-radius: 50%;
   border: 1px solid rgba(0, 45, 114, 0.08);
   background: radial-gradient(ellipse at center, rgba(104, 172, 229, 0.08), transparent 62%);
@@ -315,7 +316,7 @@
 
 .ctScene {
   position: absolute;
-  inset: 34px 20px 44px;
+  inset: 10px 0 18px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -323,7 +324,7 @@
 
 .ctPlane {
   position: relative;
-  width: min(640px, 100%);
+  width: min(900px, 100%);
   aspect-ratio: 1.44;
   border: 1px solid rgba(17, 17, 17, 0.08);
   border-radius: 6px;
@@ -435,7 +436,7 @@
   z-index: 8;
   display: flex;
   align-items: end;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 28px;
 }
 
@@ -485,24 +486,6 @@
   background: rgba(17, 17, 17, 0.08);
 }
 
-.depthCta {
-  gap: 12px;
-  min-width: 260px;
-  height: 70px;
-  padding: 0 24px 0 30px;
-  border-radius: 8px;
-  color: #ffffff;
-  background: var(--jhu-heritage);
-  border-color: var(--jhu-heritage);
-  font-size: 18px;
-  text-transform: uppercase;
-}
-
-.depthCta:hover {
-  background: #003a8c;
-  border-color: #003a8c;
-}
-
 .depthRail {
   position: absolute;
   top: 112px;
@@ -534,7 +517,7 @@
 
 @media (max-width: 1200px) {
   .hero {
-    grid-template-columns: minmax(300px, 0.78fr) minmax(440px, 1.22fr);
+    grid-template-columns: minmax(300px, 0.76fr) minmax(560px, 1.24fr);
     padding-left: 38px;
     padding-right: 38px;
   }
@@ -544,7 +527,11 @@
   }
 
   .visualPanel {
-    min-height: 540px;
+    min-height: 620px;
+  }
+
+  .ctPlane {
+    width: min(760px, 100%);
   }
 
   .heroFooter {
@@ -598,11 +585,6 @@
     font-size: 21px;
   }
 
-  .depthCta {
-    min-width: 208px;
-    height: 60px;
-    font-size: 15px;
-  }
 }
 
 @media (max-width: 720px) {
@@ -724,7 +706,6 @@
   .depthRailFill,
   .btnPrimary,
   .btnSecondary,
-  .depthCta,
   .sliceButton,
   .tabPill {
     transition: none;

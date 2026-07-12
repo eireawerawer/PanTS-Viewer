@@ -292,11 +292,6 @@ export default function LandingPage() {
               </div>
             ))}
           </div>
-
-          <button type="button" className={styles.depthCta} onClick={() => scrollToProgress(1)}>
-            <span>Explore Depth</span>
-            <IconChevronRight size={20} stroke={2.2} />
-          </button>
         </footer>
 
         <div className={styles.depthRail} aria-hidden="true">
