@@ -8,6 +8,11 @@ export default defineConfig({
 	plugins: [react()],
 	test: {
 		environment: "jsdom",
+		environmentOptions: {
+			// A non-opaque origin gives jsdom a real localStorage implementation.
+			// Node 24 no longer supplies the accidental global fallback older runs used.
+			jsdom: { url: "http://localhost/" },
+		},
 		globals: false,
 		setupFiles: ["./src/test/setup.ts"],
 		include: ["src/**/*.{test,spec}.{ts,tsx}"],

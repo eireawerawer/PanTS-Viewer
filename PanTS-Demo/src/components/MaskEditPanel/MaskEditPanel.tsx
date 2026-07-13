@@ -27,6 +27,8 @@ type Props = {
 	onClose: () => void;
 	/** Reading-session hook — fires once per edit burst with a description. */
 	onEdit?: (detail: string) => void;
+	/** Live Rooms use server-ordered, participant-scoped undo instead of local history. */
+	collaboration?: { connected: boolean; onUndo: () => void };
 };
 
 const DEFAULT_BRUSH_MM = 10;
@@ -34,7 +36,7 @@ const DEFAULT_BRUSH_MM = 10;
 // Right-side panel for correcting the segmentation masks: pick the target organ,
 // paint or erase on any 2D pane, undo/redo, and download the edited labelmap as
 // .nii.gz. Everything happens client-side on the loaded labelmap volume.
-function MaskEditPanel({ organs, caseId, serverCaseId, mode, onModeChange, onClose, onEdit }: Props) {
+function MaskEditPanel({ organs, caseId, serverCaseId, mode, onModeChange, onClose, onEdit, collaboration }: Props) {
 	const [segment, setSegment] = useState(organs[0]?.id ?? 1);
 	const [brushMm, setBrushMm] = useState(DEFAULT_BRUSH_MM);
 	const [edited, setEdited] = useState(false);
@@ -170,9 +172,10 @@ function MaskEditPanel({ organs, caseId, serverCaseId, mode, onModeChange, onClo
 				<div className="vp-edit__history">
 					<button
 						className="vp-edit__btn"
-						disabled={!history.canUndo}
+						disabled={collaboration ? !collaboration.connected : !history.canUndo}
 						onClick={() => {
-							undoMaskEdit();
+							if (collaboration) collaboration.onUndo();
+							else undoMaskEdit();
 							setHistory(getMaskEditHistoryState());
 						}}
 					>
@@ -180,7 +183,7 @@ function MaskEditPanel({ organs, caseId, serverCaseId, mode, onModeChange, onClo
 					</button>
 					<button
 						className="vp-edit__btn"
-						disabled={!history.canRedo}
+						disabled={Boolean(collaboration) || !history.canRedo}
 						onClick={() => {
 							redoMaskEdit();
 							setHistory(getMaskEditHistoryState());
@@ -214,7 +217,9 @@ function MaskEditPanel({ organs, caseId, serverCaseId, mode, onModeChange, onClo
 					{mode
 						? `${mode === "brush" ? "Painting" : "Erasing"} on the 2D panes — drag to ${mode === "brush" ? "fill" : "clear"}.`
 						: "Pick Paint or Erase, then drag on any 2D pane."}
-					{" "}Edits stay in your browser until downloaded.
+					{" "}{collaboration
+						? "Edits are saved to this temporary room and included in room export."
+						: "Edits stay in your browser until downloaded."}
 				</div>
 			</div>
 		</div>

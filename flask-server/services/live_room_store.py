@@ -1,0 +1,1113 @@
+"""Filesystem-backed state for temporary, account-free Live Rooms.
+
+Flask and the async WebSocket process both use this module.  Every mutation is
+guarded by a process-local lock plus an advisory file lock, so sequence numbers
+and snapshots remain consistent across the two processes without Redis or a
+database.
+"""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import hmac
+import html
+import io
+import json
+import os
+import re
+import secrets
+import shutil
+import tempfile
+import threading
+import uuid
+import zipfile
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterator
+
+import nibabel as nib
+import numpy as np
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+
+try:  # Linux production path; tests on other platforms still keep thread safety.
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
+
+
+ROOM_TTL = timedelta(hours=24)
+MAX_EVENTS = 50_000
+MAX_EVENT_LOG_BYTES = 512 * 1024 * 1024
+MAX_ROOM_BYTES = 8 * 1024 * 1024 * 1024
+MAX_EXPORT_BYTES = 4 * 1024 * 1024 * 1024
+MAX_TEXT_NOTE = 4_000
+MAX_TEXT_CHAT = 2_000
+MAX_NAME = 32
+MAX_CHAT_MESSAGES = 500
+MAX_MASK_RANGES_PER_EVENT = 50_000
+MAX_MASK_VOXELS_PER_EVENT = 8_000_000
+SNAPSHOT_MASK_EVENT_INTERVAL = 50
+SNAPSHOT_TIME_INTERVAL = timedelta(minutes=5)
+
+MEASUREMENT_TOOLS = {
+    "Length",
+    "Probe",
+    "RectangleROI",
+    "EllipticalROI",
+    "PlanarFreehandROI",
+    "Bidirectional",
+    "Angle",
+    "CobbAngle",
+    "ArrowAnnotate",
+}
+DURABLE_TYPES = {
+    "measurement.upsert",
+    "measurement.delete",
+    "mask.patch",
+    "note.upsert",
+    "note.delete",
+    "chat.add",
+}
+
+
+class LiveRoomError(RuntimeError):
+    status_code = 400
+    code = "invalid_request"
+
+
+class RoomNotFound(LiveRoomError):
+    status_code = 404
+    code = "room_not_found"
+
+
+class RoomUnauthorized(LiveRoomError):
+    status_code = 401
+    code = "invalid_room_key"
+
+
+class RoomExpired(LiveRoomError):
+    status_code = 410
+    code = "room_expired"
+
+
+class RoomFull(LiveRoomError):
+    status_code = 507
+    code = "room_event_log_full"
+
+
+@dataclass(frozen=True)
+class CaseFiles:
+    ct_path: Path
+    mask_path: Path
+    geometry_hash: str
+    dimensions: tuple[int, int, int]
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def isoformat(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def parse_time(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def hash_room_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _clean_text(value: Any, limit: int, *, required: bool = True) -> str:
+    if not isinstance(value, str):
+        raise LiveRoomError("Text value must be a string")
+    # React renders these values as text.  Remove control characters as an extra
+    # barrier for JSON/CSV/report exports while preserving ordinary whitespace.
+    cleaned = "".join(ch for ch in value if ch in "\n\t" or ord(ch) >= 32).strip()
+    if required and not cleaned:
+        raise LiveRoomError("Text value cannot be empty")
+    if len(cleaned) > limit:
+        raise LiveRoomError(f"Text value exceeds {limit} characters")
+    return cleaned
+
+
+def _atomic_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+class LiveRoomStore:
+    def __init__(
+        self,
+        sessions_dir: str | os.PathLike[str],
+        pants_path: str | os.PathLike[str] | None = None,
+        *,
+        now: Callable[[], datetime] = utcnow,
+    ) -> None:
+        self.root = Path(sessions_dir).resolve() / "live_rooms"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.pants_path = Path(pants_path).resolve() if pants_path else None
+        self._now = now
+        self._locks: dict[str, threading.RLock] = {}
+        self._locks_guard = threading.Lock()
+
+    @staticmethod
+    def validate_room_id(room_id: str) -> str:
+        try:
+            parsed = uuid.UUID(str(room_id))
+        except (ValueError, AttributeError) as exc:
+            raise RoomNotFound("Room not found") from exc
+        canonical = str(parsed)
+        if canonical != str(room_id).lower():
+            raise RoomNotFound("Room not found")
+        return canonical
+
+    def _room_dir(self, room_id: str) -> Path:
+        canonical = self.validate_room_id(room_id)
+        path = self.root / canonical
+        # UUID validation above prevents traversal.  Resolve check also guards a
+        # mistakenly-created symlink inside live_rooms.
+        if path.exists() and path.resolve().parent != self.root:
+            raise RoomNotFound("Room not found")
+        return path
+
+    def _thread_lock(self, room_id: str) -> threading.RLock:
+        with self._locks_guard:
+            return self._locks.setdefault(room_id, threading.RLock())
+
+    @contextmanager
+    def _locked(self, room_id: str, *, require_exists: bool = True) -> Iterator[Path]:
+        room_id = self.validate_room_id(room_id)
+        with self._thread_lock(room_id):
+            room_dir = self._room_dir(room_id)
+            if require_exists and not (room_dir / "metadata.json").is_file():
+                raise RoomNotFound("Room not found")
+            room_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = room_dir / ".lock"
+            with lock_path.open("a+b") as lock_file:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield room_dir
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, Any]:
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                value = json.load(stream)
+        except FileNotFoundError as exc:
+            raise RoomNotFound("Room not found") from exc
+        if not isinstance(value, dict):
+            raise LiveRoomError(f"Invalid room file: {path.name}")
+        return value
+
+    def _load_metadata(self, room_dir: Path, *, allow_expired: bool = False) -> dict[str, Any]:
+        metadata = self._read_json(room_dir / "metadata.json")
+        metadata = self._recover_from_event_log(room_dir, metadata)
+        if not allow_expired and parse_time(metadata["expires_at"]) <= self._now():
+            raise RoomExpired("Room expired and was deleted")
+        return metadata
+
+    def _recover_from_event_log(self, room_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+        """Replay committed events if a process stopped between event fsync and JSON replace."""
+        last_event = self._last_event(room_dir)
+        latest_logged = int(last_event["seq"]) if last_event else 0
+        latest_metadata = int(metadata.get("latest_seq", 0))
+        if latest_logged <= latest_metadata:
+            return metadata
+        events = list(self._iter_events(room_dir))
+        state = self._read_json(room_dir / "state.json")
+        state.setdefault("measurements", {})
+        state.setdefault("notes", {})
+        state.setdefault("chat", [])
+        state.setdefault("undone_event_ids", [])
+        nvoxels = int(np.prod(metadata["dimensions"], dtype=np.int64))
+        writers: np.memmap | None = None
+        for event in events:
+            if int(event["seq"]) <= latest_metadata:
+                continue
+            payload = event.get("payload") or {}
+            event_type = event.get("type")
+            if event_type == "measurement.upsert" and payload.get("measurement"):
+                item = payload["measurement"]
+                state["measurements"][item["id"]] = item
+            elif event_type == "measurement.delete" and payload.get("id"):
+                state["measurements"].pop(payload["id"], None)
+            elif event_type == "note.upsert" and payload.get("note"):
+                item = payload["note"]
+                state["notes"][item["id"]] = item
+            elif event_type == "note.delete" and payload.get("id"):
+                state["notes"].pop(payload["id"], None)
+            elif event_type == "chat.add" and payload.get("message"):
+                if not any(item.get("id") == payload["message"]["id"] for item in state["chat"]):
+                    state["chat"].append(payload["message"])
+                    state["chat"] = state["chat"][-MAX_CHAT_MESSAGES:]
+            elif event_type == "mask.patch":
+                if writers is None:
+                    writers = self._writer_map(room_dir, nvoxels)
+                for item in payload.get("ranges", []):
+                    writers[item["start"] : item["start"] + item["length"]] = int(event["seq"])
+                metadata["mask_events_since_snapshot"] = int(metadata.get("mask_events_since_snapshot", 0)) + 1
+            if event.get("undo_of") and event["undo_of"] not in state["undone_event_ids"]:
+                state["undone_event_ids"].append(event["undo_of"])
+        if writers is not None:
+            writers.flush()
+            del writers
+        metadata["latest_seq"] = latest_logged
+        metadata["recent_event_ids"] = [event["event_id"] for event in events[-10_000:]]
+        _atomic_json(room_dir / "state.json", state)
+        _atomic_json(room_dir / "metadata.json", metadata)
+        return metadata
+
+    @staticmethod
+    def public_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "room_id",
+            "case_id",
+            "resolution",
+            "created_at",
+            "expires_at",
+            "geometry_hash",
+            "dimensions",
+            "latest_seq",
+        }
+        return {key: metadata[key] for key in allowed if key in metadata}
+
+    def _resolve_case(self, case_id: str, resolution: str) -> CaseFiles:
+        if not re.fullmatch(r"\d+", str(case_id)):
+            raise LiveRoomError("case_id must be numeric")
+        if resolution not in {"low", "full"}:
+            raise LiveRoomError("resolution must be 'low' or 'full'")
+        if self.pants_path is None:
+            raise LiveRoomError("PANTS_PATH is not configured")
+        pants_id = f"PanTS_{int(case_id):08d}"
+        ct_full = self.pants_path / "image_only" / pants_id / "ct.nii.gz"
+        mask_full = self.pants_path / "mask_only" / pants_id / "combined_labels.nii.gz"
+        if not ct_full.is_file() or not mask_full.is_file():
+            raise LiveRoomError("Dataset CT or segmentation is missing")
+        ct_path, mask_path = ct_full, mask_full
+        if resolution == "low":
+            ct_low = ct_full.with_name("ct_lowres.nii.gz")
+            if ct_low.is_file():
+                ct_path = ct_low
+
+        try:
+            ct_img = nib.load(str(ct_path))
+            mask_img = nib.load(str(mask_path))
+        except Exception as exc:
+            raise LiveRoomError("Dataset CT or segmentation could not be read") from exc
+        if resolution == "full":
+            if tuple(ct_img.shape[:3]) != tuple(mask_img.shape[:3]):
+                raise LiveRoomError("CT and segmentation geometry do not match")
+            if not np.allclose(ct_img.affine, mask_img.affine, atol=1e-4):
+                raise LiveRoomError("CT and segmentation geometry do not match")
+        else:
+            # Fast rooms use a smaller CT texture but keep the editable labelmap on its
+            # original grid. Cornerstone overlays independent volumes in world space.
+            # Validate orientation, origin, and physical extent instead of requiring
+            # identical voxel dimensions.
+            ct_basis = np.asarray(ct_img.affine[:3, :3], dtype=float)
+            mask_basis = np.asarray(mask_img.affine[:3, :3], dtype=float)
+            ct_spacing = np.linalg.norm(ct_basis, axis=0)
+            mask_spacing = np.linalg.norm(mask_basis, axis=0)
+            if np.any(ct_spacing == 0) or np.any(mask_spacing == 0):
+                raise LiveRoomError("CT and segmentation geometry do not match")
+            if not np.allclose(ct_basis / ct_spacing, mask_basis / mask_spacing, atol=1e-4):
+                raise LiveRoomError("CT and segmentation geometry do not match")
+            if not np.allclose(ct_img.affine[:3, 3], mask_img.affine[:3, 3], atol=1e-3):
+                raise LiveRoomError("CT and segmentation geometry do not match")
+            ct_extent = (np.asarray(ct_img.shape[:3], dtype=float) - 1) * ct_spacing
+            mask_extent = (np.asarray(mask_img.shape[:3], dtype=float) - 1) * mask_spacing
+            extent_tolerance = float(max(np.max(ct_spacing), np.max(mask_spacing))) + 1e-3
+            if not np.allclose(ct_extent, mask_extent, atol=extent_tolerance, rtol=0):
+                raise LiveRoomError("CT and segmentation geometry do not match")
+        geometry = {
+            "shape": list(mask_img.shape[:3]),
+            "affine": np.asarray(mask_img.affine).round(6).tolist(),
+        }
+        geometry_hash = hashlib.sha256(
+            json.dumps(geometry, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return CaseFiles(
+            ct_path=ct_path,
+            mask_path=mask_path,
+            geometry_hash=geometry_hash,
+            dimensions=tuple(int(v) for v in mask_img.shape[:3]),
+        )
+
+    def create_room(self, case_id: str, resolution: str = "low") -> tuple[dict[str, Any], str]:
+        case_files = self._resolve_case(str(case_id), resolution)
+        room_id = str(uuid.uuid4())
+        room_key = secrets.token_urlsafe(32)
+        created = self._now()
+        metadata = {
+            "room_id": room_id,
+            "key_hash": hash_room_key(room_key),
+            "case_id": str(int(case_id)),
+            "resolution": resolution,
+            "created_at": isoformat(created),
+            "expires_at": isoformat(created + ROOM_TTL),
+            "geometry_hash": case_files.geometry_hash,
+            "dimensions": list(case_files.dimensions),
+            "base_ct_path": str(case_files.ct_path),
+            "base_mask_path": str(case_files.mask_path),
+            "latest_seq": 0,
+            "mask_snapshot_seq": 0,
+            "mask_events_since_snapshot": 0,
+            "last_snapshot_at": isoformat(created),
+            "recent_event_ids": [],
+        }
+        state = {
+            "measurements": {},
+            "notes": {},
+            "chat": [],
+            "undone_event_ids": [],
+        }
+        with self._locked(room_id, require_exists=False) as room_dir:
+            _atomic_json(room_dir / "metadata.json", metadata)
+            _atomic_json(room_dir / "state.json", state)
+            (room_dir / "events.jsonl").touch(mode=0o600)
+        return self.public_metadata(metadata), room_key
+
+    def verify_key(self, room_id: str, room_key: str, *, allow_expired: bool = False) -> dict[str, Any]:
+        if not isinstance(room_key, str) or not room_key:
+            raise RoomUnauthorized("Room key required")
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir, allow_expired=allow_expired)
+            supplied = hash_room_key(room_key)
+            if not hmac.compare_digest(supplied, metadata.get("key_hash", "")):
+                raise RoomUnauthorized("Invalid room key")
+            return self.public_metadata(metadata)
+
+    def get_metadata(self, room_id: str, room_key: str) -> dict[str, Any]:
+        return self.verify_key(room_id, room_key)
+
+    def get_snapshot(self, room_id: str, room_key: str) -> dict[str, Any]:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
+                raise RoomUnauthorized("Invalid room key")
+            state = self._read_json(room_dir / "state.json")
+            return {
+                "room": self.public_metadata(metadata),
+                "latest_seq": metadata["latest_seq"],
+                "state": state,
+            }
+
+    def events_after(self, room_id: str, room_key: str, sequence: int) -> list[dict[str, Any]]:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
+                raise RoomUnauthorized("Invalid room key")
+            return [event for event in self._iter_events(room_dir) if int(event["seq"]) > int(sequence)]
+
+    @staticmethod
+    def _iter_events(room_dir: Path) -> Iterator[dict[str, Any]]:
+        path = room_dir / "events.jsonl"
+        if not path.exists():
+            return
+        with path.open("r", encoding="utf-8") as stream:
+            pending: str | None = None
+            for line in stream:
+                if pending is not None and pending.strip():
+                    yield json.loads(pending)
+                pending = line
+            if pending and pending.strip():
+                try:
+                    yield json.loads(pending)
+                except json.JSONDecodeError:
+                    # Power loss can leave only the final append incomplete. Earlier
+                    # malformed lines still raise through the look-ahead branch above.
+                    return
+
+    @staticmethod
+    def _last_event(room_dir: Path) -> dict[str, Any] | None:
+        """Read only the tail event during normal metadata loads.
+
+        Rooms can contain tens of thousands of events. Scanning the complete JSONL
+        file on every commit made ordinary edits progressively slower even when no
+        recovery was needed.
+        """
+        path = room_dir / "events.jsonl"
+        if not path.exists() or path.stat().st_size == 0:
+            return None
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            position = stream.tell()
+            buffer = b""
+            while position > 0:
+                size = min(64 * 1024, position)
+                position -= size
+                stream.seek(position)
+                buffer = stream.read(size) + buffer
+                lines = buffer.splitlines()
+                if len(lines) < 2 and position > 0:
+                    continue
+                for line in reversed(lines):
+                    if not line.strip():
+                        continue
+                    try:
+                        value = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if isinstance(value, dict):
+                        return value
+                if position == 0:
+                    break
+        return None
+
+    @staticmethod
+    def _find_event(room_dir: Path, event_id: str) -> dict[str, Any] | None:
+        for event in LiveRoomStore._iter_events(room_dir):
+            if event.get("event_id") == event_id:
+                return event
+        return None
+
+    @staticmethod
+    def _validate_point(point: Any) -> list[float]:
+        if not isinstance(point, list) or len(point) != 3:
+            raise LiveRoomError("World coordinate must contain three numbers")
+        values = [float(value) for value in point]
+        if not all(np.isfinite(values)):
+            raise LiveRoomError("World coordinate contains a non-finite value")
+        return values
+
+    def _sanitize_measurement(self, raw: Any, current: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            raise LiveRoomError("measurement must be an object")
+        measurement_id = str(raw.get("id", ""))
+        if not measurement_id or len(measurement_id) > 128:
+            raise LiveRoomError("Invalid measurement id")
+        tool = str(raw.get("tool", ""))
+        if tool not in MEASUREMENT_TOOLS:
+            raise LiveRoomError("Unsupported measurement tool")
+        points_raw = raw.get("points") or []
+        polyline_raw = raw.get("polyline") or []
+        if len(points_raw) > 64 or len(polyline_raw) > 20_000:
+            raise LiveRoomError("Measurement contains too many points")
+        points = [self._validate_point(point) for point in points_raw]
+        polyline = [self._validate_point(point) for point in polyline_raw]
+        return {
+            "id": measurement_id,
+            "tool": tool,
+            "points": points,
+            "polyline": polyline,
+            "text": _clean_text(raw.get("text", ""), MAX_TEXT_NOTE, required=False),
+            "label": _clean_text(raw.get("label", ""), 256, required=False),
+            "frame_of_reference": str(raw.get("frame_of_reference", ""))[:256],
+            "metadata": raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {},
+            "revision": int(current.get("revision", 0) + 1) if current else 1,
+        }
+
+    def _validate_mask_patch(self, payload: Any, metadata: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise LiveRoomError("mask patch must be an object")
+        if payload.get("geometry_hash") != metadata["geometry_hash"]:
+            raise LiveRoomError("Mask geometry hash does not match this room")
+        if payload.get("resolution") != metadata["resolution"]:
+            raise LiveRoomError("Mask patch resolution does not match this room")
+        segment_label = int(payload.get("segment_label", -1))
+        if not 0 <= segment_label <= 255:
+            raise LiveRoomError("Invalid segment label")
+        ranges_raw = payload.get("ranges")
+        if not isinstance(ranges_raw, list) or not ranges_raw:
+            raise LiveRoomError("Mask patch ranges are required")
+        if len(ranges_raw) > MAX_MASK_RANGES_PER_EVENT:
+            raise LiveRoomError("Mask patch contains too many ranges")
+        nvoxels = int(np.prod(metadata["dimensions"], dtype=np.int64))
+        changed = 0
+        ranges: list[dict[str, int]] = []
+        previous_end = -1
+        for raw in ranges_raw:
+            if not isinstance(raw, dict):
+                raise LiveRoomError("Invalid mask range")
+            start = int(raw.get("start", -1))
+            length = int(raw.get("length", 0))
+            before = int(raw.get("before", -1))
+            after = int(raw.get("after", -1))
+            if start < 0 or length <= 0 or start + length > nvoxels:
+                raise LiveRoomError("Mask range is out of bounds")
+            if start < previous_end:
+                raise LiveRoomError("Mask ranges must be sorted and non-overlapping")
+            if not (0 <= before <= 255 and 0 <= after <= 255):
+                raise LiveRoomError("Mask labels must be uint8 values")
+            changed += length
+            if changed > MAX_MASK_VOXELS_PER_EVENT:
+                raise LiveRoomError("Mask patch is too large")
+            previous_end = start + length
+            ranges.append({"start": start, "length": length, "before": before, "after": after})
+        return {
+            "operation_id": str(payload.get("operation_id", ""))[:128],
+            "geometry_hash": metadata["geometry_hash"],
+            "resolution": metadata["resolution"],
+            "segment_label": segment_label,
+            "ranges": ranges,
+        }
+
+    @staticmethod
+    def _writer_map(room_dir: Path, nvoxels: int) -> np.memmap:
+        path = room_dir / "mask_writers.bin"
+        expected32 = nvoxels * np.dtype(np.uint32).itemsize
+        expected64 = nvoxels * np.dtype(np.uint64).itemsize
+        if path.exists() and path.stat().st_size == expected64:
+            # Keep existing rooms readable across this optimization. New rooms use
+            # uint32 because sequence numbers are capped at 50,000.
+            return np.memmap(path, dtype=np.uint64, mode="r+", shape=(nvoxels,))
+        if not path.exists() or path.stat().st_size != expected32:
+            with path.open("wb") as stream:
+                stream.truncate(expected32)
+        return np.memmap(path, dtype=np.uint32, mode="r+", shape=(nvoxels,))
+
+    def _apply_event(
+        self,
+        room_dir: Path,
+        metadata: dict[str, Any],
+        state: dict[str, Any],
+        event_type: str,
+        payload: dict[str, Any],
+        seq: int,
+        name: str,
+    ) -> tuple[dict[str, Any], Any]:
+        before: Any = None
+        if event_type == "measurement.upsert":
+            raw = payload.get("measurement")
+            measurement_id = str(raw.get("id", "")) if isinstance(raw, dict) else ""
+            before = state["measurements"].get(measurement_id)
+            measurement = self._sanitize_measurement(raw, before)
+            measurement["_seq"] = seq
+            state["measurements"][measurement["id"]] = measurement
+            payload = {"measurement": measurement}
+        elif event_type == "measurement.delete":
+            measurement_id = str(payload.get("id", ""))
+            before = state["measurements"].pop(measurement_id, None)
+            if not measurement_id:
+                raise LiveRoomError("Measurement id required")
+            payload = {"id": measurement_id}
+        elif event_type == "note.upsert":
+            raw = payload.get("note")
+            if not isinstance(raw, dict):
+                raise LiveRoomError("note must be an object")
+            note_id = str(raw.get("id", ""))
+            if not note_id or len(note_id) > 128:
+                raise LiveRoomError("Invalid note id")
+            before = state["notes"].get(note_id)
+            note = {
+                "id": note_id,
+                "author": name,
+                "text": _clean_text(raw.get("text", ""), MAX_TEXT_NOTE),
+                "world": self._validate_point(raw.get("world")),
+                "plane": str(raw.get("plane", "axial"))[:32],
+                "organ_label": _clean_text(raw.get("organ_label", ""), 128, required=False),
+                "revision": int(before.get("revision", 0) + 1) if before else 1,
+                "_seq": seq,
+            }
+            state["notes"][note_id] = note
+            payload = {"note": note}
+        elif event_type == "note.delete":
+            note_id = str(payload.get("id", ""))
+            before = state["notes"].pop(note_id, None)
+            if not note_id:
+                raise LiveRoomError("Note id required")
+            payload = {"id": note_id}
+        elif event_type == "chat.add":
+            raw = payload.get("message")
+            if not isinstance(raw, dict):
+                raise LiveRoomError("message must be an object")
+            message_id = str(raw.get("id", ""))
+            if not message_id or len(message_id) > 128:
+                raise LiveRoomError("Invalid chat message id")
+            if any(item.get("id") == message_id for item in state["chat"]):
+                raise LiveRoomError("Duplicate chat message id")
+            message = {
+                "id": message_id,
+                "author": name,
+                "text": _clean_text(raw.get("text", ""), MAX_TEXT_CHAT),
+                "timestamp": isoformat(self._now()),
+                "_seq": seq,
+            }
+            state["chat"].append(message)
+            state["chat"] = state["chat"][-MAX_CHAT_MESSAGES:]
+            payload = {"message": message}
+        elif event_type == "mask.patch":
+            payload = self._validate_mask_patch(payload, metadata)
+            nvoxels = int(np.prod(metadata["dimensions"], dtype=np.int64))
+            writers = self._writer_map(room_dir, nvoxels)
+            for item in payload["ranges"]:
+                writers[item["start"] : item["start"] + item["length"]] = seq
+            writers.flush()
+            del writers
+            metadata["mask_events_since_snapshot"] += 1
+        else:
+            raise LiveRoomError("Unsupported durable event type")
+        return payload, before
+
+    def commit_event(
+        self,
+        room_id: str,
+        room_key: str,
+        *,
+        event_id: str,
+        event_type: str,
+        participant_id: str,
+        name: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        if event_type not in DURABLE_TYPES:
+            raise LiveRoomError("Unsupported durable event type")
+        if not isinstance(event_id, str) or not event_id or len(event_id) > 128:
+            raise LiveRoomError("event_id is required")
+        if not isinstance(participant_id, str) or not participant_id or len(participant_id) > 128:
+            raise LiveRoomError("participant_id is required")
+        name = _clean_text(name, MAX_NAME)
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
+                raise RoomUnauthorized("Invalid room key")
+            if event_id in metadata.get("recent_event_ids", []):
+                existing = self._find_event(room_dir, event_id)
+                if existing:
+                    return existing, True
+            event_path = room_dir / "events.jsonl"
+            room_bytes = sum(path.stat().st_size for path in room_dir.iterdir() if path.is_file())
+            if (
+                metadata["latest_seq"] >= MAX_EVENTS
+                or event_path.stat().st_size >= MAX_EVENT_LOG_BYTES
+                or room_bytes >= MAX_ROOM_BYTES
+            ):
+                raise RoomFull("Room event log is full; export remains available")
+            state = self._read_json(room_dir / "state.json")
+            seq = int(metadata["latest_seq"]) + 1
+            normalized_payload, before = self._apply_event(
+                room_dir, metadata, state, event_type, payload, seq, name
+            )
+            event = {
+                "seq": seq,
+                "event_id": event_id,
+                "type": event_type,
+                "participant_id": participant_id,
+                "name": name,
+                "created_at": isoformat(self._now()),
+                "payload": normalized_payload,
+            }
+            if before is not None:
+                event["before"] = before
+            serialized = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+            if event_path.stat().st_size + len(serialized.encode("utf-8")) + 1 > MAX_EVENT_LOG_BYTES:
+                raise RoomFull("Room event log is full; export remains available")
+            with event_path.open("a", encoding="utf-8") as stream:
+                stream.write(serialized + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            metadata["latest_seq"] = seq
+            recent = list(metadata.get("recent_event_ids", []))
+            recent.append(event_id)
+            metadata["recent_event_ids"] = recent[-10_000:]
+            _atomic_json(room_dir / "state.json", state)
+            _atomic_json(room_dir / "metadata.json", metadata)
+            self._invalidate_exports(room_dir)
+            if event_type == "mask.patch" and self._snapshot_due(metadata):
+                self._materialize_mask_locked(room_dir, metadata)
+            return event, False
+
+    def _snapshot_due(self, metadata: dict[str, Any]) -> bool:
+        return (
+            int(metadata.get("mask_events_since_snapshot", 0)) >= SNAPSHOT_MASK_EVENT_INTERVAL
+            or self._now() - parse_time(metadata["last_snapshot_at"]) >= SNAPSHOT_TIME_INTERVAL
+        )
+
+    @staticmethod
+    def _invalidate_exports(room_dir: Path) -> None:
+        for name in ("export.zip", "report.pdf", "report.html"):
+            try:
+                (room_dir / name).unlink()
+            except FileNotFoundError:
+                pass
+
+    def _materialize_mask_locked(self, room_dir: Path, metadata: dict[str, Any]) -> Path:
+        snapshot_path = room_dir / "mask_snapshot.nii.gz"
+        snapshot_seq = int(metadata.get("mask_snapshot_seq", 0))
+        source = snapshot_path if snapshot_path.exists() else Path(metadata["base_mask_path"])
+        image = nib.load(str(source))
+        data = np.array(np.asanyarray(image.dataobj), dtype=np.uint8, order="F")
+        flat = data.reshape(-1, order="F")
+        latest_applied = snapshot_seq
+        for event in self._iter_events(room_dir):
+            seq = int(event["seq"])
+            if seq <= snapshot_seq or event.get("type") != "mask.patch":
+                continue
+            for item in event["payload"]["ranges"]:
+                flat[item["start"] : item["start"] + item["length"]] = item["after"]
+            latest_applied = max(latest_applied, seq)
+        output = nib.Nifti1Image(flat.reshape(data.shape, order="F"), image.affine, header=image.header)
+        output.set_data_dtype(np.uint8)
+        temp_path = room_dir / ".mask_snapshot.tmp.nii.gz"
+        nib.save(output, str(temp_path))
+        os.replace(temp_path, snapshot_path)
+        metadata["mask_snapshot_seq"] = latest_applied
+        metadata["mask_events_since_snapshot"] = 0
+        metadata["last_snapshot_at"] = isoformat(self._now())
+        _atomic_json(room_dir / "metadata.json", metadata)
+        return snapshot_path
+
+    def get_mask_snapshot(self, room_id: str, room_key: str) -> tuple[Path, int]:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
+                raise RoomUnauthorized("Invalid room key")
+            if int(metadata["latest_seq"]) == 0:
+                return Path(metadata["base_mask_path"]), 0
+            path = self._materialize_mask_locked(room_dir, metadata)
+            return path, int(metadata["mask_snapshot_seq"])
+
+    def _event_is_current(self, state: dict[str, Any], event: dict[str, Any]) -> bool:
+        payload = event["payload"]
+        if event["type"] == "measurement.upsert":
+            current = state["measurements"].get(payload["measurement"]["id"])
+            return bool(current and int(current.get("_seq", -1)) == int(event["seq"]))
+        if event["type"] == "measurement.delete":
+            return payload["id"] not in state["measurements"]
+        if event["type"] == "note.upsert":
+            current = state["notes"].get(payload["note"]["id"])
+            return bool(current and int(current.get("_seq", -1)) == int(event["seq"]))
+        if event["type"] == "note.delete":
+            return payload["id"] not in state["notes"]
+        return True
+
+    def undo_latest(
+        self, room_id: str, room_key: str, participant_id: str, name: str
+    ) -> dict[str, Any]:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
+                raise RoomUnauthorized("Invalid room key")
+            state = self._read_json(room_dir / "state.json")
+            undone = set(state.get("undone_event_ids", []))
+            all_events = list(self._iter_events(room_dir))
+            candidates = [
+                event
+                for event in all_events
+                if event.get("participant_id") == participant_id
+                and event.get("event_id") not in undone
+                and event.get("type") != "chat.add"
+            ]
+            target = candidates[-1] if candidates else None
+            if target is None:
+                return {"ok": False, "reason": "Nothing to undo"}
+
+            def touched_later(object_kind: str, object_id: str) -> bool:
+                upsert_type = f"{object_kind}.upsert"
+                delete_type = f"{object_kind}.delete"
+                for later in all_events:
+                    if int(later["seq"]) <= int(target["seq"]):
+                        continue
+                    later_payload = later.get("payload") or {}
+                    later_id = (
+                        (later_payload.get(object_kind) or {}).get("id")
+                        if later.get("type") == upsert_type
+                        else later_payload.get("id") if later.get("type") == delete_type else None
+                    )
+                    if later_id == object_id:
+                        return True
+                return False
+
+            seq = int(metadata["latest_seq"]) + 1
+            inverse_type = target["type"]
+            inverse_payload: dict[str, Any]
+            partial = False
+            reverted = 0
+            total = 0
+            if inverse_type == "mask.patch":
+                nvoxels = int(np.prod(metadata["dimensions"], dtype=np.int64))
+                writers = self._writer_map(room_dir, nvoxels)
+                inverse_ranges: list[dict[str, int]] = []
+                for item in target["payload"]["ranges"]:
+                    start, length = int(item["start"]), int(item["length"])
+                    total += length
+                    matches = np.asarray(writers[start : start + length] == int(target["seq"]), dtype=np.bool_)
+                    boundaries = np.flatnonzero(
+                        np.diff(np.concatenate((np.array([False]), matches, np.array([False]))))
+                    ).reshape(-1, 2)
+                    for run_start, run_end in boundaries:
+                        run_length = int(run_end - run_start)
+                        inverse_ranges.append(
+                            {
+                                "start": start + int(run_start),
+                                "length": run_length,
+                                "before": int(item["after"]),
+                                "after": int(item["before"]),
+                            }
+                        )
+                        reverted += run_length
+                        if len(inverse_ranges) > MAX_MASK_RANGES_PER_EVENT:
+                            del writers
+                            return {"ok": False, "reason": "Undo is too fragmented to apply safely", "partial": True}
+                for item in inverse_ranges:
+                    writers[item["start"] : item["start"] + item["length"]] = seq
+                writers.flush()
+                del writers
+                if not inverse_ranges:
+                    state["undone_event_ids"].append(target["event_id"])
+                    _atomic_json(room_dir / "state.json", state)
+                    return {"ok": False, "reason": "Later edits replaced every affected voxel", "partial": True}
+                partial = reverted < total
+                inverse_payload = {
+                    "operation_id": str(uuid.uuid4()),
+                    "geometry_hash": metadata["geometry_hash"],
+                    "resolution": metadata["resolution"],
+                    "segment_label": target["payload"]["segment_label"],
+                    "ranges": inverse_ranges,
+                }
+                metadata["mask_events_since_snapshot"] += 1
+            elif inverse_type == "measurement.upsert":
+                measurement_id = target["payload"]["measurement"]["id"]
+                if not self._event_is_current(state, target):
+                    return {"ok": False, "reason": "Measurement changed after this operation"}
+                before = target.get("before")
+                if before:
+                    before = dict(before)
+                    before["_seq"] = seq
+                    state["measurements"][measurement_id] = before
+                    inverse_payload = {"measurement": before}
+                else:
+                    state["measurements"].pop(measurement_id, None)
+                    inverse_type = "measurement.delete"
+                    inverse_payload = {"id": measurement_id}
+            elif inverse_type == "measurement.delete":
+                before = target.get("before")
+                target_id = target["payload"]["id"]
+                if not before or touched_later("measurement", target_id) or not self._event_is_current(state, target):
+                    return {"ok": False, "reason": "Measurement cannot be restored"}
+                before = dict(before)
+                before["_seq"] = seq
+                state["measurements"][before["id"]] = before
+                inverse_type = "measurement.upsert"
+                inverse_payload = {"measurement": before}
+            elif inverse_type == "note.upsert":
+                note_id = target["payload"]["note"]["id"]
+                if not self._event_is_current(state, target):
+                    return {"ok": False, "reason": "Note changed after this operation"}
+                before = target.get("before")
+                if before:
+                    before = dict(before)
+                    before["_seq"] = seq
+                    state["notes"][note_id] = before
+                    inverse_payload = {"note": before}
+                else:
+                    state["notes"].pop(note_id, None)
+                    inverse_type = "note.delete"
+                    inverse_payload = {"id": note_id}
+            elif inverse_type == "note.delete":
+                before = target.get("before")
+                target_id = target["payload"]["id"]
+                if not before or touched_later("note", target_id) or not self._event_is_current(state, target):
+                    return {"ok": False, "reason": "Note cannot be restored"}
+                before = dict(before)
+                before["_seq"] = seq
+                state["notes"][before["id"]] = before
+                inverse_type = "note.upsert"
+                inverse_payload = {"note": before}
+            else:
+                return {"ok": False, "reason": "Operation cannot be undone"}
+
+            inverse = {
+                "seq": seq,
+                "event_id": str(uuid.uuid4()),
+                "type": inverse_type,
+                "participant_id": participant_id,
+                "name": _clean_text(name, MAX_NAME),
+                "created_at": isoformat(self._now()),
+                "payload": inverse_payload,
+                "undo_of": target["event_id"],
+            }
+            with (room_dir / "events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(inverse, ensure_ascii=False, separators=(",", ":")) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            state["undone_event_ids"].append(target["event_id"])
+            metadata["latest_seq"] = seq
+            recent = list(metadata.get("recent_event_ids", [])) + [inverse["event_id"]]
+            metadata["recent_event_ids"] = recent[-10_000:]
+            _atomic_json(room_dir / "state.json", state)
+            _atomic_json(room_dir / "metadata.json", metadata)
+            self._invalidate_exports(room_dir)
+            return {
+                "ok": True,
+                "partial": partial,
+                "reverted": reverted if total else None,
+                "total": total if total else None,
+                "event": inverse,
+            }
+
+    def _build_report(self, room_dir: Path, metadata: dict[str, Any], state: dict[str, Any]) -> tuple[Path, Path]:
+        report_html = room_dir / "report.html"
+        report_pdf = room_dir / "report.pdf"
+        measurements = list(state["measurements"].values())
+        notes = list(state["notes"].values())
+        chat = list(state["chat"])
+        rows = "".join(
+            f"<tr><td>{html.escape(item['tool'])}</td><td>{html.escape(item.get('label', ''))}</td>"
+            f"<td>{html.escape(str(item.get('text', '')))}</td></tr>"
+            for item in measurements
+        ) or "<tr><td colspan='3'>None</td></tr>"
+        note_rows = "".join(
+            f"<li><strong>{html.escape(item['author'])}</strong>: {html.escape(item['text'])}</li>"
+            for item in notes
+        ) or "<li>None</li>"
+        chat_rows = "".join(
+            f"<li><strong>{html.escape(item['author'])}</strong>: {html.escape(item['text'])}</li>"
+            for item in chat
+        ) or "<li>None</li>"
+        html_text = f"""<!doctype html><html><head><meta charset='utf-8'><title>BodyMaps Live Room report</title>
+<style>body{{font:14px Arial,sans-serif;margin:40px;color:#18212a}}table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccd5dc;padding:8px;text-align:left}}small{{color:#53606b}}</style></head><body>
+<h1>BodyMaps Live Room report</h1><p>Case {html.escape(metadata['case_id'])} · {html.escape(metadata['resolution'])} resolution</p>
+<p>Created {html.escape(metadata['created_at'])} · Expires {html.escape(metadata['expires_at'])}</p>
+<h2>Measurements</h2><table><thead><tr><th>Tool</th><th>Label</th><th>Text</th></tr></thead><tbody>{rows}</tbody></table>
+<h2>Pinned notes</h2><ul>{note_rows}</ul><h2>Chat</h2><ul>{chat_rows}</ul>
+<p><small>For research use only. Not for diagnostic use.</small></p></body></html>"""
+        report_html.write_text(html_text, encoding="utf-8")
+
+        pdf = canvas.Canvas(str(report_pdf), pagesize=letter)
+        width, height = letter
+        y = height - 54
+        pdf.setTitle("BodyMaps Live Room report")
+        pdf.setFont("Helvetica-Bold", 18)
+        pdf.drawString(54, y, "BodyMaps Live Room report")
+        y -= 28
+        pdf.setFont("Helvetica", 10)
+        for line in (
+            f"Case {metadata['case_id']} | {metadata['resolution']} resolution",
+            f"Created {metadata['created_at']}",
+            f"Expires {metadata['expires_at']}",
+            f"Measurements: {len(measurements)} | Notes: {len(notes)} | Chat messages: {len(chat)}",
+        ):
+            pdf.drawString(54, y, line)
+            y -= 16
+        y -= 8
+        pdf.setFont("Helvetica-Bold", 12)
+        pdf.drawString(54, y, "Pinned notes")
+        y -= 18
+        pdf.setFont("Helvetica", 9)
+        for item in notes[:40]:
+            text = f"{item['author']}: {item['text']}"[:110]
+            pdf.drawString(62, y, text)
+            y -= 14
+            if y < 72:
+                pdf.showPage()
+                y = height - 54
+                pdf.setFont("Helvetica", 9)
+        pdf.setFont("Helvetica-Oblique", 9)
+        pdf.drawString(54, 36, "For research use only. Not for diagnostic use.")
+        pdf.save()
+        return report_html, report_pdf
+
+    @staticmethod
+    def _chat_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            event["payload"]["message"]
+            for event in events
+            if event.get("type") == "chat.add" and (event.get("payload") or {}).get("message")
+        ]
+
+    def build_export(self, room_id: str, room_key: str) -> Path:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
+                raise RoomUnauthorized("Invalid room key")
+            export_path = room_dir / "export.zip"
+            if export_path.exists():
+                return export_path
+            state = self._read_json(room_dir / "state.json")
+            events = list(self._iter_events(room_dir))
+            export_state = {**state, "chat": self._chat_from_events(events)}
+            mask_path = self._materialize_mask_locked(room_dir, metadata)
+            report_html, report_pdf = self._build_report(room_dir, metadata, export_state)
+            measurements = list(state["measurements"].values())
+            measurements_json = json.dumps(measurements, indent=2, ensure_ascii=False)
+            csv_buffer = io.StringIO()
+            writer = csv.DictWriter(
+                csv_buffer,
+                fieldnames=["id", "tool", "label", "text", "revision", "frame_of_reference"],
+                extrasaction="ignore",
+            )
+            writer.writeheader()
+            writer.writerows(measurements)
+            manifest = {
+                **self.public_metadata(metadata),
+                "exported_at": isoformat(self._now()),
+                "participant_nicknames": sorted({event["name"] for event in events}),
+                "artifacts": [
+                    "edited_labelmap.nii.gz",
+                    "measurements.csv",
+                    "measurements.json",
+                    "notes.json",
+                    "chat.json",
+                    "events.json",
+                    "report.html",
+                    "report.pdf",
+                ],
+                "disclaimer": "For research use only. Not for diagnostic use.",
+            }
+            temp_path = room_dir / ".export.tmp.zip"
+            with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.write(mask_path, "edited_labelmap.nii.gz")
+                archive.writestr("measurements.csv", csv_buffer.getvalue())
+                archive.writestr("measurements.json", measurements_json)
+                archive.writestr("notes.json", json.dumps(list(state["notes"].values()), indent=2, ensure_ascii=False))
+                archive.writestr("chat.json", json.dumps(export_state["chat"], indent=2, ensure_ascii=False))
+                archive.writestr("events.json", json.dumps(events, indent=2, ensure_ascii=False))
+                archive.write(report_html, "report.html")
+                archive.write(report_pdf, "report.pdf")
+                archive.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
+            if temp_path.stat().st_size > MAX_EXPORT_BYTES:
+                temp_path.unlink(missing_ok=True)
+                raise RoomFull("Room export exceeds the 4 GiB artifact limit")
+            os.replace(temp_path, export_path)
+            return export_path
+
+    def get_report(self, room_id: str, room_key: str) -> Path:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
+                raise RoomUnauthorized("Invalid room key")
+            state = self._read_json(room_dir / "state.json")
+            events = list(self._iter_events(room_dir))
+            report_state = {**state, "chat": self._chat_from_events(events)}
+            _, report_pdf = self._build_report(room_dir, metadata, report_state)
+            return report_pdf
+
+    def cleanup_expired(self) -> list[str]:
+        removed: list[str] = []
+        for child in list(self.root.iterdir()):
+            if not child.is_dir():
+                continue
+            try:
+                room_id = self.validate_room_id(child.name)
+                with self._locked(room_id) as room_dir:
+                    metadata = self._load_metadata(room_dir, allow_expired=True)
+                    if parse_time(metadata["expires_at"]) > self._now():
+                        continue
+                shutil.rmtree(child, ignore_errors=True)
+                removed.append(room_id)
+            except (LiveRoomError, OSError, ValueError, KeyError):
+                continue
+        return removed

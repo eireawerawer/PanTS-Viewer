@@ -60,7 +60,6 @@ function Checked({
 		OrganSystem[system].forEach((sub) => {
 			if (typeof sub === "string") {
 				newCheckState[getOrganIdx(sub) + 1] = toggled;
-				console.log(toggled);
 				return;
 			}
 			const key: SubSystems = Object.keys(sub)[0] as SubSystems;
@@ -212,18 +211,16 @@ function Checked({
 					) {
 						const organKey: AllSystems = Object.keys(organ)[0] as AllSystems;
 						return (
-							<>
-								<Checked
-									key={Object.keys(organ)[0]}
-									OrganSystem={organ}
-									system={organKey}
-									labelColorMap={labelColorMap}
-									checkState={checkState}
-									setCheckState={setCheckState}
-									level={level + 1}
-									onJumpToOrgan={onJumpToOrgan}
-								/>
-							</>
+							<Checked
+								key={organKey}
+								OrganSystem={organ}
+								system={organKey}
+								labelColorMap={labelColorMap}
+								checkState={checkState}
+								setCheckState={setCheckState}
+								level={level + 1}
+								onJumpToOrgan={onJumpToOrgan}
+							/>
 						);
 					}
 				})}

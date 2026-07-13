@@ -4,3 +4,4 @@
 .env
 /sessions
 /test-sessions
+/tmp/render_only/

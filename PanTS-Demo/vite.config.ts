@@ -66,6 +66,11 @@ export default defineConfig({
 				changeOrigin: true,
 				secure: false,
 			},
+			"/ws": {
+				target: env.VITE_WS_BASE || "ws://127.0.0.1:8001",
+				ws: true,
+				changeOrigin: true,
+			},
 		},
 	},
 });

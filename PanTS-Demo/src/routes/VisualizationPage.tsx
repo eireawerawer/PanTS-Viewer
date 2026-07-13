@@ -33,6 +33,8 @@ import {
     IconSquareDashed,
     IconStack2,
     IconTrash,
+    IconUsersGroup,
+    IconX,
     IconZoomIn
 } from "@tabler/icons-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
@@ -56,13 +58,18 @@ import {
 } from "../helpers/constants";
 import {
     ANGLE_TOOL,
+    applyRemoteMaskRanges,
+    applyRemoteMeasurement,
+    applySharedMprView,
     applyVolume3DPreset,
     ARROW_TOOL,
     BIDIRECTIONAL_TOOL,
     captureViewportImages,
     centerOnCursor,
     clearMeasurements,
+    createSegmentationShadow,
     disableVolume3D,
+    diffSegmentationFromShadow,
     EDIT_BRUSH,
     EDIT_ERASER,
     ELLIPSE_TOOL,
@@ -72,6 +79,7 @@ import {
     getCrosshairMm,
     getCurrentVolumeModality,
     getMeasurementSummaries,
+    getSharedMprView,
     getOrganCentroids,
     getOrganLabelAtPoint,
     getOrganLabelOnClick,
@@ -79,6 +87,7 @@ import {
     MAGNIFY_TOOL,
     moveCornerstoneCrosshairToMm,
     PROBE_TOOL,
+    removeRemoteMeasurement,
     redoMaskEdit,
     renderVisualization,
     resetMprOrientation,
@@ -92,10 +101,13 @@ import {
     setReferenceLinesEnabled,
     setVisibilities,
     setZoom,
+    serializeMeasurement,
     startCine,
     stopCine,
     subscribeToCrosshairChanges,
     subscribeToMeasurementChanges,
+    subscribeToMprViewChanges,
+    subscribeToSegmentationEdits,
     subscribeToSliceChanges,
     subscribeToVolumeProgress,
     toggleCrosshairTool,
@@ -106,7 +118,10 @@ import {
     zoomToFit,
     type CinePane,
     type PrimaryMouseToolName,
-    type SliceInfo
+    type SharedMeasurement,
+    type SharedMprView,
+    type SliceInfo,
+    worldToVisiblePaneCanvas
 } from "../helpers/CornerstoneNifti2";
 import { getLocalDicomFiles, loadLocalDicomSeries } from "../helpers/dicomLocal";
 import { downloadUrlAsFile } from "../helpers/downloadFile";
@@ -129,6 +144,9 @@ import {
 import { toolDisplayName, type ReportMeasurement } from "../helpers/sessionReport";
 import { filenameToName, getPanTSId } from "../helpers/utils";
 import { decodeViewerState, encodeViewerState } from "../helpers/viewerShareState";
+import { LiveRoomDock, LiveRoomHeader } from "../liveRooms/LiveRoomChrome";
+import LiveRoomCreateDialog from "../liveRooms/LiveRoomCreateDialog";
+import type { LiveRoomController, LiveRoomMaskPatch } from "../liveRooms/types";
 import { type CheckBoxData } from "../types";
 import "./VisualizationPage.css";
 
@@ -287,15 +305,19 @@ function useToolbarFlyout() {
 	return { open, pos, groupRef, btnRef, menuRef, toggle, close };
 }
 
-function VisualizationPage() {
+type VisualizationPageProps = {
+	liveRoom?: LiveRoomController;
+};
+
+function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 	// References and state
 	const params = useParams();
-	const pantsCase = params.caseId;
-	const sessionId = params.sessionId;
+	const pantsCase = liveRoom?.metadata.case_id ?? params.caseId;
+	const sessionId = liveRoom ? undefined : params.sessionId;
 	// Local DICOM mode (/dicom): a folder of .dcm files picked on the Upload page,
 	// viewed entirely in-browser. No backend case, so no segmentation layer.
 	const routerLocation = useLocation();
-	const isDicom = routerLocation.pathname === "/dicom";
+	const isDicom = !liveRoom && routerLocation.pathname === "/dicom";
 	const [dicomError, setDicomError] = useState<string | null>(null);
 
 	// Where to load the volumes from. Per the maintainer's rule, dataset cases load
@@ -309,14 +331,21 @@ function VisualizationPage() {
 	// Whether the local volumes exist (enables the HD toggle). Dataset cases default to
 	// the low-res copy for fast loading; ?hd=1 in the URL requests full resolution.
 	const [localAvailable, setLocalAvailable] = useState(false);
-	const isHd =
-		typeof window !== "undefined" &&
-		new URLSearchParams(window.location.search).get("hd") === "1";
+	const isHd = liveRoom
+		? liveRoom.metadata.resolution === "full"
+		: typeof window !== "undefined" && new URLSearchParams(window.location.search).get("hd") === "1";
 
 	useEffect(() => {
 		let cancelled = false;
 		const resolveSources = async () => {
 			if (isDicom) return; // local files, not URLs — the setup effect handles them
+			if (liveRoom) {
+				const resParam = liveRoom.metadata.resolution === "low" ? "?res=low" : "";
+				setLocalAvailable(true);
+				setCtUrl(`${API_BASE}/api/get-main-nifti/${liveRoom.metadata.case_id}.nii.gz${resParam}`);
+				setSegUrl(liveRoom.maskUrl);
+				return;
+			}
 			if (sessionId) {
 				setCtUrl(`${API_BASE}/api/session-ct/${sessionId}`);
 				setSegUrl(`${API_BASE}/api/session-segmentation/${sessionId}`);
@@ -332,15 +361,24 @@ function VisualizationPage() {
 			const localOk = await fetch(localCt, { method: "HEAD" }).then((r) => r.ok).catch(() => false);
 			if (cancelled) return;
 			setLocalAvailable(localOk);
-			// Local: low-res by default (server falls back to full if not yet generated),
-			// full res when ?hd=1. HuggingFace fallback is full res only.
+			// Keep the categorical mask at full resolution even while the CT uses its fast
+			// preview. Cornerstone aligns both volumes in world space; downsampling labels
+			// creates avoidable stair-stepping and loses small structures.
 			const resParam = isHd ? "" : "?res=low";
 			setCtUrl(localOk ? `${localCt}${resParam}` : hfCt);
-			setSegUrl(localOk ? `${localSeg}${resParam}` : hfSeg);
+			setSegUrl(localOk ? localSeg : hfSeg);
 		};
 		resolveSources();
 		return () => { cancelled = true; };
-	}, [pantsCase, sessionId, isHd, isDicom]);
+	}, [
+		pantsCase,
+		sessionId,
+		isHd,
+		isDicom,
+		liveRoom?.metadata.case_id,
+		liveRoom?.metadata.resolution,
+		liveRoom?.maskUrl,
+	]);
 
 	// Flip between low-res and full-res by reloading the route — a fresh mount cleanly
 	// re-inits the Cornerstone/NiiVue contexts (re-running them in place is fragile).
@@ -502,6 +540,11 @@ function VisualizationPage() {
 	const [sessionResult, setSessionResult] = useState<SessionResult | null>(null);
 	const [sessionMeasurements, setSessionMeasurements] = useState<ReportMeasurement[]>([]);
 	const [showMeasurePanel, setShowMeasurePanel] = useState(false);
+	const [showLiveRoomCreate, setShowLiveRoomCreate] = useState(false);
+	const [liveRoomDockOpen, setLiveRoomDockOpen] = useState(Boolean(liveRoom));
+	const [openPinnedNote, setOpenPinnedNote] = useState<{ noteId: string; pane: CinePane } | null>(null);
+	const segmentationShadowRef = useRef<Uint8Array | null>(null);
+	const initialLiveMeasurementsAppliedRef = useRef(false);
 	// Shareable-link state: brief "copied" confirmation, and a guard so a deep-link's view
 	// state is applied exactly once after the volume finishes loading.
 	const [shareCopied, setShareCopied] = useState(false);
@@ -633,18 +676,138 @@ function VisualizationPage() {
 	// (on the next frame, after the annotation has painted onto the SVG overlay).
 	useEffect(() => {
 		const unsubscribe = subscribeToMeasurementChanges((kind, m) => {
-			if (!sessionRef.current) return;
-			if (kind === "completed") {
+			if (liveRoom && liveRoom.connectionState === "connected") {
+				if (kind === "removed") {
+					liveRoom.sendDurable("measurement.delete", { id: m.uid });
+				} else {
+					const measurement = serializeMeasurement(m.uid);
+					if (measurement) liveRoom.sendDurable("measurement.upsert", { measurement });
+				}
+			}
+			if (kind === "completed" && sessionRef.current) {
 				sessionRef.current.log("measure", `${toolDisplayName(m.tool)} measured: ${m.value}`);
 				requestAnimationFrame(() => {
 					void takeSnapshot(`${toolDisplayName(m.tool)} — ${m.value}`);
 				});
-			} else if (kind === "removed") {
+			} else if (kind === "removed" && sessionRef.current) {
 				sessionRef.current.log("measure", `Removed a ${toolDisplayName(m.tool)} measurement`);
 			}
 		});
 		return unsubscribe;
-	}, [takeSnapshot]);
+	}, [takeSnapshot, liveRoom?.connectionState, liveRoom?.sendDurable]);
+
+	// Live Room durable state is loaded before Cornerstone.  Hydrate shared measurements
+	// once the viewports exist, then apply later committed events incrementally.
+	useEffect(() => {
+		if (!liveRoom || loading || initialLiveMeasurementsAppliedRef.current) return;
+		initialLiveMeasurementsAppliedRef.current = true;
+		for (const measurement of Object.values(liveRoom.state.measurements)) {
+			applyRemoteMeasurement(measurement as SharedMeasurement);
+		}
+	}, [liveRoom?.state.measurements, loading]);
+
+	useEffect(() => {
+		if (!liveRoom?.pendingEvents.length || loading) return;
+		let appliedThrough = 0;
+		for (const { event, replayed } of liveRoom.pendingEvents) {
+			appliedThrough = Math.max(appliedThrough, event.seq);
+			// Sender already has ordinary live edits. Replayed edits and server-generated
+			// undo events must also be applied to the sender's newly loaded viewport.
+			if (event.participant_id === liveRoom.participantId && !event.undo_of && !replayed) continue;
+			const payload = event.payload as Record<string, unknown>;
+			if (event.type === "measurement.upsert" && payload.measurement) {
+				applyRemoteMeasurement(payload.measurement as SharedMeasurement);
+			} else if (event.type === "measurement.delete" && payload.id) {
+				removeRemoteMeasurement(String(payload.id));
+			} else if (event.type === "mask.patch") {
+				const patch = payload as unknown as LiveRoomMaskPatch;
+				applyRemoteMaskRanges(patch.ranges, segmentationShadowRef.current);
+			}
+		}
+		liveRoom.acknowledgeEvents(appliedThrough);
+	}, [liveRoom?.pendingEvents, liveRoom?.participantId, liveRoom?.acknowledgeEvents, loading]);
+
+	// Client shadow + modified-slice RLE keeps brush traffic proportional to changed
+	// voxels instead of serializing a full labelmap after every stroke.
+	useEffect(() => {
+		if (!liveRoom || loading) return;
+		segmentationShadowRef.current = createSegmentationShadow();
+		const unsubscribe = subscribeToSegmentationEdits((detail) => {
+			const shadow = segmentationShadowRef.current;
+			if (!shadow) return;
+			const ranges = diffSegmentationFromShadow(shadow, detail?.modifiedSlicesToUse);
+			if (!ranges.length || liveRoom.connectionState !== "connected") return;
+			const segmentLabel = detail?.segmentIndex ?? ranges.find((range) => range.after > 0)?.after ?? 0;
+			const operationId = crypto.randomUUID();
+			liveRoom.sendDurable("mask.patch", {
+				operation_id: operationId,
+				geometry_hash: liveRoom.metadata.geometry_hash,
+				resolution: liveRoom.metadata.resolution,
+				segment_label: segmentLabel,
+				ranges,
+			}, operationId);
+		});
+		return unsubscribe;
+	}, [
+		liveRoom?.connectionState,
+		liveRoom?.sendDurable,
+		liveRoom?.metadata.geometry_hash,
+		liveRoom?.metadata.resolution,
+		loading,
+	]);
+
+	// Publish camera/navigation state at the hook's 20 Hz cap.  Following suppresses
+	// outbound view echoes; applying a leader's camera therefore stays one-way.
+	useEffect(() => {
+		if (!liveRoom || loading || !renderingEngine) return;
+		const publish = (view: SharedMprView) => {
+			if (liveRoom.followingId) return;
+			liveRoom.sendView({
+				view: {
+					...view,
+					windowWidth,
+					windowCenter,
+					opacity: opacityValue,
+					visibleOrgans: checkState,
+				},
+			});
+		};
+		const unsubscribe = subscribeToMprViewChanges(publish);
+		const current = getSharedMprView();
+		if (current) publish(current);
+		return unsubscribe;
+	}, [liveRoom?.followingId, liveRoom?.sendView, loading, renderingEngine, windowWidth, windowCenter, opacityValue, checkState]);
+
+	useEffect(() => {
+		if (!liveRoom?.followingId || loading) return;
+		const leader = liveRoom.participants.find((item) => item.participant_id === liveRoom.followingId);
+		if (!leader?.view) return;
+		applySharedMprView(leader.view);
+		if (leader.view.windowWidth != null && leader.view.windowCenter != null) {
+			handleWindowChange(leader.view.windowWidth, leader.view.windowCenter);
+		}
+		if (leader.view.opacity != null) {
+			setOpacityValue(leader.view.opacity);
+			setFillOpacity(leader.view.opacity / 100);
+		}
+		if (leader.view.visibleOrgans) setCheckState(leader.view.visibleOrgans);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [liveRoom?.followingId, liveRoom?.participants, loading]);
+
+	useEffect(() => {
+		if (!liveRoom) return;
+		liveRoom.sendPresence({
+			crosshair: crosshairMm,
+			active_tool: editMode ?? activeMeasureTool ?? (crosshairToolActive ? "crosshair" : "pan"),
+			plane: activePaneRef.current,
+		});
+	}, [liveRoom?.sendPresence, crosshairMm, editMode, activeMeasureTool, crosshairToolActive]);
+
+	useEffect(() => {
+		if (!liveRoom || liveRoom.connectionState === "connected") return;
+		setEditMode(null);
+		setActiveMeasureTool(null);
+	}, [liveRoom?.connectionState]);
 
 	// ---- Cine playback / flip / rotate — all act on the "focused" pane -------------
 
@@ -725,7 +888,9 @@ function VisualizationPage() {
 				return;
 			const key = e.key.toLowerCase();
 			if ((e.metaKey || e.ctrlKey) && !e.altKey && key === "z") {
-				if (e.shiftKey) redoMaskEdit();
+				if (liveRoom) {
+					if (!e.shiftKey) liveRoom.requestUndo();
+				} else if (e.shiftKey) redoMaskEdit();
 				else undoMaskEdit();
 				e.preventDefault();
 				return;
@@ -743,6 +908,7 @@ function VisualizationPage() {
 				g: MAGNIFY_TOOL,
 			};
 			if (toolByKey[key]) {
+				if (liveRoom && liveRoom.connectionState !== "connected") return;
 				setEditMode(null); // measurement keys take the mouse back from the brush
 				setActiveMeasureTool((prev) => (prev === toolByKey[key] ? null : toolByKey[key]));
 			} else if (key === "c") {
@@ -766,7 +932,7 @@ function VisualizationPage() {
 		};
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
-	}, [takeSnapshot, toggleCine]);
+	}, [takeSnapshot, toggleCine, liveRoom]);
 
 	// View-mode changes belong in the reading timeline (skip the initial mount).
 	const loggedViewMode = useRef<ViewMode | null>(null);
@@ -819,14 +985,14 @@ function VisualizationPage() {
 	// Only when the local files exist (server disk — fast); the HuggingFace fallback
 	// is already full-res, and ?hd=1 loads full-res up front.
 	useEffect(() => {
-		if (loading || !localAvailable || isHd || isDicom || !pantsCase) return;
+		if (liveRoom || loading || !localAvailable || isHd || isDicom || !pantsCase) return;
 		if (enhanceStartedRef.current) return;
 		// Ref is flipped inside the timer (not here) so StrictMode's double-run —
 		// which clears the first timer — still ends up scheduling exactly one stream.
 		const timer = window.setTimeout(() => { void runEnhance(); }, 1500);
 		return () => window.clearTimeout(timer);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [loading, localAvailable, isHd, isDicom, pantsCase]);
+	}, [liveRoom, loading, localAvailable, isHd, isDicom, pantsCase]);
 
 	// ---- Shaded 3D volume rendering (Volume mode in the 3D pane) -------------------
 
@@ -970,7 +1136,6 @@ function VisualizationPage() {
 				// !render_ref.current ||
 				cmap.length === 0
 			) {
-				console.log("return", ctUrl, segUrl);
 				return;
 			}
 
@@ -1110,6 +1275,20 @@ function VisualizationPage() {
 		return unsubscribe;
 	}, [renderingEngine, viewportIds, volumeId]);
 
+	// A pin popover belongs to its visible slice. Close it as soon as navigation
+	// leaves that note's plane tolerance so returning later never resurrects stale UI.
+	useEffect(() => {
+		if (!openPinnedNote || !liveRoom) return;
+		const note = liveRoom.state.notes[openPinnedNote.noteId];
+		if (
+			!note
+			|| note.plane !== openPinnedNote.pane
+			|| !worldToVisiblePaneCanvas(openPinnedNote.pane, note.world)
+		) {
+			setOpenPinnedNote(null);
+		}
+	}, [liveRoom?.state.notes, openPinnedNote, sliceInfo]);
+
 	// Apply the reference-lines toggle once the engine/viewports/volume are ready, and
 	// re-apply on both a user toggle and a volume reload (a fresh tool group always starts
 	// with every tool disabled).
@@ -1132,8 +1311,14 @@ function VisualizationPage() {
 		activePaneRef.current = pane;
 		if (referenceLinesOn && paneChanged) setReferenceLinesEnabled(true, pane);
 	};
-	const handlePaneWheel = (pane: CinePane) => () => handlePaneFocus(pane);
-	const handlePaneMouseDown = (pane: CinePane) => () => handlePaneFocus(pane);
+	const handlePaneWheel = (pane: CinePane) => () => {
+		liveRoom?.stopFollowing();
+		handlePaneFocus(pane);
+	};
+	const handlePaneMouseDown = (pane: CinePane) => () => {
+		liveRoom?.stopFollowing();
+		handlePaneFocus(pane);
+	};
 
 	// Apply a shared deep-link's view state once the volume is ready (orientation, window,
 	// opacity, hidden organs, crosshair). Runs a single time — after that the URL is just a
@@ -1203,6 +1388,7 @@ function VisualizationPage() {
 	// still visually reflects its contents' state without having to be open.
 	const viewGroupActive = hoverIdentifyEnabled || referenceLinesOn;
 	const panelsGroupActive = showOrganDetails || showStats || showMetadata || showMeasurePanel;
+	const collaborationDisabled = Boolean(liveRoom && liveRoom.connectionState !== "connected");
 
 	// The Layout ▾ trigger shows the pane-layout preset's name when one is active
 	// (it's the more specific choice), otherwise the current view mode.
@@ -1381,8 +1567,94 @@ function VisualizationPage() {
 	// the same DOM nodes.
 	const renderPaneOverlays = (pane: CinePane) => {
 		const info = sliceInfo[pane];
+		const paneElement = pane === "axial"
+			? axial_ref.current
+			: pane === "sagittal"
+				? sagittal_ref.current
+				: coronal_ref.current;
+		const pinnedNotes = liveRoom
+			? Object.values(liveRoom.state.notes).flatMap((note) => {
+				if (note.plane !== pane) return [];
+				const position = worldToVisiblePaneCanvas(pane, note.world);
+				if (!position || position[0] < 0 || position[1] < 0) return [];
+				return [{
+					note,
+					position,
+					opensLeft: Boolean(paneElement && position[0] > paneElement.clientWidth * 0.62),
+					opensAbove: Boolean(paneElement && position[1] > paneElement.clientHeight * 0.62),
+				}];
+			})
+			: [];
 		return (
 			<>
+				{pinnedNotes.map(({ note, position, opensLeft, opensAbove }) => {
+					const popoverId = `lr-note-popover-${pane}-${note.id}`;
+					const isOpen = openPinnedNote?.noteId === note.id && openPinnedNote.pane === pane;
+					return (
+					<div
+						className="lr-note-anchor"
+						key={note.id}
+						style={{ left: position[0], top: position[1] }}
+						data-horizontal={opensLeft ? "left" : "right"}
+						data-vertical={opensAbove ? "above" : "below"}
+						onKeyDown={(event) => {
+							if (event.key === "Escape") setOpenPinnedNote(null);
+						}}
+					>
+						<button
+							className="lr-note-pin"
+							title={`${note.author}: ${note.text}`}
+							aria-label={`Pinned note from ${note.author}: ${note.text}`}
+							aria-expanded={isOpen}
+							aria-controls={popoverId}
+							onClick={(event) => {
+								event.stopPropagation();
+								setOpenPinnedNote(isOpen ? null : { noteId: note.id, pane });
+							}}
+						>
+							<span />
+						</button>
+						{isOpen && (
+							<div
+								className="lr-note-popover"
+								id={popoverId}
+								role="dialog"
+								aria-labelledby={`${popoverId}-author`}
+								aria-describedby={`${popoverId}-text`}
+								onClick={(event) => event.stopPropagation()}
+							>
+								<header>
+									<div>
+										<span>PINNED NOTE</span>
+										<strong id={`${popoverId}-author`}>{note.author}</strong>
+									</div>
+									<button type="button" aria-label="Close pinned note" onClick={() => setOpenPinnedNote(null)}><IconX size={15} /></button>
+								</header>
+								<p id={`${popoverId}-text`}>{note.text}</p>
+								<footer>
+									<span>{note.organ_label || pane}</span>
+									<span>{note.world.map((value) => Math.round(value)).join(", ")} mm</span>
+								</footer>
+							</div>
+						)}
+					</div>
+					);
+				})}
+				{liveRoom?.participants
+					.filter((participant) => participant.participant_id !== liveRoom.participantId && participant.cursor?.pane === pane)
+					.map((participant) => (
+						<div
+							className="lr-remote-cursor"
+							key={participant.participant_id}
+							style={{
+								left: `${Math.max(0, Math.min(1, participant.cursor!.x)) * 100}%`,
+								top: `${Math.max(0, Math.min(1, participant.cursor!.y)) * 100}%`,
+								color: participant.color,
+							}}
+						>
+							<span>{participant.name}</span>
+						</div>
+					))}
 				{info && info.total > 1 && (
 					<>
 						<input
@@ -1626,6 +1898,17 @@ const aiAvailableOrgans = useMemo(() => {
 	// cursor for one specific pane (via canvasToWorld, not the crosshair) and floats a
 	// tooltip next to the pointer. No-ops entirely while the tool is off.
 	const handlePaneHover = (pane: CinePane) => (e: MouseEvent) => {
+		if (liveRoom) {
+			const bounds = e.currentTarget.getBoundingClientRect();
+			liveRoom.sendPresence({
+				cursor: {
+					pane,
+					x: (e.clientX - bounds.left) / Math.max(1, bounds.width),
+					y: (e.clientY - bounds.top) / Math.max(1, bounds.height),
+				},
+				plane: pane,
+			});
+		}
 		if (!hoverIdentifyEnabled) return;
 		const idx = getOrganLabelAtPoint(pane, e.clientX, e.clientY);
 		if (!idx) {
@@ -1645,11 +1928,12 @@ const aiAvailableOrgans = useMemo(() => {
 	};
 
 	const handlePaneHoverLeave = () => {
+		liveRoom?.sendPresence({ cursor: null });
 		setHoverOrganTip((t) => (t.visible ? { ...t, visible: false } : t));
 	};
 
 	const navBack = () => {
-		window.location.href = "/dashboard";
+		window.location.href = liveRoom ? `/case/${liveRoom.metadata.case_id}` : "/dashboard";
 	};
 	// const PREVIEW_IDS = [1, 17, 30, 35, 121];
 
@@ -1660,15 +1944,27 @@ const aiAvailableOrgans = useMemo(() => {
 
 	return (
 		<div
-			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}`}
+			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${liveRoom ? " is-live-room" : ""}`}
+			onPointerDownCapture={(event) => {
+				if (!liveRoom?.followingId) return;
+				const target = event.target as HTMLElement;
+				if (!target.closest(".lr-header, .lr-dock")) liveRoom.stopFollowing();
+			}}
 			style={{
 				display: "flex",
 				overflow: "hidden",
 				flexDirection: "column",
-				height: "100vh",
-				width: "100vw",
+				height: "100dvh",
+				width: "100%",
 			}}
 		>
+			{liveRoom && (
+				<LiveRoomHeader
+					room={liveRoom}
+					dockOpen={liveRoomDockOpen}
+					onToggleDock={() => setLiveRoomDockOpen((value) => !value)}
+				/>
+			)}
 			{/* ---- Top toolbar (PYCAD-style). Lives in normal flow, so it sits ABOVE the
 			     viewports and never overlays them. Shown/hidden by the gear button. ---- */}
 			{showToolbar && (
@@ -1698,6 +1994,16 @@ const aiAvailableOrgans = useMemo(() => {
 						<span className="vp-tb-id__eyebrow">{sessionId ? "Session" : "Case"}</span>
 						<span className="vp-tb-id__val">{caseId}</span>
 					</div>
+					{!liveRoom && params.caseId && (
+						<button
+							className="vp-tb-mini vp-live-room-button"
+							onClick={() => setShowLiveRoomCreate(true)}
+							aria-label="Start Live Room"
+						>
+							<IconUsersGroup size={17} />
+							<span>Live Room</span>
+						</button>
+					)}
 
 					<span className="vp-tb-divider" />
 
@@ -1923,8 +2229,9 @@ const aiAvailableOrgans = useMemo(() => {
 											<div className="vp-toolgroup" ref={measureFlyout.groupRef}>
 												<button
 													ref={measureFlyout.btnRef}
-													className={`vp-tool ${measureToolActive || measureFlyout.open ? "vp-tool--active" : ""}`}
-													onClick={measureFlyout.toggle}
+												className={`vp-tool ${measureToolActive || measureFlyout.open ? "vp-tool--active" : ""}`}
+												onClick={measureFlyout.toggle}
+												disabled={collaborationDisabled}
 													aria-label="Measurement tools"
 													aria-haspopup="menu"
 													aria-expanded={measureFlyout.open}
@@ -1945,7 +2252,8 @@ const aiAvailableOrgans = useMemo(() => {
 																<button
 																	key={name}
 																	className={`vp-flyout__item ${activeMeasureTool === name ? "is-active" : ""}`}
-																	role="menuitem"
+															role="menuitem"
+															disabled={collaborationDisabled}
 																	onClick={() => {
 																		setEditMode(null);
 																		setActiveMeasureTool((p) => (p === name ? null : name));
@@ -1959,7 +2267,8 @@ const aiAvailableOrgans = useMemo(() => {
 															))}
 															<button
 																className="vp-flyout__item"
-																role="menuitem"
+														role="menuitem"
+														disabled={collaborationDisabled}
 																onClick={() => {
 																	clearMeasurements();
 																	measureFlyout.close();
@@ -2108,16 +2417,18 @@ const aiAvailableOrgans = useMemo(() => {
 											    during a review and shouldn't cost an extra click to reach. Cover
 											    measurements as well as mask edits; ⌘Z/⇧⌘Z work everywhere too. */}
 											<button
-												className="vp-tool"
-												onClick={() => undoMaskEdit()}
+											className="vp-tool"
+											onClick={() => liveRoom ? liveRoom.requestUndo() : undoMaskEdit()}
+											disabled={collaborationDisabled}
 												aria-label="Undo"
 											>
 												<IconArrowBackUp size={20} color="white" />
 												<span className="vp-tool__tip">Undo (⌘Z) — measurements & mask edits</span>
 											</button>
 											<button
-												className="vp-tool"
-												onClick={() => redoMaskEdit()}
+											className="vp-tool"
+											onClick={() => redoMaskEdit()}
+											disabled={Boolean(liveRoom)}
 												aria-label="Redo"
 											>
 												<IconArrowForwardUp size={20} color="white" />
@@ -2125,7 +2436,8 @@ const aiAvailableOrgans = useMemo(() => {
 											</button>
 											{!isDicom && (
 												<button
-													className={`vp-tool ${showEditPanel || editMode ? "vp-tool--active" : ""}`}
+												className={`vp-tool ${showEditPanel || editMode ? "vp-tool--active" : ""}`}
+												disabled={collaborationDisabled}
 													onClick={() => {
 														setShowStats(false);
 														setShowMetadata(false);
@@ -2331,7 +2643,7 @@ const aiAvailableOrgans = useMemo(() => {
 
 											{/* HD and AI stay inline: HD is a live status indicator (streaming %),
 											    and AI is a headline feature — neither belongs buried in a menu. */}
-											{!sessionId && localAvailable && (
+											{!liveRoom && !sessionId && localAvailable && (
 												<button
 													className={`vp-tool ${isHd || enhance.state === "done" ? "vp-tool--active" : ""} ${enhance.state === "streaming" ? "vp-tool--busy" : ""}`}
 													onClick={() => {
@@ -2780,7 +3092,7 @@ const aiAvailableOrgans = useMemo(() => {
 				<MaskEditPanel
 					organs={checkBoxData}
 					caseId={String(caseId)}
-					serverCaseId={pantsCase}
+					serverCaseId={liveRoom ? undefined : pantsCase}
 					mode={editMode}
 					onModeChange={setEditMode}
 					onClose={() => {
@@ -2788,6 +3100,10 @@ const aiAvailableOrgans = useMemo(() => {
 						setEditMode(null);
 					}}
 					onEdit={(detail) => sessionRef.current?.log("edit", detail, 2000)}
+					collaboration={liveRoom ? {
+						connected: liveRoom.connectionState === "connected",
+						onUndo: liveRoom.requestUndo,
+					} : undefined}
 				/>
 			)}
 
@@ -2809,6 +3125,14 @@ const aiAvailableOrgans = useMemo(() => {
 				demographics={demographics}
 				actions={aiActions}
 			/>
+			{liveRoom && liveRoomDockOpen && (
+				<LiveRoomDock
+					room={liveRoom}
+					crosshair={crosshairMm}
+					activePlane={getFocusedPane()}
+					onClose={() => setLiveRoomDockOpen(false)}
+				/>
+			)}
 			</div>
 
 			{/* Local-DICOM load failure: explain and offer the way back. */}
@@ -2855,6 +3179,24 @@ const aiAvailableOrgans = useMemo(() => {
 					/>
 				)
 			}
+
+			{!liveRoom && params.caseId && (
+				<LiveRoomCreateDialog
+					caseId={params.caseId}
+					open={showLiveRoomCreate}
+					onClose={() => setShowLiveRoomCreate(false)}
+				/>
+			)}
+
+			{liveRoom?.connectionState === "expired" && (
+				<div className="lr-room-ended" role="alert">
+					<div>
+						<h2>Live Room expired</h2>
+						<p>Temporary room data was deleted. Canonical dataset case remains unchanged.</p>
+						<a className="lr-button lr-button--primary" href={`/case/${liveRoom.metadata.case_id}`}>Return to case</a>
+					</div>
+				</div>
+			)}
 
 		</div >
 	);

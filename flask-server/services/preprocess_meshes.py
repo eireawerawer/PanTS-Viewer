@@ -101,7 +101,7 @@ def compute_global_center(data: np.ndarray, affine: np.ndarray) -> np.ndarray:
     three = nifti_world_to_three(world)
 
     return (three.min(axis=0) + three.max(axis=0)) / 2.0
-def compute_volume_bounds_three(shape, affine: np.ndarray):
+def compute_volume_bounds_three(shape, affine: np.ndarray, center: np.ndarray):
     nx, ny, nz = shape[:3]
 
     corners_ijk = np.array(
@@ -120,8 +120,6 @@ def compute_volume_bounds_three(shape, affine: np.ndarray):
 
     world = nib.affines.apply_affine(affine, corners_ijk)
     three = nifti_world_to_three(world)
-
-    center = (three.min(axis=0) + three.max(axis=0)) / 2.0
 
     three_centered = three - center
 
@@ -192,7 +190,7 @@ def get_panTS_id(index: int):
     return cur_case_id
 
 # display_id: PanTS_00000900
-def preprocess_case(display_id: str, label_nifti_path: str, output_root: str):
+def preprocess_case(display_id: str, label_nifti_path: str, output_root: str, *, verbose: bool = True):
     label_nifti_path = Path(label_nifti_path)
     output_root = Path(output_root)
 
@@ -210,7 +208,7 @@ def preprocess_case(display_id: str, label_nifti_path: str, output_root: str):
     data = data.astype(np.int32)
 
     global_center = compute_global_center(data, img.affine)
-    bounds = compute_volume_bounds_three(data.shape, img.affine)
+    bounds = compute_volume_bounds_three(data.shape, img.affine, global_center)
 
     manifest = {
         "caseId": display_id,
@@ -247,12 +245,14 @@ def preprocess_case(display_id: str, label_nifti_path: str, output_root: str):
             }
         )
 
-        print(f"Exported {meta['name']} -> {out_path}")
+        if verbose:
+            print(f"Exported {meta['name']} -> {out_path}")
 
     manifest_path = case_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
-    print(f"Wrote manifest -> {manifest_path}")
+    if verbose:
+        print(f"Wrote manifest -> {manifest_path}")
 
 def preprocess_case_by_index(index: int, skip_existing: bool = False):
     pants_case = get_panTS_id(index)
@@ -262,7 +262,7 @@ def preprocess_case_by_index(index: int, skip_existing: bool = False):
         f"{pants_case}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
     )
 
-    output_path = f"{Constants.PANTS_PATH}/render_only/{pants_case}/"
+    output_path = os.path.join(Constants.MESH_PATH, pants_case)
     manifest_path = Path(output_path) / "manifest.json"
 
     if skip_existing and manifest_path.exists():

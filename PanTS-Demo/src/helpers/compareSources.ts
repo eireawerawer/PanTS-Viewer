@@ -5,8 +5,9 @@
 import { API_BASE } from "./constants";
 import { getPanTSId } from "./utils";
 
-// Local volume+mask first (fast, low-res); HuggingFace mirror fallback — same sources the
-// single viewer uses, so coverage is identical.
+// Local CT preview + full-resolution mask first; HuggingFace mirror fallback. Labelmaps
+// stay full resolution because nearest-neighbour downsampling visibly stair-steps organ
+// boundaries and can erase small structures.
 export async function resolveSources(id: string): Promise<{ ct: string; seg: string }> {
 	const localCt = `${API_BASE}/api/get-main-nifti/${id}.nii.gz`;
 	const localSeg = `${API_BASE}/api/get-segmentations/${id}.nii.gz`;
@@ -16,7 +17,7 @@ export async function resolveSources(id: string): Promise<{ ct: string; seg: str
 	const ok = await fetch(localCt, { method: "HEAD" })
 		.then((r) => r.ok)
 		.catch(() => false);
-	return ok ? { ct: `${localCt}?res=low`, seg: `${localSeg}?res=low` } : { ct: hfCt, seg: hfSeg };
+	return ok ? { ct: `${localCt}?res=low`, seg: localSeg } : { ct: hfCt, seg: hfSeg };
 }
 
 // Respect the user's data budget: skip prefetch under Save-Data or on very slow (2G)

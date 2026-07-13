@@ -722,8 +722,12 @@ export function getMaskEditHistoryState(): { canUndo: boolean; canRedo: boolean 
 }
 
 // Fires whenever any stroke (or undo/redo of one) changes the labelmap.
-export function subscribeToSegmentationEdits(cb: () => void): () => void {
-  const handler = () => cb();
+export function subscribeToSegmentationEdits(cb: (detail?: SegmentationEditDetail) => void): () => void {
+  const handler = (event: Event) => {
+    if (_remoteSegmentationEventDepth > 0) return;
+    const detail = (event as CustomEvent).detail as SegmentationEditDetail | undefined;
+    cb(detail);
+  };
   eventTarget.addEventListener(
     csToolsEnums.Events.SEGMENTATION_DATA_MODIFIED,
     handler as EventListener
@@ -733,6 +737,103 @@ export function subscribeToSegmentationEdits(cb: () => void): () => void {
       csToolsEnums.Events.SEGMENTATION_DATA_MODIFIED,
       handler as EventListener
     );
+}
+
+export type SegmentationEditDetail = {
+  modifiedSlicesToUse?: number[];
+  segmentIndex?: number;
+};
+
+export type MaskRange = {
+  start: number;
+  length: number;
+  before: number;
+  after: number;
+};
+
+let _remoteSegmentationEventDepth = 0;
+
+/** Snapshot used to diff only slices Cornerstone says a local stroke modified. */
+export function createSegmentationShadow(): Uint8Array | null {
+  const current = getSegmentationExport();
+  if (!current) return null;
+  const shadow = new Uint8Array(current.data.length);
+  for (let i = 0; i < current.data.length; i++) shadow[i] = Number(current.data[i]);
+  return shadow;
+}
+
+/** Build constant before/after runs and advance the caller's shadow in place. */
+export function diffSegmentationFromShadow(
+  shadow: Uint8Array,
+  modifiedSlices?: number[]
+): MaskRange[] {
+  const current = getSegmentationExport();
+  if (!current || current.data.length !== shadow.length) return [];
+  const [width, height, depth] = current.dimensions;
+  const sliceSize = width * height;
+  const slices = modifiedSlices?.length
+    ? [...new Set(modifiedSlices.filter((slice) => slice >= 0 && slice < depth))].sort((a, b) => a - b)
+    : Array.from({ length: depth }, (_, index) => index);
+  const ranges: MaskRange[] = [];
+  let active: MaskRange | null = null;
+  for (const slice of slices) {
+    const first = slice * sliceSize;
+    const end = Math.min(first + sliceSize, current.data.length);
+    for (let index = first; index < end; index++) {
+      const before = shadow[index];
+      const after = Number(current.data[index]);
+      if (before === after) continue;
+      shadow[index] = after;
+      if (
+        active &&
+        active.start + active.length === index &&
+        active.before === before &&
+        active.after === after
+      ) {
+        active.length += 1;
+      } else {
+        active = { start: index, length: 1, before, after };
+        ranges.push(active);
+      }
+    }
+    active = null; // never merge across an uninspected slice boundary
+  }
+  return ranges;
+}
+
+/** Apply server-ordered ranges without re-emitting them as local brush strokes. */
+export function applyRemoteMaskRanges(ranges: MaskRange[], shadow?: Uint8Array | null): void {
+  const volume = cache.getVolume(segmentationId);
+  const vm = volume?.voxelManager;
+  if (!volume || !vm || !ranges.length) return;
+  const scalar = vm.getCompleteScalarDataArray?.() as
+    | Uint8Array
+    | Uint16Array
+    | Float32Array
+    | undefined;
+  const modifiedSlices = new Set<number>();
+  const sliceSize = volume.dimensions[0] * volume.dimensions[1];
+  for (const range of ranges) {
+    const end = range.start + range.length;
+    for (let index = range.start; index < end; index++) {
+      if (scalar) scalar[index] = range.after;
+      else vm.setAtIndex(index, range.after);
+      if (shadow && index < shadow.length) shadow[index] = range.after;
+    }
+    const firstSlice = Math.floor(range.start / sliceSize);
+    const lastSlice = Math.floor((end - 1) / sliceSize);
+    for (let slice = firstSlice; slice <= lastSlice; slice++) modifiedSlices.add(slice);
+  }
+  _remoteSegmentationEventDepth += 1;
+  try {
+    segmentation.triggerSegmentationEvents.triggerSegmentationDataModified(
+      segmentationId,
+      [...modifiedSlices]
+    );
+  } finally {
+    _remoteSegmentationEventDepth -= 1;
+  }
+  currentRenderingEngine?.render();
 }
 
 export type LabelmapExport = {
@@ -874,6 +975,99 @@ export function removeMeasurement(uid: string) {
   currentRenderingEngine?.render();
 }
 
+export type SharedMeasurement = {
+  id: string;
+  tool: string;
+  points: number[][];
+  polyline: number[][];
+  text: string;
+  label: string;
+  frame_of_reference: string;
+  metadata: Record<string, unknown>;
+  revision?: number;
+};
+
+let _remoteMeasurementEventDepth = 0;
+
+function finitePointList(value: unknown): number[][] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((point) => Array.isArray(point) && point.length === 3)
+    .map((point) => (point as number[]).map(Number))
+    .filter((point) => point.every(Number.isFinite));
+}
+
+/** Serialize only portable world-coordinate fields; cached statistics stay local. */
+export function serializeMeasurement(uid: string): SharedMeasurement | null {
+  const a = annotation.state.getAnnotation(uid) as any;
+  if (!a?.annotationUID || !MEASUREMENT_TOOL_NAMES.includes(a?.metadata?.toolName)) return null;
+  const metadata = a.metadata ?? {};
+  return {
+    id: String(a.annotationUID),
+    tool: String(metadata.toolName),
+    points: finitePointList(a?.data?.handles?.points),
+    polyline: finitePointList(a?.data?.contour?.polyline),
+    text: String(a?.data?.text ?? ""),
+    label: String(a?.data?.label ?? ""),
+    frame_of_reference: String(metadata.FrameOfReferenceUID ?? ""),
+    metadata: {
+      referencedImageId: metadata.referencedImageId,
+      viewPlaneNormal: metadata.viewPlaneNormal,
+      viewUp: metadata.viewUp,
+      FrameOfReferenceUID: metadata.FrameOfReferenceUID,
+    },
+  };
+}
+
+export function applyRemoteMeasurement(shared: SharedMeasurement): void {
+  const engine = currentRenderingEngine;
+  if (!engine || !MEASUREMENT_TOOL_NAMES.includes(shared.tool as MeasurementToolName)) return;
+  const viewport = engine.getViewport(viewportId1);
+  if (!viewport?.element) return;
+  const existing = annotation.state.getAnnotation(shared.id);
+  _remoteMeasurementEventDepth += 1;
+  try {
+    if (existing) annotation.state.removeAnnotation(shared.id);
+    const metadata = shared.metadata ?? {};
+    annotation.state.addAnnotation(
+      {
+        annotationUID: shared.id,
+        highlighted: false,
+        invalidated: true,
+        metadata: {
+          toolName: shared.tool,
+          referencedImageId: metadata.referencedImageId,
+          viewPlaneNormal: metadata.viewPlaneNormal,
+          viewUp: metadata.viewUp,
+          FrameOfReferenceUID: shared.frame_of_reference || metadata.FrameOfReferenceUID,
+        },
+        data: {
+          handles: { points: shared.points },
+          contour: shared.polyline.length ? { polyline: shared.polyline, closed: true } : undefined,
+          text: shared.text,
+          label: shared.label,
+        },
+      } as any,
+      viewport.element
+    );
+  } finally {
+    _remoteMeasurementEventDepth -= 1;
+  }
+  engine.render();
+}
+
+export function removeRemoteMeasurement(uid: string): void {
+  _remoteMeasurementEventDepth += 1;
+  try {
+    annotation.state.removeAnnotation(uid);
+  } catch {
+    /* already removed */
+  } finally {
+    _remoteMeasurementEventDepth -= 1;
+  }
+  currentRenderingEngine?.render();
+}
+
 // Moves the crosshair to the annotation and returns the target (so the caller
 // can also sync its own crosshair state / the 3D view).
 export function jumpToMeasurement(uid: string): [number, number, number] | null {
@@ -916,9 +1110,11 @@ type MprViewport = {
   scroll(delta?: number): void;
   getNumberOfSlices(): number;
   getSliceIndex(): number;
+  getCamera(): { focalPoint?: Point3; viewPlaneNormal?: Point3 };
   flip(flipDirection: { flipHorizontal?: boolean; flipVertical?: boolean }): void;
   getRotation(): number;
   setRotation(rotation: number): void;
+  worldToCanvas(world: Point3): Point2;
   render(): void;
 };
 
@@ -1014,6 +1210,54 @@ export function setPaneSliceIndex(pane: CinePane, index: number): void {
   if (delta !== 0) viewport.scroll(delta);
 }
 
+export function worldToPaneCanvas(
+  pane: CinePane,
+  world: [number, number, number]
+): [number, number] | null {
+  const viewport = _getMprViewport(pane);
+  if (!viewport) return null;
+  try {
+    const point = viewport.worldToCanvas(world as Point3);
+    return [Number(point[0]), Number(point[1])];
+  } catch {
+    return null;
+  }
+}
+
+// Project a world-space marker only while its point is near the pane currently on
+// screen. worldToCanvas alone projects points from every depth onto the active plane,
+// which made pinned notes appear to follow users through the entire scan. Tolerance is
+// expressed in slices so anisotropic CTs remain forgiving without a fixed-mm guess.
+export function worldToVisiblePaneCanvas(
+  pane: CinePane,
+  world: [number, number, number],
+  toleranceSlices = 1.25
+): [number, number] | null {
+  const viewport = _getMprViewport(pane);
+  if (!viewport) return null;
+  try {
+    const camera = viewport.getCamera();
+    const focalPoint = camera.focalPoint;
+    const normal = camera.viewPlaneNormal;
+    if (!focalPoint || !normal) return null;
+    const distanceMm = Math.abs(
+      (world[0] - focalPoint[0]) * normal[0]
+      + (world[1] - focalPoint[1]) * normal[1]
+      + (world[2] - focalPoint[2]) * normal[2]
+    );
+    const volume = _currentCtVolumeId ? cache.getVolume(_currentCtVolumeId) : undefined;
+    const measuredSpacing = volume
+      ? csCoreUtils.getSpacingInNormalDirection(volume, normal)
+      : 1;
+    const sliceSpacing = Number.isFinite(measuredSpacing) && measuredSpacing > 0 ? measuredSpacing : 1;
+    const toleranceMm = Math.max(2, sliceSpacing * Math.max(0, toleranceSlices));
+    if (!Number.isFinite(distanceMm) || distanceMm > toleranceMm) return null;
+    return worldToPaneCanvas(pane, world);
+  } catch {
+    return null;
+  }
+}
+
 // Fires `cb` once immediately per pane (so the caller has an initial reading) and again
 // on every CAMERA_MODIFIED where the slice index actually changed — pan/zoom/rotate also
 // fire that event, so each pane's last-seen index is compared to avoid spamming the
@@ -1064,6 +1308,7 @@ export function subscribeToMeasurementChanges(
 ): () => void {
   const names = MEASUREMENT_TOOL_NAMES as readonly string[];
   const make = (kind: MeasurementChangeKind) => (evt: Event) => {
+    if (_remoteMeasurementEventDepth > 0) return;
     const a = (evt as CustomEvent).detail?.annotation;
     if (!a?.annotationUID || !names.includes(a?.metadata?.toolName)) return;
     cb(kind, toSummary(a));
@@ -1077,6 +1322,86 @@ export function subscribeToMeasurementChanges(
   return () => {
     for (const [name, handler] of pairs) eventTarget.removeEventListener(name, handler);
   };
+}
+
+export type SharedCamera = {
+  focalPoint?: number[];
+  position?: number[];
+  viewUp?: number[];
+  viewPlaneNormal?: number[];
+  parallelScale?: number;
+  flipHorizontal?: boolean;
+  flipVertical?: boolean;
+};
+
+export type SharedMprView = {
+  cameras: Partial<Record<CinePane, SharedCamera>>;
+  crosshair: [number, number, number] | null;
+};
+
+function cameraForShare(camera: any): SharedCamera {
+  const copyVector = (value: unknown) => Array.isArray(value) || ArrayBuffer.isView(value)
+    ? Array.from(value as ArrayLike<number>, Number)
+    : undefined;
+  return {
+    focalPoint: copyVector(camera?.focalPoint),
+    position: copyVector(camera?.position),
+    viewUp: copyVector(camera?.viewUp),
+    viewPlaneNormal: copyVector(camera?.viewPlaneNormal),
+    parallelScale: Number.isFinite(camera?.parallelScale) ? Number(camera.parallelScale) : undefined,
+    flipHorizontal: Boolean(camera?.flipHorizontal),
+    flipVertical: Boolean(camera?.flipVertical),
+  };
+}
+
+export function getSharedMprView(): SharedMprView | null {
+  const engine = currentRenderingEngine;
+  if (!engine) return null;
+  const cameras: SharedMprView["cameras"] = {};
+  for (const pane of Object.keys(CINE_VIEWPORT_BY_PANE) as CinePane[]) {
+    try {
+      cameras[pane] = cameraForShare(engine.getViewport(CINE_VIEWPORT_BY_PANE[pane]).getCamera());
+    } catch {
+      /* viewport not ready */
+    }
+  }
+  return { cameras, crosshair: getCrosshairMm() };
+}
+
+export function applySharedMprView(shared: SharedMprView): void {
+  const engine = currentRenderingEngine;
+  if (!engine) return;
+  for (const pane of Object.keys(shared.cameras) as CinePane[]) {
+    const camera = shared.cameras[pane];
+    if (!camera) continue;
+    try {
+      engine.getViewport(CINE_VIEWPORT_BY_PANE[pane]).setCamera(camera as never);
+    } catch {
+      /* viewport may have been replaced during reconnect */
+    }
+  }
+  if (shared.crosshair) moveCornerstoneCrosshairToMm(shared.crosshair);
+  engine.render();
+}
+
+export function subscribeToMprViewChanges(cb: (view: SharedMprView) => void): () => void {
+  const engine = currentRenderingEngine;
+  if (!engine) return () => undefined;
+  const cleanups: Array<() => void> = [];
+  for (const viewportId of Object.values(CINE_VIEWPORT_BY_PANE)) {
+    try {
+      const viewport = engine.getViewport(viewportId);
+      const handler = () => {
+        const view = getSharedMprView();
+        if (view) cb(view);
+      };
+      viewport.element.addEventListener(Enums.Events.CAMERA_MODIFIED, handler);
+      cleanups.push(() => viewport.element.removeEventListener(Enums.Events.CAMERA_MODIFIED, handler));
+    } catch {
+      /* viewport not ready */
+    }
+  }
+  return () => cleanups.forEach((cleanup) => cleanup());
 }
 
 // ---------------------------------------------------------------------------

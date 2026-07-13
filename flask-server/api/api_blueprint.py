@@ -1,9 +1,9 @@
-from flask import Blueprint, send_file, make_response, request, jsonify, Response
+from flask import Blueprint, current_app, send_file, make_response, request, jsonify, Response
 from werkzeug.utils import secure_filename
 from services.nifti_processor import NiftiProcessor
 from services.session_manager import SessionManager, generate_uuid
 from services.auto_segmentor import run_auto_segmentation, cancel_all_inference
-from services.mesh_generation import generate_mesh_manifest, generate_organ_glb_bytes
+from services.mesh_generation import ensure_case_meshes, safe_filename
 from services.inference_job_queue import InferenceJobQueue
 from services.intent_parser import parse_intent
 from services.ollama_client import (
@@ -12,7 +12,6 @@ from services.ollama_client import (
     chat_json,
     list_ollama_models,
 )
-from services.segmentation_metrics import calculate_session_metrics
 from models.application_session import ApplicationSession
 from models.combined_labels import CombinedLabels
 from models.base import db
@@ -30,6 +29,7 @@ from reportlab.lib.units import cm
 from sqlalchemy.orm import aliased
 import os
 import io
+import re
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -217,31 +217,47 @@ def get_image_preview(clabel_id):
 def get_mesh_manifest(case_id):
     if not _is_safe_id(case_id):
         return jsonify({"error": "Invalid id"}), 400
-    manifest_path = os.path.join(Constants.MESH_PATH, get_panTS_id(secure_filename(case_id)), "manifest.json")
 
-    if not os.path.exists(manifest_path):
-        return jsonify({"error": f"File not found: {manifest_path} "}), 404
+    try:
+        display_id = get_panTS_id(secure_filename(case_id))
+    except ValueError:
+        return jsonify({"error": "Case id must be numeric"}), 400
+    if not Constants.PANTS_PATH:
+        current_app.logger.error("PANTS_PATH is not configured; cannot prepare case meshes")
+        return jsonify({"error": "3D segmentation storage is not configured"}), 503
 
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        manifest = json.load(f)
+    label_path = os.path.join(
+        Constants.PANTS_PATH,
+        "mask_only",
+        display_id,
+        Constants.COMBINED_LABELS_NIFTI_FILENAME,
+    )
+    try:
+        manifest_path = ensure_case_meshes(display_id, label_path, Constants.MESH_PATH)
+        with manifest_path.open("r", encoding="utf-8") as stream:
+            manifest = json.load(stream)
+    except FileNotFoundError:
+        return jsonify({"error": "Segmentation not found for this case"}), 404
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+        current_app.logger.exception("Mesh generation failed for case %s", display_id)
+        return jsonify({"error": "Could not prepare 3D segmentation"}), 500
+
+    # Cached manifests may have been built behind another host or base path.
+    # Emit request-local URLs so browser always fetches GLBs from this deployment.
+    for organ in manifest.get("organs", []):
+        filename = f"{safe_filename(str(organ.get('key', '')))}.glb"
+        organ["url"] = _absolute_api_url(f"/cases/{display_id}/render_only/{filename}")
 
     return jsonify(manifest)
 
 @api_blueprint.route("/cases/<display_id>/render_only/<filename>")
 def get_mesh_file(display_id, filename):
+    if not re.fullmatch(r"PanTS_\d{8}", display_id) or not re.fullmatch(r"[a-z0-9_-]+\.glb", filename):
+        return jsonify({"error": "Invalid mesh path"}), 400
     mesh_path = os.path.join(Constants.MESH_PATH, display_id, filename)
-    try:
-        response = send_file(
-            mesh_path,
-            mimetype="model/gltf-binary",
-            conditional=False,
-        )
-
-    except Exception as e:
-        return jsonify({"error": f"Error generating GLB: {str(e)}"}), 500
-        
-
-    return response
+    if not os.path.isfile(mesh_path):
+        return jsonify({"error": "Mesh not found"}), 404
+    return send_file(mesh_path, mimetype="model/gltf-binary", conditional=False)
 
 @api_blueprint.route('/get-label-colormap/<clabel_id>', methods=['GET'])
 def get_label_colormap(clabel_id):
@@ -1873,6 +1889,11 @@ def _ai_load_metrics(case_id, supplied_metrics):
                 result = get_mask_data_internal(identifier)
                 source = "server_mask_data"
             else:
+                # Optional session metric helper isn't shipped in every deployment.
+                # Import lazily so its absence doesn't prevent the entire Flask app
+                # (including Live Rooms) from starting; this branch already falls
+                # back to frontend-supplied metrics on any error below.
+                from services.segmentation_metrics import calculate_session_metrics
                 result = calculate_session_metrics(
                     identifier,
                     Constants.SESSIONS_DIR_NAME,

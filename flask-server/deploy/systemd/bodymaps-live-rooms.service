@@ -1,0 +1,19 @@
+[Unit]
+Description=BodyMaps Live Rooms WebSocket Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=visitor
+Group=visitor
+WorkingDirectory=/home/visitor/PanTS-Viewer/flask-server
+ExecStart=/home/visitor/PanTS-Viewer/flask-server/.venv/bin/python live_rooms_ws.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+

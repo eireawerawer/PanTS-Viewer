@@ -16,19 +16,30 @@ type SegmentationMeshViewerProps = {
 };
 
 
-export async function fetchMeshManifest(caseId: string): Promise<MeshManifest> {
+async function fetchMeshManifest(caseId: string): Promise<MeshManifest> {
   const res = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/cases/${caseId}/mesh-manifest`);
 
   if (!res.ok) {
     throw new Error(`Failed to fetch mesh manifest: ${res.status}`);
   }
 
-  return res.json();
+  const manifest: unknown = await res.json();
+  if (
+    !manifest
+    || typeof manifest !== "object"
+    || !Array.isArray((manifest as Partial<MeshManifest>).organs)
+    || !Array.isArray((manifest as Partial<MeshManifest>).center)
+    || !(manifest as Partial<MeshManifest>).bounds
+  ) {
+    throw new Error("Mesh manifest has an invalid shape");
+  }
+  return manifest as MeshManifest;
 }
 
 export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm }: SegmentationMeshViewerProps) {
   const [manifest, setManifest] = useState<MeshManifest | null>(null);
   const [loaded, setLoaded] = useState<Record<number, boolean>>({});
+  const [unavailable, setUnavailable] = useState(false);
 
   const crosshairPosition = useMemo(() => {
     if (!manifest || !crosshairMm) return null;
@@ -41,6 +52,9 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
 
   useEffect(() => {
     let alive = true;
+    setManifest(null);
+    setLoaded({});
+    setUnavailable(false);
 
     fetchMeshManifest(caseId)
       .then((data) => {
@@ -56,8 +70,8 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
 
         setLoaded(initialLoaded);
       })
-      .catch((err) => {
-        console.error(err);
+      .catch(() => {
+        if (alive) setUnavailable(true);
       });
 
     return () => {
@@ -67,6 +81,9 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
 
   const organs = useMemo(() => manifest?.organs ?? [], [manifest]);
 
+  if (unavailable) {
+    return <div>3D segmentation unavailable</div>;
+  }
   if (!manifest || loading || !checkState || checkState.length === 0) {
     return <div>Loading 3D segmentation...</div>;
   }
