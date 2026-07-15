@@ -56,9 +56,23 @@ import threading
 from .path_safety import is_safe_id as _is_safe_id
 
 
+def _metadata_xlsx_path():
+    # metadata.xlsx ships either at the root of PANTS_PATH or under data/
+    # depending on the checkout/deployment; use whichever exists.
+    for candidate in (
+        os.path.join(Constants.PANTS_PATH, "metadata.xlsx"),
+        os.path.join(Constants.PANTS_PATH, "data", "metadata.xlsx"),
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def _load_metadata_cache():
     try:
-        xlsx_path = os.path.join(Constants.PANTS_PATH, "metadata.xlsx")
+        xlsx_path = _metadata_xlsx_path()
+        if not xlsx_path:
+            return {}
         df = pd.read_excel(xlsx_path, engine="openpyxl")
         cache = {}
         for _, row in df.iterrows():
@@ -74,7 +88,32 @@ def _load_metadata_cache():
 
 _METADATA_CACHE = _load_metadata_cache()
 
-progress_tracker = {}  # {session_id: (start_time, expected_total_seconds)}
+# Lazy cache of {PanTS id: (contrast, study_detail)} for /get-report-data.
+# The old code re-loaded the entire ~10k-row workbook (non-read-only!) on
+# every request, which took seconds; load it once and index it instead.
+_REPORT_STUDY_META = None
+
+
+def _report_study_meta(pid):
+    global _REPORT_STUDY_META
+    if _REPORT_STUDY_META is None:
+        cache = {}
+        try:
+            xlsx_path = _metadata_xlsx_path()
+            if xlsx_path:
+                wb = load_workbook(xlsx_path, read_only=True, data_only=True)
+                sheet = wb["PanTS_metadata"] if "PanTS_metadata" in wb.sheetnames else wb.active
+                for row in sheet.iter_rows(min_row=2, values_only=True):
+                    if row and row[0]:
+                        cache[str(row[0])] = (
+                            row[3] if len(row) > 3 and row[3] is not None else "",
+                            row[8] if len(row) > 8 and row[8] is not None else "",
+                        )
+                wb.close()
+        except Exception as e:
+            print(f"[report meta] metadata load failed: {e}")
+        _REPORT_STUDY_META = cache
+    return _REPORT_STUDY_META.get(pid, ("", ""))
 
 INFERENCE_QUEUE_DIR = os.getenv(
     "INFERENCE_QUEUE_DIR",
@@ -169,13 +208,9 @@ def proxy_image():
 
 
 
-from flask import request, jsonify
 import numpy as np
-import nibabel as nib
 from scipy.ndimage import distance_transform_edt, label
 from collections import defaultdict
-from constants import Constants
-import os
 from openpyxl import load_workbook
 
 
@@ -229,7 +264,11 @@ def get_mesh_manifest(case_id):
 
 @api_blueprint.route("/cases/<display_id>/render_only/<filename>")
 def get_mesh_file(display_id, filename):
-    mesh_path = os.path.join(Constants.MESH_PATH, display_id, filename)
+    # Both segments come straight from the URL and are joined into a path;
+    # apply the same id-guard + secure_filename barrier as the other routes.
+    if not _is_safe_id(display_id):
+        return jsonify({"error": "Invalid id"}), 400
+    mesh_path = os.path.join(Constants.MESH_PATH, secure_filename(display_id), secure_filename(filename))
     try:
         response = send_file(
             mesh_path,
@@ -245,7 +284,10 @@ def get_mesh_file(display_id, filename):
 
 @api_blueprint.route('/get-label-colormap/<clabel_id>', methods=['GET'])
 def get_label_colormap(clabel_id):
-    
+    # int() below raises on non-numeric input; reject it with a 400 instead
+    # of an unhandled 500 (also makes the id safe to join into the path).
+    if not str(clabel_id).isdigit():
+        return jsonify({"error": "Invalid id"}), 400
     clabel_path = os.path.join(Constants.PANTS_PATH, "mask_only", get_panTS_id(int(clabel_id)),  'combined_labels.nii.gz')
 
     try:
@@ -369,8 +411,13 @@ def get_main_nifti(clabel_id):
 
 @api_blueprint.route('/get-report/<id>', methods=['GET'])
 def get_report(id):
-    temp_pdf_path = f"{PDF_DIR}/temp.pdf"
-    output_pdf_path = f"{PDF_DIR}/final.pdf"
+    if not _is_safe_id(str(id)):
+        return jsonify({"error": "Invalid id"}), 400
+    # Per-request filenames: with gunicorn's 8 threads, two simultaneous report
+    # requests sharing temp.pdf/final.pdf would corrupt each other's output.
+    request_token = uuid.uuid4().hex
+    temp_pdf_path = f"{PDF_DIR}/temp_{request_token}.pdf"
+    output_pdf_path = f"{PDF_DIR}/final_{request_token}.pdf"
     try:
         try:
             organ_metrics = get_mask_data_internal(id)
@@ -419,10 +466,16 @@ def get_report(id):
  
     except Exception as e:
         return jsonify({"error": f"Unhandled error: {str(e)}"}), 500
- 
+
     finally:
-        if os.path.exists(temp_pdf_path):
-            os.remove(temp_pdf_path)
+        # send_file has already opened the output PDF by the time this runs, so
+        # unlinking here is safe (POSIX) and keeps per-request files from piling up.
+        for path in (temp_pdf_path, output_pdf_path):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
  
  
 @api_blueprint.route('/explain-impressions', methods=['POST'])
@@ -458,9 +511,7 @@ def get_report_data(id):
         return jsonify({"error": "Invalid id parameter"}), 400
     case_id = int(id)
     try:
-        if id is None or not str(id).isdigit():
-            return jsonify({"error": "Invalid id parameter"}), 400
-        id = str(int(id))
+        id = str(case_id)
         # ── Try RadGPT structured report from metadata.xlsx first ─────────────
         # This uses Zongwei Zhou's own RadGPT model output — more accurate
         # than Ollama-generated impressions. Falls back to Ollama if not found.
@@ -468,8 +519,8 @@ def get_report_data(id):
         radgpt_impression = None
         try:
             import openpyxl, re
-            metadata_path = os.path.join(Constants.PANTS_PATH, "data", "metadata.xlsx")
-            if os.path.exists(metadata_path):
+            metadata_path = _metadata_xlsx_path()
+            if metadata_path:
                 wb = openpyxl.load_workbook(metadata_path, read_only=True, data_only=True)
                 ws = wb.active
                 headers = [cell.value for cell in next(ws.iter_rows())]
@@ -518,15 +569,7 @@ def get_report_data(id):
         age = meta.get("age", "N/A")
         sex = meta.get("sex", "N/A")
  
-        wb = load_workbook(os.path.join(Constants.PANTS_PATH, "data", "metadata.xlsx"))
-        sheet = wb["PanTS_metadata"]
-        contrast = ""
-        study_detail = ""
-        for row in sheet.iter_rows(values_only=True):
-            if row[0] == pid:
-                contrast = row[3]
-                study_detail = row[8]
-                break
+        contrast, study_detail = _report_study_meta(pid)
  
         # If local files don't exist, download from HuggingFace
         if not os.path.exists(ct_path) or not os.path.exists(mask_path):
@@ -538,7 +581,7 @@ def get_report_data(id):
                 hf_ct = f"{hf_base}/image_only/{pants_id}/ct.nii.gz?download=true"
                 ct_path = os.path.join(tmp_dir, "ct.nii.gz")
                 print(f"[HuggingFace] Downloading CT for case {id}...")
-                r = requests.get(hf_ct, stream=True, verify=False)
+                r = requests.get(hf_ct, stream=True, timeout=60)
                 with open(ct_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
@@ -546,7 +589,7 @@ def get_report_data(id):
                 hf_mask = f"{hf_base}/mask_only/{pants_id}/combined_labels.nii.gz?download=true"
                 mask_path = os.path.join(tmp_dir, "combined_labels.nii.gz")
                 print(f"[HuggingFace] Downloading mask for case {id}...")
-                r = requests.get(hf_mask, stream=True, verify=False)
+                r = requests.get(hf_mask, stream=True, timeout=60)
                 with open(mask_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
@@ -897,6 +940,17 @@ def _get_inference_job(session_id):
     return None
 
 
+def _uploaded_file_candidate(session_id, uploaded_filename):
+    """Resolve uploaded_filename inside its session's inference dir, rejecting
+    values that would escape it ("../", absolute paths). Legitimate values are
+    session-relative, e.g. "BDMAP_00000042/ct.nii.gz" from /finalize-upload."""
+    base = os.path.abspath(os.path.join(Constants.SESSIONS_DIR_NAME, "inference", session_id))
+    candidate = os.path.abspath(os.path.join(base, uploaded_filename))
+    if not candidate.startswith(base + os.sep):
+        return None
+    return candidate if os.path.exists(candidate) else None
+
+
 def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_path=None):
     if not _is_safe_id(session_id):
         return jsonify({"error": "Invalid session ID"}), 400
@@ -909,7 +963,10 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
             return jsonify({"error": "ShapeKit requires INPUT_SERVER_PATH pointing to a segmentation output directory"}), 400
         input_path = server_input_path
     elif ct_file is not None:
-        input_path = os.path.join(session_path, ct_file.filename)
+        # The multipart filename is client-controlled and may contain path
+        # separators; keep only a sanitized basename inside the session dir.
+        safe_name = secure_filename(os.path.basename(ct_file.filename or "")) or "ct.nii.gz"
+        input_path = os.path.join(session_path, safe_name)
         ct_file.save(input_path)
     elif server_input_path:
         if not os.path.exists(server_input_path):
@@ -969,11 +1026,6 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
                             abs_path = os.path.join(dirpath, filename)
                             arcname = os.path.relpath(abs_path, output_mask_dir)
                             zipf.write(abs_path, arcname=arcname)
-
-            if session_id in progress_tracker:
-                start_time, expected_time, _ = progress_tracker[session_id]
-                progress_tracker[session_id] = (start_time, expected_time, True)
-                progress_tracker.pop(session_id, None)
 
             _set_inference_job(session_id, status="completed", error=None,
                                zip_path=zip_path, output_mask_dir=output_mask_dir)
@@ -1036,6 +1088,10 @@ def run_epai_inference():
         return None
 
     session_id = _pick_text("session_id", "SESSION_ID", "sessionId") or str(uuid.uuid4())
+    # session_id is joined into filesystem paths below (and again inside
+    # _start_auto_segmentation) - reject traversal payloads up front.
+    if not _is_safe_id(session_id):
+        return jsonify({"error": "Invalid session ID"}), 400
     model_name = _pick_text("model_name", "model", "MODEL_NAME") or "ePAI"
     uploaded_filename = _pick_text("uploaded_filename", "output_filename", "filename")
     input_server_path = _pick_text("INPUT_SERVER_PATH", "input_server_path", "server_path", "path")
@@ -1060,8 +1116,8 @@ def run_epai_inference():
             return jsonify({"error": f"Source reconstruction session {source_reconstruction_session_id} not found or not completed"}), 404
 
     if not input_server_path and uploaded_filename:
-        candidate = os.path.join(Constants.SESSIONS_DIR_NAME, "inference", session_id, uploaded_filename)
-        if os.path.exists(candidate):
+        candidate = _uploaded_file_candidate(session_id, uploaded_filename)
+        if candidate:
             input_server_path = candidate
 
     if not input_server_path and ct_file is None:
@@ -1161,6 +1217,8 @@ def create_pull_inference_job():
         return None
 
     session_id = _pick_text("session_id", "SESSION_ID", "sessionId") or str(uuid.uuid4())
+    if not _is_safe_id(session_id):
+        return jsonify({"error": "Invalid session ID"}), 400
     input_server_path = _pick_text("input_server_path", "INPUT_SERVER_PATH", "path")
     uploaded_filename = _pick_text("uploaded_filename", "output_filename", "filename")
     model = _pick_text("model", "MODEL_NAME") or "ePAI"
@@ -1173,15 +1231,14 @@ def create_pull_inference_job():
     )
 
     if not input_server_path and uploaded_filename:
-        candidate = os.path.join(Constants.SESSIONS_DIR_NAME, "inference", session_id, uploaded_filename)
-        if os.path.exists(candidate):
+        candidate = _uploaded_file_candidate(session_id, uploaded_filename)
+        if candidate:
             input_server_path = candidate
 
     if ct_file is not None and not input_server_path:
         target_dir = os.path.join(Constants.SESSIONS_DIR_NAME, "inference", session_id, "input")
         os.makedirs(target_dir, exist_ok=True)
-        original_name = os.path.basename(ct_file.filename or "ct.nii.gz")
-        target_name = original_name if original_name else "ct.nii.gz"
+        target_name = secure_filename(os.path.basename(ct_file.filename or "")) or "ct.nii.gz"
         input_server_path = os.path.join(target_dir, target_name)
         ct_file.save(input_server_path)
 
@@ -1485,6 +1542,9 @@ def finalize_upload():
 
         if requested_bdmap_id and requested_bdmap_id.strip():
             bdmap_id = requested_bdmap_id.strip()
+            # bdmap_id becomes a directory name below - same guard as session ids.
+            if not _is_safe_id(bdmap_id):
+                return jsonify({"error": "Invalid bdmap_id"}), 400
             if not bdmap_id.startswith("BDMAP_"):
                 bdmap_id = f"BDMAP_{bdmap_id}"
         else:
@@ -1507,7 +1567,8 @@ def finalize_upload():
         elif lower_name.endswith(".nii"):
             target_filename = "ct.nii"
         else:
-            target_filename = normalized_output
+            # Client-controlled name joined into a path below - sanitize it.
+            target_filename = secure_filename(normalized_output) or "inference_input.gz"
 
         target_dir = base_path
         if target_filename.lower().endswith(".nii") or target_filename.lower().endswith(".nii.gz"):
@@ -1517,7 +1578,7 @@ def finalize_upload():
         final_path = os.path.join(target_dir, target_filename)
 
         # Combine chunks
-        temp_folder = os.path.join("/tmp/uploads", session_id)
+        temp_folder = os.path.join(CHUNK_DIR, session_id)
         with open(final_path, "wb") as out_file:
             for i in range(total_chunks):
                 chunk_path = os.path.join(temp_folder, f"chunk-{i}")
@@ -1547,13 +1608,17 @@ def upload_dicom_slice():
         session_id = request.form.get("session_id")
         if not session_id:
             return jsonify({"error": "session_id required"}), 400
+        # session_id and the slice filename are both joined into paths below.
+        if not _is_safe_id(session_id):
+            return jsonify({"error": "Invalid session ID"}), 400
         slice_file = request.files.get("file")
         if not slice_file:
             return jsonify({"error": "file required"}), 400
 
-        dicom_dir = os.path.join("/tmp/uploads", session_id, "dicom")
+        dicom_dir = os.path.join(CHUNK_DIR, session_id, "dicom")
         os.makedirs(dicom_dir, exist_ok=True)
-        save_path = os.path.join(dicom_dir, slice_file.filename or f"{uuid.uuid4()}.dcm")
+        safe_name = secure_filename(slice_file.filename or "") or f"{uuid.uuid4()}.dcm"
+        save_path = os.path.join(dicom_dir, safe_name)
         slice_file.save(save_path)
         return jsonify({"status": "ok", "filename": os.path.basename(save_path)})
     except Exception as e:
@@ -1570,8 +1635,12 @@ def finalize_dicom():
         session_id = request.form.get("session_id")
         if not session_id:
             return jsonify({"error": "session_id required"}), 400
+        # session_id is joined into paths below AND into the shutil.rmtree
+        # cleanup - a traversal payload here would delete outside /tmp/uploads.
+        if not _is_safe_id(session_id):
+            return jsonify({"error": "Invalid session ID"}), 400
 
-        dicom_dir = os.path.join("/tmp/uploads", session_id, "dicom")
+        dicom_dir = os.path.join(CHUNK_DIR, session_id, "dicom")
         if not os.path.isdir(dicom_dir):
             return jsonify({"error": "No DICOM slices found for this session"}), 400
 
@@ -1603,7 +1672,7 @@ def finalize_dicom():
 
         # Clean up temp DICOM slices
         import shutil
-        shutil.rmtree(os.path.join("/tmp/uploads", session_id), ignore_errors=True)
+        shutil.rmtree(os.path.join(CHUNK_DIR, session_id), ignore_errors=True)
 
         uploaded_filename = os.path.relpath(final_path, base_path)
         return jsonify({
@@ -1622,7 +1691,8 @@ def finalize_dicom():
 @api_blueprint.route('/cancel-inference', methods=['POST'])
 def cancel_inference():
     cancel_all_inference()
-    for session_id, job in inference_jobs.items():
+    # Snapshot: _set_inference_job mutates the dict while we iterate.
+    for session_id, job in list(inference_jobs.items()):
         if job.get('status') == 'running':
             _set_inference_job(session_id, status='failed', error='Cancelled by user')
     return jsonify({"message": "Inference cancelled"}), 200
@@ -3391,8 +3461,6 @@ def list_edited_masks(case_id):
 # Additive and read-only against the dataset — loads image_only/ and mask_only/
 # but writes nothing there. Heavy numeric work lives in services/advanced_analysis.
 # ---------------------------------------------------------------------------
-
-import threading
 
 # Each of these requests loads a CT volume into worker RAM, so unbounded
 # concurrency is an OOM waiting to happen. Cap in-flight analyses per process
