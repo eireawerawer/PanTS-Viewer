@@ -35,7 +35,8 @@ def create_app():
 
     logging.getLogger('werkzeug').addFilter(FilterProgressRequests())
 
-    CORS(app)
+    allowed_origins = [o.strip() for o in os.environ.get('ALLOWED_ORIGINS', 'http://localhost:5173').split(',') if o.strip()]
+    CORS(app, resources={r"/api/*": {"origins": allowed_origins}})
 
     return app
 
@@ -66,11 +67,12 @@ def find_watch_files():
 if __name__ == "__main__":
     use_ssl = os.environ.get("USE_SSL", "false").lower() == "true"
     ssl_context = ("../certs/localhost-cert.pem", "../certs/localhost-key.pem") if use_ssl else None
+    debug_enabled = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
     run_simple(
-        hostname="0.0.0.0",
+        hostname=os.environ.get("FLASK_HOST", "127.0.0.1"),
         port=5001,
         application=app,
-        use_debugger=True,
+        use_debugger=debug_enabled,
         use_reloader=True,
         extra_files=find_watch_files(),
         ssl_context=ssl_context
