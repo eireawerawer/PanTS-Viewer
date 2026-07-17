@@ -19,6 +19,10 @@ class Constants:
     # api_blueprint variables
     BASE_PATH = os.environ.get('BASE_PATH', '/')
     PANTS_PATH = os.environ.get('PANTS_PATH')
+    # CancerVerse: CT-only cases (no segmentations/meshes), a second dataset browsable
+    # alongside PanTS. Points at the folder that directly contains CV_######## case
+    # dirs (mirrors how PANTS_PATH points at the folder containing image_only/).
+    CANCERVERSE_PATH = os.environ.get('CANCERVERSE_PATH')
     PERMISSIONS_DIR = os.environ.get('PERMISSIONS_DIR', "/home/visitor/data")
     MESH_PATH = PERMISSIONS_DIR + "/render_only"
     MAIN_NIFTI_FORM_NAME = 'MAIN_NIFTI'

@@ -7,7 +7,9 @@ import {
 	closestColorIndex,
 	deepIsEqual,
 	filenameToName,
+	getCaseDisplay,
 	getPanTSId,
+	isCancerVerseId,
 	prettify_segmentation_category,
 	roundDigits,
 } from "./utils";
@@ -26,6 +28,19 @@ describe("case-ID formatting", () => {
 	it("cleanName strips the prefix and leading zeros", () => {
 		expect(cleanName("PanTS_00008854")).toBe("8854");
 		expect(cleanName("PanTS_00000001")).toBe("1");
+	});
+
+	it("isCancerVerseId recognizes CV-prefixed ids, not plain PanTS numbers", () => {
+		expect(isCancerVerseId("CV_00000012")).toBe(true);
+		expect(isCancerVerseId("cv12")).toBe(true);
+		expect(isCancerVerseId("17")).toBe(false);
+		expect(isCancerVerseId("PanTS_00000017")).toBe(false);
+	});
+
+	it("getCaseDisplay keeps PanTS's existing label and gives CancerVerse its real id, no offset", () => {
+		expect(getCaseDisplay("17")).toEqual({ dataset: "PanTS", label: "PanTS_00000017" });
+		expect(getCaseDisplay("CV_00000012")).toEqual({ dataset: "CancerVerse", label: "CV_00000012" });
+		expect(getCaseDisplay("cv12")).toEqual({ dataset: "CancerVerse", label: "CV_00000012" });
 	});
 });
 

@@ -8,3 +8,7 @@ tmp/*
 downloaded.nii.gz
 PanTS/data/pdf/
 .DS_Store
+
+*.nii.gz
+CancerVerse/CancerVerse_dataset_metadata.csv
+CancerVerse/~/.cache/huggingface/.agent_harnesses.json

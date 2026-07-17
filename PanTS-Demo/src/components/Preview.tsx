@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { API_BASE } from "../helpers/constants";
+import { getCaseDisplay } from "../helpers/utils";
 import { prefetchViewer } from "../helpers/prefetchViewer";
 import type { PreviewType } from "../types";
 
 type Props = {
-	id: number;
+	id: string;
 	previewMetadata: PreviewType;
 	saved?: boolean;
 	onToggleSave?: () => void;
@@ -35,14 +36,16 @@ export default function Preview({
 
 	if (!previewMetadata) return null;
 
-	const caseIdStr = `PanTS_${id.toString().padStart(8, "0")}`;
+	const { dataset, label: caseIdStr } = getCaseDisplay(id);
 	// HuggingFace fallback, routed through the backend's same-origin proxy. A *direct*
 	// cross-origin image is blocked by the viewer's COEP: require-corp header (which is
 	// why thumbnails went missing); the proxy keeps it same-origin, matching home.html.
+	// CancerVerse has no HuggingFace profile-image mirror, so it skips straight to the
+	// "both sources failed" placeholder if the local endpoint 404s.
 	const hfProfileUrl = `https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/profile_only/${caseIdStr}/profile.jpg`;
 	const proxyThumbUrl = `${API_BASE}/api/proxy-image?url=${encodeURIComponent(hfProfileUrl)}`;
 	const handleImgError = () => {
-		if (thumbUrl !== proxyThumbUrl) {
+		if (dataset !== "CancerVerse" && thumbUrl !== proxyThumbUrl) {
 			setThumbUrl(proxyThumbUrl); // local failed — retry via the same-origin HF proxy
 		} else {
 			setImgError(true); // both sources failed

@@ -19,6 +19,10 @@ BASE_PATH=/
 
 PANTS_PATH=/folder/where/PanTS
 
+# Enables Cancerverse
+# Points at the folder containing CV_######## case dirs directly.
+CANCERVERSE_PATH=/folder/where/CancerVerse/CancerVerse
+
 USE_SSL=false
 ```
 
@@ -67,6 +71,7 @@ git checkout main
 git pull
 ```
 If `git pull` (or the checkout) refuses because of "local changes would be overwritten," someone edited files directly on the server. Do **not** force past it. Run `git status` to see what changed, then discard each file with `git checkout -- <file>` (or ask the maintainer) before pulling again. The server should never carry local edits.
+
 
 #### 2. Rebuild the frontend and refresh backend dependencies
 ```

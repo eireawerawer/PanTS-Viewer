@@ -195,14 +195,37 @@ os.makedirs(PDF_DIR, exist_ok=True)
 def _arg(name: str, default=None):
     return request.args.get(name, default)
 
+def _cancerverse_preview_entry(formatted_id):
+    """sex/age/tumor for a CancerVerse card, from the merged DF (CancerVerse has no
+    positional metadata.xlsx cache like PanTS's _METADATA_CACHE, so this looks the
+    row up directly by its exact case-id string -- safe/unique since CV_######## ids
+    don't collide with PanTS's)."""
+    match = DF[DF.get("__case_str", "") == formatted_id]
+    if not len(match):
+        return {"sex": "", "age": "", "tumor": 0}
+    row = match.iloc[0]
+    tumor = row.get("__tumor01")
+    return {
+        "sex": row.get("__sex") or "",
+        "age": row.get("__age") if pd.notna(row.get("__age")) else "",
+        "tumor": int(tumor) if pd.notna(tumor) else 0,
+    }
+
+
 @api_blueprint.route('/get_preview/<clabel_ids>', methods=['GET'])
 def get_preview(clabel_ids):
     clabel_ids = clabel_ids.split(",")
     res = {}
     for clabel_id in clabel_ids:
-        pid = get_panTS_id(clabel_id)
-        entry = _METADATA_CACHE.get(pid, {"sex": "", "age": "", "tumor": 0})
-        res[clabel_id] = entry
+        try:
+            dataset, formatted_id = resolve_dataset_case(clabel_id)
+        except ValueError:
+            continue
+        if dataset == "CancerVerse":
+            res[clabel_id] = _cancerverse_preview_entry(formatted_id)
+        else:
+            entry = _METADATA_CACHE.get(formatted_id, {"sex": "", "age": "", "tumor": 0})
+            res[clabel_id] = entry
     return jsonify(res)
 
 # if not preloaded
@@ -210,12 +233,19 @@ def get_preview(clabel_ids):
 def get_image_preview(clabel_id):
     if not _is_safe_id(clabel_id):
         return jsonify({"error": "Invalid id"}), 400
-    path = os.path.join(Constants.PANTS_PATH, "profile_only", get_panTS_id(secure_filename(clabel_id)), "profile.jpg")
+    try:
+        dataset, formatted_id = resolve_dataset_case(secure_filename(clabel_id))
+    except ValueError:
+        return jsonify({"error": "Invalid id"}), 400
+    if dataset == "CancerVerse":
+        # No profile/thumbnail images exist for CancerVerse cases.
+        return jsonify({"error": "No preview image for this dataset"}), 404
+    path = os.path.join(Constants.PANTS_PATH, "profile_only", formatted_id, "profile.jpg")
     if not os.path.exists(path):
         return jsonify({"error": f"File not found: {path} "}), 404
     return send_file(
         path,
-        mimetype="image/jpg",   
+        mimetype="image/jpg",
         as_attachment=False,
         download_name=f"{clabel_id}_slice.jpg"
     )
@@ -348,17 +378,28 @@ def get_mask_data():
 def get_main_nifti(clabel_id):
     if not _is_safe_id(clabel_id):
         return jsonify({"error": "Invalid id"}), 400
-    case_dir = f"{Constants.PANTS_PATH}/image_only/{get_panTS_id(secure_filename(clabel_id))}"
-    main_nifti_path = f"{case_dir}/{Constants.MAIN_NIFTI_FILENAME}"
+    try:
+        dataset, formatted_id = resolve_dataset_case(secure_filename(clabel_id))
+    except ValueError:
+        return jsonify({"error": "Invalid id"}), 400
 
-    # ?res=low → serve the precomputed low-res copy when present (much smaller/faster
-    # for big full-body scans). It lives under LOWRES_ROOT (a writable disk), NOT the
-    # read-only dataset mount. Falls back to full res if it hasn't been generated.
-    if (request.args.get('res') or '').strip().lower() == 'low':
-        low_name = Constants.MAIN_NIFTI_FILENAME.replace('.nii.gz', '_lowres.nii.gz')
-        low_path = f"{LOWRES_ROOT}/image_only/{get_panTS_id(secure_filename(clabel_id))}/{low_name}"
-        if os.path.exists(low_path):
-            main_nifti_path = low_path
+    if dataset == "CancerVerse":
+        # CT-only dataset: no image_only/ split, no low-res copy generated -- ?res=low
+        # is simply a no-op here (always full res).
+        case_dir = f"{Constants.CANCERVERSE_PATH}/{formatted_id}"
+        main_nifti_path = f"{case_dir}/{Constants.MAIN_NIFTI_FILENAME}"
+    else:
+        case_dir = f"{Constants.PANTS_PATH}/image_only/{formatted_id}"
+        main_nifti_path = f"{case_dir}/{Constants.MAIN_NIFTI_FILENAME}"
+
+        # ?res=low → serve the precomputed low-res copy when present (much smaller/faster
+        # for big full-body scans). It lives under LOWRES_ROOT (a writable disk), NOT the
+        # read-only dataset mount. Falls back to full res if it hasn't been generated.
+        if (request.args.get('res') or '').strip().lower() == 'low':
+            low_name = Constants.MAIN_NIFTI_FILENAME.replace('.nii.gz', '_lowres.nii.gz')
+            low_path = f"{LOWRES_ROOT}/image_only/{formatted_id}/{low_name}"
+            if os.path.exists(low_path):
+                main_nifti_path = low_path
 
     if os.path.exists(main_nifti_path):
         response = make_response(send_file(main_nifti_path, mimetype='application/gzip'))
@@ -1715,6 +1756,7 @@ def _facet_counts_with_unknown(df: pd.DataFrame, col_key: str, top_k: int = 6) -
         "study_type": ("study_type", str),
         "site_nat": ("site_nationality", str),
         "site_nationality": ("site_nationality", str),
+        "dataset": ("dataset", str),
     }
     if col_key not in key_to_col:
         return {"rows": [], "unknown": 0}
@@ -1791,7 +1833,7 @@ def api_facets():
 
         valid  = {
             "ct_phase","manufacturer","year","sex","tumor",
-            "model","study_type","site_nat","site_nationality"
+            "model","study_type","site_nat","site_nationality","dataset"
         }
         fields = [f for f in fields if f in valid] or ["ct_phase","manufacturer"]
         top_k  = to_int(_arg("top_k","6")) or 6
@@ -1815,6 +1857,7 @@ def api_facets():
             "study_type": {"study_type"},
             "site_nat": {"site_nat","site_nationality"},
             "site_nationality": {"site_nat","site_nationality"},
+            "dataset": {"dataset"},
         }
 
         for f in fields:

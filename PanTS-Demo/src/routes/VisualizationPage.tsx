@@ -18,6 +18,7 @@ import {
     IconClick,
     IconDownload,
     IconEye,
+    IconFileText,
     IconFlipHorizontal,
     IconGrid3x3,
     IconHome,
@@ -130,7 +131,7 @@ import {
     type SessionResult,
 } from "../helpers/readingSession";
 import { toolDisplayName, type ReportMeasurement } from "../helpers/sessionReport";
-import { filenameToName, getPanTSId } from "../helpers/utils";
+import { filenameToName, getPanTSId, isCancerVerseId } from "../helpers/utils";
 import { decodeViewerState, encodeViewerState } from "../helpers/viewerShareState";
 import { type CheckBoxData } from "../types";
 import "./VisualizationPage.css";
@@ -316,6 +317,20 @@ function VisualizationPage() {
 	const isLocal = isDicom || isLocalNifti;
 	const [dicomError, setDicomError] = useState<string | null>(null);
 
+	// CancerVerse: a real backend case (unlike isLocal), but CT-only — no
+	// segmentations/meshes exist for it. Segmentation-dependent tools stay visible but
+	// rendered faded/disabled (fadedProps below) rather than hidden or silently broken.
+	const isCancerVerse = !isLocal && isCancerVerseId(pantsCase ?? "");
+	const FADED_STYLE = { opacity: 0.4, pointerEvents: "none" as const, cursor: "not-allowed" };
+	const fadedProps = isCancerVerse
+		? { style: FADED_STYLE, title: "Not available — CancerVerse has no segmentation data", "aria-disabled": true }
+		: {};
+	// The inverse: report notes only exist for CancerVerse (free-text radiology reports
+	// from its metadata CSV) — fade the tool for every other dataset/mode.
+	const reportNotesFadedProps = !isCancerVerse
+		? { style: FADED_STYLE, title: "Not available — no report notes for this dataset", "aria-disabled": true }
+		: {};
+
 	// Where to load the volumes from. Per the maintainer's rule, dataset cases load
 	// from the lab's LOCAL endpoints (served off disk on the JHU server — much faster
 	// for big full-body scans than streaming the .nii.gz from HuggingFace). We probe
@@ -340,6 +355,14 @@ function VisualizationPage() {
 				setSegUrl(`${API_BASE}/api/session-segmentation/${sessionId}`);
 				return;
 			}
+			if (isCancerVerse) {
+				// CT-only: no masks, no HuggingFace mirror, no low-res tier generated for
+				// this dataset — always full res straight from the local backend.
+				setLocalAvailable(false);
+				setCtUrl(`${API_BASE}/api/get-main-nifti/${pantsCase}.nii.gz`);
+				setSegUrl(null);
+				return;
+			}
 			const id = pantsCase ?? "1";
 			const p = getPanTSId(id);
 			const localCt = `${API_BASE}/api/get-main-nifti/${id}.nii.gz`;
@@ -358,7 +381,7 @@ function VisualizationPage() {
 		};
 		resolveSources();
 		return () => { cancelled = true; };
-	}, [pantsCase, sessionId, isHd, isLocal]);
+	}, [pantsCase, sessionId, isHd, isLocal, isCancerVerse]);
 
 	// Flip between low-res and full-res by reloading the route — a fresh mount cleanly
 	// re-inits the Cornerstone/NiiVue contexts (re-running them in place is fragile).
@@ -436,6 +459,9 @@ function VisualizationPage() {
 	const [showMetadata, setShowMetadata] = useState(false);
 	const [caseMetadata, setCaseMetadata] = useState<Record<string, unknown> | null>(null);
 	const demographicsTriedRef = useRef(false);
+	// Free-text radiology report notes — CancerVerse-only (comes from caseMetadata.report,
+	// same /api/search row PanTS cases just don't carry that field on).
+	const [showReportNotes, setShowReportNotes] = useState(false);
 	// Measured download progress for the loading screen (from the nifti loader's real
 	// bytes-loaded/total — accurate, not a guess).
 	const [dlPct, setDlPct] = useState<number | null>(null);
@@ -494,7 +520,7 @@ function VisualizationPage() {
 	useEffect(() => { checkBoxDataRef.current = checkBoxData; }, [checkBoxData]);
 	// 3D pane rendering mode: organ meshes (dataset cases) or shaded GPU volume
 	// rendering of the CT itself (the only 3D option for local DICOM).
-	const [threeDMode, setThreeDMode] = useState<"mesh" | "volume">(isLocal ? "volume" : "mesh");
+	const [threeDMode, setThreeDMode] = useState<"mesh" | "volume">(isLocal || isCancerVerse ? "volume" : "mesh");
 	const [volumePreset, setVolumePreset] = useState<string>(VOLUME_3D_PRESETS[0].name);
 	// CT presets by default; swapped for the MR set when a local DICOM turns out to be MR.
 	const [volume3DPresets, setVolume3DPresets] = useState<readonly { name: string; label: string }[]>(VOLUME_3D_PRESETS);
@@ -774,6 +800,7 @@ function VisualizationPage() {
 			} else if (key === "m") {
 				setShowStats(false);
 				setShowMetadata(false);
+				setShowReportNotes(false);
 				setShowEditPanel(false);
 				setEditMode(null);
 				setShowMeasurePanel((v) => !v);
@@ -1020,7 +1047,9 @@ function VisualizationPage() {
 
 			if (
 				!ctUrl ||
-				!segUrl ||
+				// CancerVerse cases never get a segUrl (no masks exist) — that's expected,
+				// not a "still loading" state, so it doesn't block rendering the CT.
+				(!segUrl && !isCancerVerse) ||
 				!axial_ref.current ||
 				!sagittal_ref.current ||
 				!coronal_ref.current ||
@@ -1037,7 +1066,7 @@ function VisualizationPage() {
 				coronal_ref.current,
 				cmap,
 				ctUrl,
-				segUrl,
+				segUrl ?? undefined,
 				setLoading
 			);
 
@@ -1081,6 +1110,7 @@ function VisualizationPage() {
 		segUrl,
 		isDicom,
 		isLocalNifti,
+		isCancerVerse,
 		axial_ref,
 		sagittal_ref,
 		coronal_ref,
@@ -1262,7 +1292,7 @@ function VisualizationPage() {
 	// Group-level "something inside is active" flags, so each collapsed toolbar dropdown
 	// still visually reflects its contents' state without having to be open.
 	const viewGroupActive = hoverIdentifyEnabled || referenceLinesOn;
-	const panelsGroupActive = showOrganDetails || showStats || showMetadata || showMeasurePanel;
+	const panelsGroupActive = showOrganDetails || showStats || showMetadata || showReportNotes || showMeasurePanel;
 
 	// The Layout ▾ trigger shows the pane-layout preset's name when one is active
 	// (it's the more specific choice), otherwise the current view mode.
@@ -1574,8 +1604,9 @@ function VisualizationPage() {
 	};
 
 	const handleToggleStats = () => {
-		// The right-side slot is shared by stats / metadata / measurements / mask editing.
+		// The right-side slot is shared by stats / metadata / report notes / measurements / mask editing.
 		setShowMetadata(false);
+		setShowReportNotes(false);
 		setShowMeasurePanel(false);
 		setShowEditPanel(false);
 		setEditMode(null);
@@ -1586,10 +1617,23 @@ function VisualizationPage() {
 
 	const handleToggleMetadata = () => {
 		setShowStats(false);
+		setShowReportNotes(false);
 		setShowMeasurePanel(false);
 		setShowEditPanel(false);
 		setEditMode(null);
 		setShowMetadata((v) => !v);
+		loadPercentileContext();
+	};
+
+	// Report notes only ever has data for CancerVerse cases (see reportNotesFadedProps),
+	// but the toggle itself just reuses the same shared right-side slot + metadata fetch.
+	const handleToggleReportNotes = () => {
+		setShowStats(false);
+		setShowMetadata(false);
+		setShowMeasurePanel(false);
+		setShowEditPanel(false);
+		setEditMode(null);
+		setShowReportNotes((v) => !v);
 		loadPercentileContext();
 	};
 
@@ -1601,6 +1645,7 @@ function VisualizationPage() {
 		if (opening) {
 			setShowStats(false);
 			setShowMetadata(false);
+			setShowReportNotes(false);
 			setShowMeasurePanel(false);
 			setShowEditPanel(false);
 			setEditMode(null);
@@ -2091,7 +2136,9 @@ const aiAvailableOrgans = useMemo(() => {
 																className={`vp-flyout__item ${hoverIdentifyEnabled ? "is-active" : ""}`}
 																role="menuitem"
 																title="Name the organ under the cursor"
+																{...fadedProps}
 																onClick={() => {
+																	if (isCancerVerse) return;
 																	setHoverIdentifyEnabled((v) => !v);
 																	setHoverOrganTip((t) => (t.visible ? { ...t, visible: false } : t));
 																	viewFlyout.close();
@@ -2217,10 +2264,13 @@ const aiAvailableOrgans = useMemo(() => {
 											{!isLocal && (
 												<button
 													className={`vp-tool ${showEditPanel || editMode ? "vp-tool--active" : ""}`}
+													{...fadedProps}
 													onClick={() => {
+														if (isCancerVerse) return;
 														setShowStats(false);
 														setShowMetadata(false);
 														setShowMeasurePanel(false);
+														setShowReportNotes(false);
 														setShowEditPanel((v) => {
 															const next = !v;
 															if (!next) setEditMode(null);
@@ -2334,12 +2384,15 @@ const aiAvailableOrgans = useMemo(() => {
 																<button
 																	className={`vp-flyout__item ${showOrganDetails ? "is-active" : ""}`}
 																	role="menuitem"
+																	{...fadedProps}
 																	onClick={() => {
+																		if (isCancerVerse) return;
 																		if (showOrganDetails) {
 																			setShowOrganDetails(false);
 																		} else {
 																			setShowStats(false);
 																			setShowMetadata(false);
+																			setShowReportNotes(false);
 																			setShowMeasurePanel(false);
 																			setShowOrganDetails(true);
 																		}
@@ -2354,7 +2407,9 @@ const aiAvailableOrgans = useMemo(() => {
 																<button
 																	className={`vp-flyout__item ${showStats ? "is-active" : ""}`}
 																	role="menuitem"
+																	{...fadedProps}
 																	onClick={() => {
+																		if (isCancerVerse) return;
 																		handleToggleStats();
 																		panelsFlyout.close();
 																	}}
@@ -2377,11 +2432,25 @@ const aiAvailableOrgans = useMemo(() => {
 																</button>
 															)}
 															<button
+																className={`vp-flyout__item ${showReportNotes ? "is-active" : ""}`}
+																role="menuitem"
+																{...reportNotesFadedProps}
+																onClick={() => {
+																	if (!isCancerVerse) return;
+																	handleToggleReportNotes();
+																	panelsFlyout.close();
+																}}
+															>
+																<IconFileText size={18} />
+																<span>Report notes</span>
+															</button>
+															<button
 																className={`vp-flyout__item ${showMeasurePanel ? "is-active" : ""}`}
 																role="menuitem"
 																onClick={() => {
 																	setShowStats(false);
 																	setShowMetadata(false);
+																	setShowReportNotes(false);
 																	setShowEditPanel(false);
 																	setEditMode(null);
 																	setShowMeasurePanel((v) => !v);
@@ -2402,7 +2471,8 @@ const aiAvailableOrgans = useMemo(() => {
 											{!isLocal && (
 												<button
 													className="vp-tool"
-													onClick={handleDownloadClick}
+													{...fadedProps}
+													onClick={isCancerVerse ? undefined : handleDownloadClick}
 													aria-label="Download segmentations"
 												>
 													<IconDownload size={20} color="white" />
@@ -2412,7 +2482,8 @@ const aiAvailableOrgans = useMemo(() => {
 											{!isLocal && (
 												<button
 													className="vp-tool"
-													onClick={() => setShowReportScreen(true)}
+													{...fadedProps}
+													onClick={isCancerVerse ? undefined : () => setShowReportScreen(true)}
 													aria-label="Open report"
 												>
 													<IconReport size={20} color="white" />
@@ -2607,11 +2678,11 @@ const aiAvailableOrgans = useMemo(() => {
 									// Shaded ray-cast rendering of the CT itself (Cornerstone VOLUME_3D).
 									<div className="vp-vol3d" ref={volume3DRef} />
 								)
-							) : isLocal ? (
+							) : isLocal || isCancerVerse ? (
 								// Meshes come from the case's segmentation on the server — a local
-								// DICOM scan has none.
+								// DICOM scan and a CancerVerse case (CT-only) both have none.
 								<div className="vp-3d-empty">
-									No organ meshes for local DICOM
+									{isCancerVerse ? "No organ meshes for this dataset" : "No organ meshes for local DICOM"}
 									<span>(switch to Volume rendering above)</span>
 								</div>
 							) : (
@@ -2623,7 +2694,8 @@ const aiAvailableOrgans = useMemo(() => {
 								{!isLocal && (
 									<button
 										className={`vp-3dbar__btn ${threeDMode === "mesh" ? "is-active" : ""}`}
-										onClick={() => setThreeDMode("mesh")}
+										{...fadedProps}
+										onClick={isCancerVerse ? undefined : () => setThreeDMode("mesh")}
 									>
 										Meshes
 									</button>
@@ -2850,13 +2922,43 @@ const aiAvailableOrgans = useMemo(() => {
 						<div className="vp-meta__list">
 							{METADATA_FIELDS.map(({ key, label }, i) => (
 								<div className={`vp-meta__row${i % 2 === 1 ? " vp-meta__row--odd" : ""}`} key={key}>
-									<span className="vp-meta__label">{label}</span>
+									<span className="vp-meta__label">
+										{key === "PanTS ID" && caseMetadata.dataset === "CancerVerse" ? "CancerVerse ID" : label}
+									</span>
 									<span className="vp-meta__value">
 										{formatMetaValue(key, caseMetadata[key])}
 									</span>
 								</div>
 							))}
 						</div>
+					)}
+				</div>
+			)}
+
+			{showReportNotes && (
+				<div className="vp-stats">
+					<div className="vp-stats__head">
+						<span className="vp-panel__title">Report Notes</span>
+						<button
+							className="vp-stats__close"
+							onClick={() => setShowReportNotes(false)}
+							aria-label="Close report notes"
+						>
+							×
+						</button>
+					</div>
+					{!isCancerVerse ? (
+						<div className="vp-stats__msg">
+							Report notes are only available for CancerVerse cases.
+						</div>
+					) : !caseMetadata ? (
+						<div className="vp-stats__msg">
+							{demographicsTriedRef.current ? "No report notes available for this case." : "Loading…"}
+						</div>
+					) : !caseMetadata.report ? (
+						<div className="vp-stats__msg">No report notes available for this case.</div>
+					) : (
+						<div className="vp-report__body">{String(caseMetadata.report)}</div>
 					)}
 				</div>
 			)}

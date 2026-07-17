@@ -5,7 +5,7 @@
 // (cross-tab) to stay in sync.
 
 export type SavedCase = {
-	id: number;
+	id: string;
 	sex: string;
 	age: number;
 	tumor: number;
@@ -18,7 +18,12 @@ export const SAVED_CASES_EVENT = "savedcaseschange";
 export const loadSavedCases = (): SavedCase[] => {
 	try {
 		const arr = JSON.parse(localStorage.getItem(SAVED_CASES_KEY) || "[]");
-		return Array.isArray(arr) ? arr.filter((c) => c && typeof c.id === "number") : [];
+		// Accept legacy entries saved before case ids became strings (`id: number`) so
+		// existing bookmarks in a user's localStorage don't silently vanish.
+		if (!Array.isArray(arr)) return [];
+		return arr
+			.filter((c) => c && (typeof c.id === "number" || typeof c.id === "string"))
+			.map((c) => ({ ...c, id: String(c.id) }));
 	} catch {
 		return [];
 	}
@@ -38,7 +43,7 @@ const persistSavedCases = (list: SavedCase[]) => {
 	}
 };
 
-export const isSavedCase = (id: number): boolean => loadSavedCases().some((c) => c.id === id);
+export const isSavedCase = (id: string): boolean => loadSavedCases().some((c) => c.id === id);
 
 // Add the case if it isn't saved, otherwise remove it. Returns the updated list (most
 // recently saved first).
