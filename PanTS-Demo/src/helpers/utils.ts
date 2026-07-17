@@ -99,6 +99,23 @@ export const getPanTSId = (case_id: string) => {
     return `PanTS_${new_id}`;
 }
 
+// Whether a case id string identifies a CancerVerse case ("CV_00000012", or a bare
+// "cv12" as typed by a user) rather than a PanTS case (a plain number, "17").
+// CancerVerse has no offset/renumbering — the id here is exactly the on-disk folder
+// name, "CV_########".
+export const isCancerVerseId = (case_id: string): boolean => /^cv_?\d+$/i.test(case_id.trim());
+
+// Dataset-aware display label for a case id: PanTS keeps its existing
+// `PanTS_<8-digit>` form (unchanged), CancerVerse cases show their real
+// `CV_<8-digit>` folder name (no arithmetic — id "12" is CV_00000012's actual number).
+export const getCaseDisplay = (case_id: string): { dataset: "PanTS" | "CancerVerse"; label: string } => {
+    const m = case_id.trim().match(/^cv_?(\d+)$/i);
+    if (m) {
+        return { dataset: "CancerVerse", label: `CV_${m[1].padStart(8, "0")}` };
+    }
+    return { dataset: "PanTS", label: getPanTSId(case_id) };
+}
+
 export function capitalize(word: string) {
 	if (!word) return "";
 	return word.charAt(0).toUpperCase() + word.slice(1);

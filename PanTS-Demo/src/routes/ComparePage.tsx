@@ -10,6 +10,7 @@ import { alignStatRows } from "../helpers/compareStats";
 import { API_BASE } from "../helpers/constants";
 import { loadOrganNorms, type OrganNorms } from "../helpers/organNorms";
 import { computeStatRows, type OrganMetric } from "../helpers/organStatsExport";
+import { getCaseDisplay } from "../helpers/utils";
 import "./ComparePage.css";
 
 type Demographics = { sex: string | null; age: number | null; tumor: number | null };
@@ -78,13 +79,15 @@ function useCaseData(id: string): CaseData {
 // (mirrors the dashboard Preview's chain). In dev/demo both endpoints 404 → placeholder.
 function Thumbnail({ id }: { id: string }) {
 	const local = `${API_BASE}/api/get_image_preview/${id}`;
-	const caseIdStr = `PanTS_${id.toString().padStart(8, "0")}`;
+	const { dataset, label: caseIdStr } = getCaseDisplay(id);
 	const hf = `${API_BASE}/api/proxy-image?url=${encodeURIComponent(
 		`https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/profile_only/${caseIdStr}/profile.jpg`
 	)}`;
+	// CancerVerse has no HuggingFace profile-image mirror to fall back to.
 	const [stage, setStage] = useState<0 | 1 | 2>(0);
 	useEffect(() => setStage(0), [id]);
-	if (stage === 2) return <div className="cmp-thumb cmp-thumb--empty">No preview</div>;
+	if (stage === 2 || (stage === 1 && dataset === "CancerVerse"))
+		return <div className="cmp-thumb cmp-thumb--empty">No preview</div>;
 	return (
 		<img
 			className="cmp-thumb"

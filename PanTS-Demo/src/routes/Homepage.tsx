@@ -41,6 +41,7 @@ type FacetData = {
 
 // Filter groups whose available values are discovered from /api/facets (not hardcoded).
 const FACET_GROUPS: { key: MultiFilterKey; field: string; title: string }[] = [
+	{ key: "dataset", field: "dataset", title: "Dataset" },
 	{ key: "manufacturer", field: "manufacturer", title: "Manufacturer" },
 	{ key: "ctPhase", field: "ct_phase", title: "CT Phase" },
 	{ key: "siteNat", field: "site_nat", title: "Site" },
@@ -130,7 +131,7 @@ const filterLabelStyle: React.CSSProperties = {
 };
 
 export default function Homepage() {
-	const [PREVIEW_IDS, SET_PREVIEW_IDS] = useState<number[]>([]);
+	const [PREVIEW_IDS, SET_PREVIEW_IDS] = useState<string[]>([]);
 	const navigation = useNavigate();
 	const [previewMetadata, setPreviewMetadata] = useState<{
 		[key: string]: PreviewType;
@@ -163,37 +164,39 @@ export default function Homepage() {
 		};
 	}, []);
 
-	const handleToggleSave = (id: number, meta?: PreviewType) => {
+	const handleToggleSave = (id: string, meta?: PreviewType) => {
 		const m = meta ?? previewMetadata[id];
 		toggleSavedCase({ id, sex: m?.sex ?? "", age: m?.age ?? 0, tumor: m?.tumor ?? 0 });
 	};
 
 	// Cases picked for side-by-side comparison (max 2). Adding a third drops the oldest,
 	// so the two most recent picks are always what get compared.
-	const [compareIds, setCompareIds] = useState<number[]>([]);
+	const [compareIds, setCompareIds] = useState<string[]>([]);
 	const [compareTyped, setCompareTyped] = useState("");
-	const toggleCompare = (id: number) => {
+	const toggleCompare = (id: string) => {
 		setCompareIds((prev) =>
 			prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].slice(-2)
 		);
 	};
 	// Add a case by id typed into the tray (idempotent; caps at the two most recent).
-	const addCompareId = (id: number) => {
+	const addCompareId = (id: string) => {
 		setCompareIds((prev) => (prev.includes(id) ? prev : [...prev, id].slice(-2)));
 	};
+	// The typed-compare box only takes plain numbers, i.e. PanTS ids — matches the
+	// jump-to-case box above, which is the same PanTS-only convenience.
 	const submitTypedCompare = () => {
 		const n = parseInt(compareTyped.trim(), 10);
-		if (Number.isFinite(n) && n > 0) addCompareId(n);
+		if (Number.isFinite(n) && n > 0) addCompareId(String(n));
 		setCompareTyped("");
 	};
 
 	// Turn /api/search (or /api/random) items into the ids + metadata the grid needs.
 	const ingestItems = (items: SearchItem[]) => {
-		const ids: number[] = [];
+		const ids: string[] = [];
 		const meta: { [key: string]: PreviewType } = {};
 		for (const it of items) {
 			const id = itemToId(it);
-			if (!id) continue;
+			if (!id || id === "0") continue;
 			ids.push(id);
 			meta[id] = {
 				sex: it.sex ?? "",
@@ -272,7 +275,7 @@ export default function Homepage() {
 	const loadFacetOptions = async () => {
 		try {
 			const params = new URLSearchParams();
-			params.set("fields", "tumor,sex,manufacturer,ct_phase,site_nat,year");
+			params.set("fields", "tumor,sex,manufacturer,ct_phase,site_nat,year,dataset");
 			params.set("top_k", "8");
 			const res = await fetch(`${API_BASE}/api/facets?${params.toString()}`);
 			const data = await res.json();

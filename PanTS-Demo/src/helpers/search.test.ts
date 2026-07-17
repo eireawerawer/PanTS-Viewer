@@ -10,18 +10,23 @@ import {
 
 describe("itemToId", () => {
 	it("parses the numeric id out of a PanTS case id", () => {
-		expect(itemToId({ case_id: "PanTS_00008854" })).toBe(8854);
-		expect(itemToId({ case_id: "PanTS_00000001" })).toBe(1);
+		expect(itemToId({ case_id: "PanTS_00008854" })).toBe("8854");
+		expect(itemToId({ case_id: "PanTS_00000001" })).toBe("1");
 	});
 
 	it("falls back across id fields and handles numbers", () => {
-		expect(itemToId({ "PanTS ID": "PanTS_00000900" })).toBe(900);
-		expect(itemToId({ id: 42 })).toBe(42);
+		expect(itemToId({ "PanTS ID": "PanTS_00000900" })).toBe("900");
+		expect(itemToId({ id: 42 })).toBe("42");
 	});
 
 	it("returns 0 when no usable id is present", () => {
-		expect(itemToId({})).toBe(0);
-		expect(itemToId({ case_id: "no-digits-here" })).toBe(0);
+		expect(itemToId({})).toBe("0");
+		expect(itemToId({ case_id: "no-digits-here" })).toBe("0");
+	});
+
+	it("keeps CancerVerse ids as-is, no offset/renumbering", () => {
+		expect(itemToId({ case_id: "CV_00000012" })).toBe("CV_00000012");
+		expect(itemToId({ dataset: "CancerVerse", case_id: "CV_00000012" })).toBe("CV_00000012");
 	});
 });
 
@@ -76,6 +81,7 @@ describe("parseFiltersFromParams", () => {
 			ctPhase: ["Venous"],
 			siteNat: ["US"],
 			year: ["2020"],
+			dataset: ["CancerVerse"],
 		};
 		const restored = parseFiltersFromParams(buildSearchParams(filters));
 		expect(restored).toEqual(filters);

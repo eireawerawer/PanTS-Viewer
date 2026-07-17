@@ -11,6 +11,7 @@ export type SearchFilters = {
 	ctPhase: string[]; // CT phase, e.g. Arterial (from facets)
 	siteNat: string[]; // site nationality, e.g. US (from facets)
 	year: string[]; // study year (from facets)
+	dataset: string[]; // "PanTS" / "CancerVerse" (from facets)
 };
 
 export const EMPTY_FILTERS: SearchFilters = {
@@ -21,27 +22,32 @@ export const EMPTY_FILTERS: SearchFilters = {
 	ctPhase: [],
 	siteNat: [],
 	year: [],
+	dataset: [],
 };
 
 // The multi-select array keys (everything except `tumor`).
-export type MultiFilterKey = "sex" | "age" | "manufacturer" | "ctPhase" | "siteNat" | "year";
+export type MultiFilterKey = "sex" | "age" | "manufacturer" | "ctPhase" | "siteNat" | "year" | "dataset";
 
 // Minimal shape of an item returned by /api/search and /api/random.
 export type SearchItem = {
 	case_id?: string | number;
 	"PanTS ID"?: string | number;
 	id?: string | number;
+	dataset?: "PanTS" | "CancerVerse";
 	tumor?: number | null;
 	sex?: string | null;
 	age?: number | string | null;
 };
 
-// Parse the numeric case id out of any of the id-ish fields, e.g.
-// "PanTS_00008854" -> 8854. Returns 0 when nothing usable is present.
-export const itemToId = (it: SearchItem): number => {
+// Case identity as a string, e.g. "PanTS_00008854" -> "8854" (PanTS's existing bare-
+// number id, unchanged) or "CV_00000012" -> "CV_00000012" (CancerVerse's real id,
+// kept as-is — no offset/renumbering, so it stays identical to the folder name on
+// disk). Returns "0" when nothing usable is present.
+export const itemToId = (it: SearchItem): string => {
 	const raw = String(it.case_id ?? it["PanTS ID"] ?? it.id ?? "");
+	if (/^cv_?\d+$/i.test(raw.trim())) return raw.trim().toUpperCase();
 	const m = raw.match(/\d+/);
-	return m ? Number(m[0]) : 0;
+	return m ? String(Number(m[0])) : "0";
 };
 
 // Build the /api/search (and /api/facets, and URL) query string from the active
@@ -61,6 +67,7 @@ export const buildSearchParams = (
 	(filters.ctPhase ?? []).forEach((v) => params.append("ct_phase[]", v));
 	(filters.siteNat ?? []).forEach((v) => params.append("site_nat[]", v));
 	(filters.year ?? []).forEach((v) => params.append("year[]", v));
+	(filters.dataset ?? []).forEach((v) => params.append("dataset[]", v));
 	if (opts.sortBy) params.set("sort_by", opts.sortBy);
 	if (opts.perPage) params.set("per_page", String(opts.perPage));
 	return params;
@@ -79,6 +86,7 @@ export const parseFiltersFromParams = (params: URLSearchParams): SearchFilters =
 		ctPhase: params.getAll("ct_phase[]"),
 		siteNat: params.getAll("site_nat[]"),
 		year: params.getAll("year[]"),
+		dataset: params.getAll("dataset[]"),
 	};
 };
 
@@ -89,4 +97,5 @@ export const countActiveFilters = (f: SearchFilters): number =>
 	f.manufacturer.length +
 	f.ctPhase.length +
 	f.siteNat.length +
-	f.year.length;
+	f.year.length +
+	f.dataset.length;

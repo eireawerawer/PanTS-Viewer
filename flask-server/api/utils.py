@@ -53,8 +53,20 @@ def get_panTS_id(index):
     iter = max(0, 8 - len(index_str))
     for _ in range(iter):
         cur_case_id = "0" + cur_case_id
-    cur_case_id = "PanTS_" + cur_case_id    
+    cur_case_id = "PanTS_" + cur_case_id
     return cur_case_id
+
+def resolve_dataset_case(raw_id):
+    """Identify which dataset a case id belongs to and normalize it to its on-disk
+    folder name. PanTS ids are bare digits ("17" -> "PanTS_00000017", unchanged
+    behavior). CancerVerse ids are already the real folder name ("CV_00000012",
+    case-insensitive / optional underscore) -- no offset or renumbering, so the id
+    a user sees is exactly the id used to look the case up on disk."""
+    s = str(raw_id).strip()
+    m = re.fullmatch(r"(?i)cv_?(\d+)", s)
+    if m:
+        return "CancerVerse", f"CV_{int(m.group(1)):08d}"
+    return "PanTS", get_panTS_id(s)
 
 def clean_nan(obj):
     """Recursively replace NaN with None for JSON serialization."""
@@ -1129,6 +1141,60 @@ def _norm_cols(df_raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _load_cancerverse_metadata() -> Optional[pd.DataFrame]:
+    """CancerVerse's own metadata CSV, read directly (no derived file) and filtered
+    down to whichever CV_######## case folders actually exist under CANCERVERSE_PATH
+    right now. Downloading more cases later just means more rows show up next
+    restart -- nothing here needs regenerating. Columns are renamed to the exact
+    names PanTS's metadata.xlsx already uses (sex/age/ct phase/manufacturer/study
+    year) so _norm_cols picks them up with zero extra detection logic; columns with
+    no CancerVerse equivalent (tumor?, study type, site nationality) are simply left
+    absent, so those fields come back unknown/NaN after the concat below. The CSV's
+    free-text radiology report is carried through as "report" -- surfaced in the
+    viewer's "Report notes" panel, a CancerVerse-only feature (PanTS rows never get
+    this column, so it's simply absent/None for them after the concat).
+    """
+    root = Constants.CANCERVERSE_PATH
+    if not root or not os.path.isdir(root):
+        return None
+    csv_path = os.path.join(os.path.dirname(root), "CancerVerse_dataset_metadata.csv")
+    if not os.path.exists(csv_path):
+        return None
+    try:
+        present = {
+            name for name in os.listdir(root)
+            if re.fullmatch(r"(?i)cv_\d+", name) and os.path.isdir(os.path.join(root, name))
+        }
+        if not present:
+            return None
+        raw = pd.read_csv(csv_path)
+        raw = raw[raw["CancerVerse ID"].isin(present)].copy()
+        if not len(raw):
+            return None
+
+        def _prettify_phase(v):
+            if pd.isna(v) or not str(v).strip():
+                return np.nan
+            return str(v).strip().replace("_", " ").title()
+
+        def _year_from_date(v):
+            dt = pd.to_datetime(v, errors="coerce")
+            return dt.year if pd.notna(dt) else np.nan
+
+        return pd.DataFrame({
+            "case_id": raw["CancerVerse ID"],
+            "sex": raw.get("sex"),
+            "age": raw.get("age"),
+            "ct phase": raw["phase"].map(_prettify_phase) if "phase" in raw else np.nan,
+            "manufacturer": raw.get("scanner"),
+            "study year": raw["exam_date"].map(_year_from_date) if "exam_date" in raw else np.nan,
+            "report": raw.get("report"),
+            "dataset": "CancerVerse",
+        })
+    except Exception:
+        return None
+
+
 def _safe_float(x) -> Optional[float]:
     try:
         if x is None: return None
@@ -1214,6 +1280,12 @@ def ensure_sort_cols(df: pd.DataFrame) -> pd.DataFrame:
 if not os.path.exists(META_FILE):
     raise FileNotFoundError(f"metadata not found: {META_FILE}")
 DF_RAW = pd.read_excel(META_FILE)
+DF_RAW["dataset"] = "PanTS"
+
+_cancerverse_df = _load_cancerverse_metadata()
+if _cancerverse_df is not None and len(_cancerverse_df):
+    DF_RAW = pd.concat([DF_RAW, _cancerverse_df], ignore_index=True, sort=False)
+
 DF = _norm_cols(DF_RAW)
 
 def apply_filters(base: pd.DataFrame, exclude: Optional[Set[str]] = None) -> pd.DataFrame:
@@ -1409,6 +1481,11 @@ def apply_filters(base: pd.DataFrame, exclude: Optional[Set[str]] = None) -> pd.
 
             df = df[mask]
 
+    # --- Dataset (PanTS / CancerVerse) ---
+    ds_list = _collect_list_params(["dataset", "dataset[]"])
+    if ds_list and "dataset" in df.columns and "dataset" not in exclude:
+        wants = {d.strip().lower() for d in ds_list if d.strip()}
+        df = df[df["dataset"].astype(str).str.strip().str.lower().isin(wants)]
 
     return df
 
@@ -1425,6 +1502,7 @@ def row_to_item(row: pd.Series) -> Dict[str, Any]:
     return {
         "PanTS ID": _nan2none(pick("case") or row.get("__case_str")),
         "case_id":  _nan2none(pick("case") or row.get("__case_str")),
+        "dataset":  _nan2none(row.get("dataset")) or "PanTS",
         "tumor":    (int(row.get("__tumor01")) if pd.notna(row.get("__tumor01")) else None),
         "sex":      _nan2none(row.get("__sex")),
         "age":      _nan2none(row.get("__age")),
@@ -1434,6 +1512,7 @@ def row_to_item(row: pd.Series) -> Dict[str, Any]:
         "study year": _nan2none(row.get("__year_int")),
         "study type": _nan2none(pick("study_type") or row.get("study_type")),
         "site nationality": _nan2none(pick("site_nationality") or row.get("site_nationality")),
+        "report": _nan2none(row.get("report")),
         # 排序輔助輸出
         "spacing_sum": _nan2none(row.get("__spacing_sum")),
         "shape_sum":   _nan2none(row.get("__shape_sum")),
