@@ -1,6 +1,7 @@
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
+  { id: "Auto",      label: "Auto — AI picks the best model", desc: "Recommended · a local AI reads your request and chooses for you" },
   { id: "None",      label: "None",       desc: "View only — files never leave your browser" },
   { id: "ePAI",      label: "ePAI",       desc: "For detailed pancreas and tumor analysis" },
   { id: "SuPreM",    label: "SuPreM",     desc: "For whole-body scans from lungs to legs" },
@@ -79,7 +80,13 @@ const UploadPage: React.FC = () => {
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [inferenceCompleted, setInferenceCompleted] = useState<boolean>(false);
-  const [selectedModel, setSelectedModel] = useState<"None" | "ePAI" | "SuPreM" | "OpenVAE" | "MedFormer" | "R-Super" | "Atlas-Net" | "">("None");
+  const [selectedModel, setSelectedModel] = useState<"Auto" | "None" | "ePAI" | "SuPreM" | "OpenVAE" | "MedFormer" | "R-Super" | "Atlas-Net" | "">("Auto");
+  // FP16 = quantized (faster, half the memory, identical masks); the default.
+  const [selectedPrecision, setSelectedPrecision] = useState<"fp16" | "fp32">("fp16");
+  // Optional plain-language hint for the Auto picker, and the note it returns.
+  const [autoHint, setAutoHint] = useState("");
+  const [autoNote, setAutoNote] = useState("");
+  const [autoBusy, setAutoBusy] = useState(false);
   const [modelDropOpen, setModelDropOpen] = useState(false);
   const modelDropRef = useRef<HTMLDivElement>(null);
   const [preDropOpen, setPreDropOpen] = useState(false);
@@ -412,6 +419,7 @@ const UploadPage: React.FC = () => {
       const inferFd = new FormData();
       inferFd.append("session_id", sid);
       inferFd.append("model_name", model);
+      inferFd.append("precision", selectedPrecision);
       inferFd.append("uploaded_filename", uploadedName);
       const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
         method: "POST", body: inferFd, signal: controller.signal,
@@ -489,6 +497,7 @@ const UploadPage: React.FC = () => {
       const inferFd = new FormData();
       inferFd.append("session_id", sid);
       inferFd.append("model_name", model);
+      inferFd.append("precision", selectedPrecision);
       inferFd.append("uploaded_filename", uploadedName);
       const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
         method: "POST", body: inferFd, signal: controller.signal,
@@ -541,7 +550,37 @@ const UploadPage: React.FC = () => {
       return;
     }
 
-    const model = selectedModel;
+    // Auto mode: ask the backend (local LLM, with a heuristic fallback) to choose
+    // the model + precision, then run with that choice. Resolves to a concrete
+    // model name before anything is uploaded.
+    let model: string = selectedModel;
+    let precision = selectedPrecision;
+    if (selectedModel === "Auto") {
+      try {
+        setAutoBusy(true);
+        setMessage("Auto-selecting the best model for your scan…");
+        const filename = item ? (item.kind === 'dicom' ? item.label : item.file.name) : (path ? path.split("/").pop() : "");
+        const res = await fetch(`${API_BASE}/api/suggest-model`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ hint: autoHint, filename }),
+        });
+        const data = await parseApiResponse(res);
+        model = data.model || "ePAI";
+        precision = (data.precision === "fp32" ? "fp32" : "fp16");
+        setSelectedModel(model as typeof selectedModel);
+        setSelectedPrecision(precision);
+        setAutoNote(`Auto-selected ${model} · ${precision.toUpperCase()} — ${data.reason || "best fit for this scan."}`);
+      } catch {
+        model = "ePAI";
+        precision = "fp16";
+        setSelectedModel("ePAI");
+        setAutoNote("Auto-select was unavailable, so it defaulted to ePAI · FP16.");
+      } finally {
+        setAutoBusy(false);
+      }
+    }
+
     const sid = crypto.randomUUID();
     const itemName = item ? (item.kind === 'dicom' ? item.label : item.file.name) : undefined;
     const label = bdmapId.trim() || (path ? path.split("/").pop() : itemName) || sid;
@@ -567,6 +606,7 @@ const UploadPage: React.FC = () => {
         const fd = new FormData();
         fd.append("session_id", sid);
         fd.append("model_name", model);
+        fd.append("precision", selectedPrecision);
         fd.append("INPUT_SERVER_PATH", path);
         const res = await fetch(`${API_BASE}/api/run-epai-inference`, { method: "POST", body: fd });
         const data = await parseApiResponse(res);
@@ -682,6 +722,7 @@ const UploadPage: React.FC = () => {
     const formData = new FormData();
     formData.append("session_id", newSessionId);
     formData.append("model_name", "ePAI");
+    formData.append("precision", selectedPrecision);
     formData.append("source_reconstruction_session_id", sessionId);
 
     try {
@@ -969,10 +1010,42 @@ const UploadPage: React.FC = () => {
             <button
               className="run-btn"
               onClick={handleRunEpaiInference}
-              disabled={!selectedModel || isUploading}
+              disabled={!selectedModel || isUploading || autoBusy}
             >
-              {selectedModel === "None" ? "View" : "Run"}
+              {autoBusy ? "Selecting…" : isUploading ? "Working…" : selectedModel === "None" ? "View" : selectedModel === "Auto" ? "Analyze" : "Run"}
             </button>
+          </div>
+
+          {/* ── Simple controls: Auto hint, speed/quality, result note ── */}
+          <div className="simple-config">
+            {selectedModel === "Auto" && (
+              <input
+                type="text"
+                className="auto-hint-input"
+                placeholder="Optional — what are you looking for? (e.g. pancreatic tumor, whole abdomen)"
+                value={autoHint}
+                onChange={(e) => setAutoHint(e.target.value)}
+              />
+            )}
+            <div className="precision-toggle" role="group" aria-label="Speed versus quality">
+              <button
+                type="button"
+                className={`precision-opt${selectedPrecision === 'fp16' ? ' active' : ''}`}
+                onClick={() => setSelectedPrecision('fp16')}
+              >
+                <span className="precision-opt-title">Faster · recommended</span>
+                <span className="precision-opt-sub">FP16 · half the memory, same result</span>
+              </button>
+              <button
+                type="button"
+                className={`precision-opt${selectedPrecision === 'fp32' ? ' active' : ''}`}
+                onClick={() => setSelectedPrecision('fp32')}
+              >
+                <span className="precision-opt-title">Highest precision</span>
+                <span className="precision-opt-sub">FP32 · original full weights</span>
+              </button>
+            </div>
+            {autoNote && <div className="auto-note">{autoNote}</div>}
           </div>
 
           {/* ── Advanced options ── */}

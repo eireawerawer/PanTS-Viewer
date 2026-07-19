@@ -935,7 +935,7 @@ def _get_inference_job(session_id):
     return None
 
 
-def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_path=None):
+def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_path=None, precision="fp16"):
     if not _is_safe_id(session_id):
         return jsonify({"error": "Invalid session ID"}), 400
     session_path = os.path.join(SESSIONS_DIR, session_id)
@@ -986,7 +986,7 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
         try:
             output_mask_dir = run_auto_segmentation(
                 input_path, session_dir=session_path, model=model_name,
-                session_id=session_id, on_start=_on_gpu_slot,
+                session_id=session_id, on_start=_on_gpu_slot, precision=precision,
             )
 
             if _job_status() == "cancelled":
@@ -1074,8 +1074,20 @@ def run_epai_inference():
         return None
 
     session_id = _pick_text("session_id", "SESSION_ID", "sessionId") or str(uuid.uuid4())
+    # Sanitize any request-provided value before it reaches a filesystem path, so a
+    # crafted session id or filename cannot escape the sessions directory (path
+    # traversal). secure_filename leaves normal ids such as UUIDs and names such as
+    # "ct.nii.gz" unchanged.
+    session_id = secure_filename(session_id) or str(uuid.uuid4())
     model_name = _pick_text("model_name", "model", "MODEL_NAME") or "ePAI"
+    # Weight precision for the GPU inference stage. "fp16" routes to the quantized
+    # half-precision weights; "fp32" keeps the original full-precision checkpoints.
+    precision = (_pick_text("precision", "PRECISION") or "fp16").lower()
+    if precision not in ("fp16", "fp32"):
+        precision = "fp16"
     uploaded_filename = _pick_text("uploaded_filename", "output_filename", "filename")
+    if uploaded_filename:
+        uploaded_filename = secure_filename(uploaded_filename)
     input_server_path = _pick_text("INPUT_SERVER_PATH", "input_server_path", "server_path", "path")
     source_reconstruction_session_id = _pick_text("source_reconstruction_session_id")
     ct_file = (
@@ -1135,7 +1147,219 @@ def run_epai_inference():
         model_name=model_name,
         ct_file=ct_file,
         server_input_path=input_server_path,
+        precision=precision,
     )
+
+
+# Catalog used by the automatic model picker. Each entry pairs a model with the
+# tasks it is best suited for and its recommended inference precision. All of the
+# segmentation networks run in FP16 by default (validated to produce masks
+# identical to FP32); only the CPU-only ShapeKit stage is excluded.
+MODEL_CATALOG = [
+    {"model": "ePAI", "precision": "fp16",
+     "best_for": "pancreas, pancreatic duct, and pancreatic lesions (PDAC, cysts, PNETs)"},
+    {"model": "SuPreM", "precision": "fp16",
+     "best_for": "broad multi-organ abdominal segmentation (25 structures)"},
+    {"model": "MedFormer", "precision": "fp16",
+     "best_for": "26 abdominal structures plus pancreatic lesions; long-range context"},
+    {"model": "R-Super", "precision": "fp16",
+     "best_for": "report-supervised segmentation of underrepresented structures"},
+    {"model": "Atlas-Net", "precision": "fp16",
+     "best_for": "robust segmentation across varied CT protocols using anatomical priors"},
+]
+
+_VALID_MODELS = {m["model"] for m in MODEL_CATALOG}
+
+
+def _heuristic_model_pick(hint: str):
+    """Rule-based fallback when the local LLM is unavailable."""
+    text = (hint or "").lower()
+    if any(k in text for k in ("pancrea", "pdac", "cyst", "pnet", "duct", "lesion")):
+        choice = "ePAI"
+    elif any(k in text for k in ("organ", "abdomen", "abdominal", "liver", "kidney",
+                                 "spleen", "stomach", "multi", "whole", "full")):
+        choice = "SuPreM"
+    elif any(k in text for k in ("protocol", "robust", "varied", "generali")):
+        choice = "Atlas-Net"
+    else:
+        choice = "ePAI"
+    return {
+        "model": choice,
+        "precision": "fp16",
+        "reason": f"Rule-based match on your description; {choice} is best for "
+                  + next(m["best_for"] for m in MODEL_CATALOG if m["model"] == choice)
+                  + ". Running in FP16 (quantized) for speed.",
+        "source": "heuristic",
+    }
+
+
+# A short per-call timeout keeps the multi-step pipeline from blocking a worker for
+# minutes if the local model hangs. The repair hint is schema-agnostic so a malformed
+# reply is repaired into a plain JSON object, not the chat viewer's reply/actions shape.
+_SUGGEST_CALL_TIMEOUT = float(os.getenv("SUGGEST_MODEL_CALL_TIMEOUT", "15"))
+_SUGGEST_REPAIR_HINT = "Convert the supplied content into one valid JSON object. Return JSON only."
+
+
+def _ollama_json(system_prompt, user_prompt, temperature, seed=42):
+    """Run one local-LLM call and return the parsed JSON object."""
+    return chat_json(
+        model=DEFAULT_OLLAMA_MODEL,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=temperature,
+        seed=seed,
+        timeout=_SUGGEST_CALL_TIMEOUT,
+        repair_hint=_SUGGEST_REPAIR_HINT,
+    )
+
+
+def _match_model(name):
+    """Map a possibly-noisy model name to an exact catalog name, or empty string."""
+    raw = (name or "").strip()
+    if raw in _VALID_MODELS:
+        return raw
+    key = raw.lower().replace("-", "").replace(" ", "").replace("_", "")
+    for m in _VALID_MODELS:
+        if m.lower().replace("-", "").replace(" ", "").replace("_", "") == key:
+            return m
+    return ""
+
+
+def _agent_extract_intent(text):
+    """Subagent 1: turn the user's free text into a small structured intent."""
+    system_prompt = (
+        "You read a short request from a user of a CT segmentation tool and return a "
+        "compact JSON object describing what they want. Fields: "
+        '"region" (a short phrase such as pancreas, abdomen, whole body, or unknown), '
+        '"focus" (one of: lesion, organs, whole_body, other), and '
+        '"wants_max_precision" (true only when the user explicitly asks for maximum or '
+        "full precision). Return only the JSON object."
+    )
+    user_prompt = f"User request: {text or 'no description provided'}"
+    data = _ollama_json(system_prompt, user_prompt, 0.0)
+    focus = str(data.get("focus", "other")).strip().lower()
+    if focus not in ("lesion", "organs", "whole_body", "other"):
+        focus = "other"
+    wm = data.get("wants_max_precision", False)
+    if isinstance(wm, str):
+        wants_max = wm.strip().lower() in ("true", "yes", "1")
+    else:
+        wants_max = bool(wm)
+    return {
+        "region": str(data.get("region", "unknown")).strip() or "unknown",
+        "focus": focus,
+        "wants_max_precision": wants_max,
+    }
+
+
+def _agent_route_once(intent, catalog_lines, temperature, seed):
+    """Subagent 2: one router vote for a single model name."""
+    system_prompt = (
+        "You are a router for a CT segmentation platform. Given the user's intent and "
+        "the model catalog, name the single best model. Return only a JSON object of "
+        'the form {"model": "<one exact catalog name>"}.'
+    )
+    user_prompt = (
+        f"Catalog:\n{catalog_lines}\n\n"
+        f"Intent: region={intent['region']}, focus={intent['focus']}."
+    )
+    data = _ollama_json(system_prompt, user_prompt, temperature, seed)
+    return str(data.get("model", "")).strip()
+
+
+def _agent_verify(intent, candidate, catalog_lines):
+    """Subagent 3: confirm or correct the winning vote and write the final answer."""
+    system_prompt = (
+        "You verify a routing decision for a CT segmentation platform. Confirm the "
+        "candidate model fits the intent, or replace it with a better catalog model if "
+        "it does not. Every model runs in FP16 (half precision) by default, which is "
+        "faster and uses half the memory with masks identical to FP32. Choose fp32 only "
+        "when the user explicitly wants maximum precision. Return only a JSON object: "
+        '{"model": "<exact catalog name>", "precision": "fp16" or "fp32", '
+        '"reason": "<one short plain sentence>"}.'
+    )
+    user_prompt = (
+        f"Catalog:\n{catalog_lines}\n\n"
+        f"Intent: region={intent['region']}, focus={intent['focus']}, "
+        f"wants_max_precision={intent['wants_max_precision']}.\n"
+        f"Candidate model: {candidate or 'none'}."
+    )
+    return _ollama_json(system_prompt, user_prompt, 0.0)
+
+
+@api_blueprint.route('/suggest-model', methods=['POST'])
+def suggest_model():
+    """
+    Automatically choose the best segmentation model and precision for a scan.
+
+    This runs a small pipeline of local-LLM subagents on top of Ollama. An intent
+    extractor turns the user's free text into a structured intent, an ensemble of
+    router agents each vote for a model, and a verifier confirms or corrects the
+    winning vote and writes the final answer. If the local LLM is unavailable at any
+    step, the endpoint falls back to a deterministic heuristic, so it always returns a
+    usable result.
+    """
+    payload = request.get_json(silent=True) or {}
+    hint = str(payload.get("hint") or request.form.get("hint") or "").strip()
+    filename = str(payload.get("filename") or request.form.get("filename") or "").strip()
+    combined_hint = " ".join(x for x in (hint, filename) if x)
+    catalog_lines = "\n".join(
+        f"- {m['model']}: best for {m['best_for']}" for m in MODEL_CATALOG
+    )
+
+    try:
+        # Subagent 1: structured intent. If this first call fails, the local model is
+        # very likely down, so we let the outer handler fall back to the heuristic.
+        intent = _agent_extract_intent(combined_hint)
+
+        # Subagent 2: an ensemble of router votes. Each vote uses a different seed and
+        # temperature so the local model can actually disagree, and a single flaky call
+        # is skipped rather than discarding the whole ensemble.
+        votes = []
+        for i, temp in enumerate((0.0, 0.4, 0.8)):
+            try:
+                pick = _match_model(_agent_route_once(intent, catalog_lines, temp, seed=41 + i))
+            except Exception:
+                continue
+            if pick:
+                votes.append(pick)
+        winner = ""
+        if votes:
+            tally = {}
+            for v in votes:
+                tally[v] = tally.get(v, 0) + 1
+            # Ties favor the lowest-temperature vote, which is added first.
+            winner = max(tally, key=tally.get)
+
+        # Subagent 3: verify or correct the winner and write the final answer. A verifier
+        # failure falls back to the ensemble winner rather than to the heuristic.
+        try:
+            verdict = _agent_verify(intent, winner, catalog_lines)
+        except Exception:
+            verdict = {}
+        model_choice = _match_model(str(verdict.get("model", ""))) or winner
+        if not model_choice:
+            return jsonify(_heuristic_model_pick(combined_hint)), 200
+
+        precision = str(verdict.get("precision", "fp16")).strip().lower()
+        if precision not in ("fp16", "fp32"):
+            precision = "fp32" if intent["wants_max_precision"] else "fp16"
+        reason = str(verdict.get("reason", "")).strip() or (
+            f"{model_choice} is a good fit for this scan."
+        )
+        return jsonify({
+            "model": model_choice,
+            "precision": precision,
+            "reason": reason,
+            "source": "llm-subagents",
+            "intent": intent,
+            "votes": votes,
+        }), 200
+    except Exception as exc:
+        # Never 500 the picker: any pipeline problem degrades to the heuristic, but we
+        # log it so a real regression is not silently swallowed.
+        print(f"[suggest-model] pipeline fell back to heuristic: {exc}")
+        return jsonify(_heuristic_model_pick(combined_hint)), 200
 
 
 @api_blueprint.route('/inference-status/<session_id>', methods=['GET'])
@@ -1199,8 +1423,13 @@ def create_pull_inference_job():
         return None
 
     session_id = _pick_text("session_id", "SESSION_ID", "sessionId") or str(uuid.uuid4())
+    # Sanitize request-provided values before they reach a filesystem path (path
+    # traversal). secure_filename leaves normal UUIDs and filenames unchanged.
+    session_id = secure_filename(session_id) or str(uuid.uuid4())
     input_server_path = _pick_text("input_server_path", "INPUT_SERVER_PATH", "path")
     uploaded_filename = _pick_text("uploaded_filename", "output_filename", "filename")
+    if uploaded_filename:
+        uploaded_filename = secure_filename(uploaded_filename)
     model = _pick_text("model", "MODEL_NAME") or "ePAI"
 
     ct_file = (

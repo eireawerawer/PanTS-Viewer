@@ -133,7 +133,7 @@ def _resolve_conda_activate_path():
     return ""
 
 
-def run_auto_segmentation(input_path, session_dir, model, session_id=None, on_start=None):
+def run_auto_segmentation(input_path, session_dir, model, session_id=None, on_start=None, precision="fp16"):
     """
     Dispatch to the appropriate model inference function.
     Serialized via _gpu_lock so concurrent requests queue instead of OOM-ing.
@@ -154,6 +154,15 @@ def run_auto_segmentation(input_path, session_dir, model, session_id=None, on_st
                 print(f"[on_start] callback error for {session_id}: {e}")
         if session_id:
             bind_session(session_id)
+        # Precision applies to the GPU inference stages only. The segmentation models
+        # (ePAI, SuPreM, MedFormer, R-Super, Atlas-Net) and the OpenVAE preprocessor are
+        # torch networks that can run in FP16; ShapeKit is CPU-only shape refinement, so
+        # precision is not meaningful there and is pinned to fp32. The value is exported so
+        # the inference subprocess (which inherits this environment) can load the matching
+        # half-precision weights.
+        effective_precision = "fp32" if model == "ShapeKit" else (precision or "fp16")
+        os.environ["BODYMAPS_PRECISION"] = effective_precision
+        print(f"[INFO] Inference precision for {model}: {effective_precision}")
         if model == 'ePAI':
             conda_path = _resolve_conda_activate_path()
             return _run_epai_inference(

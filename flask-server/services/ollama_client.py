@@ -154,6 +154,8 @@ def chat_json(
     user_prompt: str,
     timeout: float | None = None,
     temperature: float = 0.2,
+    seed: int = 42,
+    repair_hint: str | None = None,
 ) -> dict[str, Any]:
     """
     Call Ollama /api/chat and return one parsed JSON object.
@@ -191,7 +193,7 @@ def chat_json(
         "options": {
             "temperature": temperature,
             "num_ctx": 16384,
-            "seed": 42,
+            "seed": seed,
         },
         "format": "json",
     }
@@ -214,7 +216,7 @@ def chat_json(
             "messages": [
                 {
                     "role": "system",
-                    "content": (
+                    "content": repair_hint or (
                         "Convert the supplied content into one valid JSON "
                         "object with keys reply, actions, and intent. "
                         "Return JSON only."
