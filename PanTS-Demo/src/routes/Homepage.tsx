@@ -978,7 +978,7 @@ export default function Homepage() {
 						No saved cases yet — click the bookmark on any case to save it here.
 					</div>
 				) : (
-					<div className="grid gap-4" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
+					<div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))" }}>
 						{showSaved
 							? savedCases.map((c) => (
 									<Preview
