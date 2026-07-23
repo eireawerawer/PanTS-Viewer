@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import AuthButton from "../components/AuthButton";
 import { segmentation_categories } from "../helpers/constants";
 import styles from "./LandingPage.module.css";
 
@@ -94,8 +95,10 @@ export default function LandingPage() {
           </button>
         </div>
 
-        {/* Spacer for balance */}
-        <div className={styles.navSpacer} />
+        {/* Account control (balances the logo on the left) */}
+        <div className={styles.navRight}>
+          <AuthButton />
+        </div>
       </nav>
 
       {/* ═══════ CENTERED HERO ═══════ */}

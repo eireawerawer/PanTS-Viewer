@@ -1,10 +1,13 @@
 import { render, screen } from "@testing-library/react";
-import type { ReactElement } from "react";
+import { useEffect, type ReactElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import LandingPage from "../pages/LandingPage";
+import AuthModal from "../components/AuthModal";
+import { AuthProvider, useAuth } from "../contexts/authContext";
+import AccountPage from "../routes/AccountPage";
 import Homepage from "../routes/Homepage";
 import UploadPage from "../routes/UploadPage";
+import LandingPage from "../pages/LandingPage";
 
 // Smoke tests: each routed page should mount and render its key content without
 // crashing. API calls are stubbed so the dashboard's data fetch resolves to an
@@ -24,7 +27,14 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-const renderRoute = (ui: ReactElement) => render(<MemoryRouter>{ui}</MemoryRouter>);
+// Pages now render the account control (useAuth), so every route needs an
+// AuthProvider in the tree, not just a router.
+const renderRoute = (ui: ReactElement) =>
+	render(
+		<AuthProvider>
+			<MemoryRouter>{ui}</MemoryRouter>
+		</AuthProvider>
+	);
 
 describe("route smoke tests", () => {
 	it("LandingPage (Overview) renders", () => {
@@ -44,5 +54,30 @@ describe("route smoke tests", () => {
 		expect(
 			await screen.findByText("Click or drag to upload")
 		).toBeInTheDocument();
+	});
+
+	it("AuthModal opens as a popup with provider options when prompted", async () => {
+		const Trigger = () => {
+			const { promptAuth } = useAuth();
+			useEffect(() => promptAuth("signin"), [promptAuth]);
+			return null;
+		};
+		render(
+			<AuthProvider>
+				<Trigger />
+				<AuthModal />
+			</AuthProvider>
+		);
+		expect(await screen.findByText("Sign in with Google")).toBeInTheDocument();
+		expect(screen.getByText("Sign in with GitHub")).toBeInTheDocument();
+	});
+
+	it("AccountPage renders the email-notification setting when signed in", async () => {
+		localStorage.setItem(
+			"mockAuthUser",
+			JSON.stringify({ email: "test@example.com", name: "Test", emailNotifications: true })
+		);
+		renderRoute(<AccountPage />);
+		expect(await screen.findByText("Email me when inference finishes")).toBeInTheDocument();
 	});
 });

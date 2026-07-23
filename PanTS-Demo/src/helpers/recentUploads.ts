@@ -10,10 +10,63 @@ export type RecentUpload = {
 	status: RecentUploadStatus;
 	timestamp: number;
 	isReconstruction?: boolean;
+	// Scans run together (multi-select) share a batchId + batchLabel. A scan run
+	// on its own has neither and is treated as an individual entry.
+	batchId?: string;
+	batchLabel?: string;
 };
 
 export const RECENT_UPLOADS_KEY = "recentUploads";
-export const MAX_RECENT_UPLOADS = 8;
+// Raised from 8 so a multi-scan batch isn't half-evicted from the list.
+export const MAX_RECENT_UPLOADS = 60;
+
+const TERMINAL: RecentUploadStatus[] = ["Completed", "Failed", "Cancelled"];
+export const isTerminalStatus = (s: RecentUploadStatus): boolean => TERMINAL.includes(s);
+
+// A grouped view over the flat upload list: each entry is either a lone scan or
+// a batch of scans sharing a batchId. Ordered by most-recent activity.
+export type UploadGroup =
+	| { kind: "single"; upload: RecentUpload; timestamp: number }
+	| {
+			kind: "batch";
+			batchId: string;
+			label: string;
+			uploads: RecentUpload[];
+			timestamp: number;
+	  };
+
+export const groupUploads = (list: RecentUpload[]): UploadGroup[] => {
+	const batches = new Map<string, RecentUpload[]>();
+	const groups: UploadGroup[] = [];
+
+	for (const u of list) {
+		if (u.batchId) {
+			if (!batches.has(u.batchId)) batches.set(u.batchId, []);
+			batches.get(u.batchId)!.push(u);
+		} else {
+			groups.push({ kind: "single", upload: u, timestamp: u.timestamp });
+		}
+	}
+
+	for (const [batchId, uploads] of batches) {
+		groups.push({
+			kind: "batch",
+			batchId,
+			label: uploads[0].batchLabel || `${uploads.length} scans`,
+			uploads,
+			timestamp: Math.max(...uploads.map((u) => u.timestamp)),
+		});
+	}
+
+	return groups.sort((a, b) => b.timestamp - a.timestamp);
+};
+
+// A batch is "in flight" while any of its scans is still processing; it's
+// "done" once every scan has reached a terminal state.
+export const isGroupInFlight = (g: UploadGroup): boolean =>
+	g.kind === "single"
+		? g.upload.status === "Processing"
+		: g.uploads.some((u) => u.status === "Processing");
 
 export const loadRecentUploads = (): RecentUpload[] => {
 	try {
