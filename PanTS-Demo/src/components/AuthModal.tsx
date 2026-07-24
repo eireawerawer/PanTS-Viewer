@@ -7,7 +7,7 @@ import "./AuthModal.css";
 // authContext.promptAuth() from the header and from gated upload actions.
 // Providers are mock (see authContext.signInWithProvider); email accepts anything.
 const AuthModal: React.FC = () => {
-	const { authPrompt, promptAuth, closeAuthPrompt, signIn, signUp, signInWithProvider } = useAuth();
+	const { authPrompt, promptAuth, closeAuthPrompt, signIn, signUp } = useAuth();
 	const isSignup = authPrompt.mode === "signup";
 
 	// "email mode" reveals the email/password form (World Labs' "Continue with email").
@@ -63,11 +63,12 @@ const AuthModal: React.FC = () => {
 
 				{!emailMode ? (
 					<>
-						<button type="button" className="authm-provider" onClick={() => signInWithProvider("google")}>
+						{/* OAuth (B2) not wired to the backend yet — disabled with a hint. */}
+						<button type="button" className="authm-provider" disabled title="Coming soon">
 							<IconBrandGoogle size={18} />
 							{isSignup ? "Sign up with Google" : "Sign in with Google"}
 						</button>
-						<button type="button" className="authm-provider" onClick={() => signInWithProvider("github")}>
+						<button type="button" className="authm-provider" disabled title="Coming soon">
 							<IconBrandGithub size={18} />
 							{isSignup ? "Sign up with GitHub" : "Sign in with GitHub"}
 						</button>

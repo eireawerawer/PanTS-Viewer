@@ -431,7 +431,7 @@ const UploadPage: React.FC = () => {
       inferFd.append("model_name", model);
       inferFd.append("uploaded_filename", uploadedName);
       const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
-        method: "POST", body: inferFd, signal: controller.signal,
+        method: "POST", body: inferFd, credentials: "include", signal: controller.signal,
       });
       const data = await parseApiResponse(res);
       if (!res.ok) throw new Error(data.error || "Failed to start inference");
@@ -509,7 +509,7 @@ const UploadPage: React.FC = () => {
       inferFd.append("model_name", model);
       inferFd.append("uploaded_filename", uploadedName);
       const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
-        method: "POST", body: inferFd, signal: controller.signal,
+        method: "POST", body: inferFd, credentials: "include", signal: controller.signal,
       });
       const data = await parseApiResponse(res);
       if (!res.ok) throw new Error(data.error || "Failed to start inference");

@@ -1,7 +1,7 @@
 // The account control shown in both nav bars (LandingPage's inline nav and the
-// shared Header). Signed out: a "Sign in" button -> /login. Signed in: the
-// button is replaced by an account menu (email + dropdown: Account settings,
-// Sign out). Reads the mock authContext, so it flips everywhere at once.
+// shared Header). Signed out: a "Sign in" button that opens the auth popup.
+// Signed in: an account menu (email + dropdown: Account settings, Sign out).
+// Reads authContext, so it flips everywhere at once.
 import { IconChevronDown, IconLogout, IconSettings } from "@tabler/icons-react";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -9,7 +9,7 @@ import { useAuth } from "../contexts/authContext";
 import styles from "./AuthButton.module.css";
 
 export default function AuthButton() {
-	const { user, isAuthenticated, signOut, promptAuth } = useAuth();
+	const { user, isAuthenticated, loading, signOut, promptAuth } = useAuth();
 	const navigate = useNavigate();
 	const [menuOpen, setMenuOpen] = useState(false);
 	const rootRef = useRef<HTMLDivElement | null>(null);
@@ -25,6 +25,9 @@ export default function AuthButton() {
 		document.addEventListener("mousedown", onDown);
 		return () => document.removeEventListener("mousedown", onDown);
 	}, [menuOpen]);
+
+	// Don't flash "Sign in" before the initial /me check resolves.
+	if (loading) return null;
 
 	if (!isAuthenticated || !user) {
 		return (

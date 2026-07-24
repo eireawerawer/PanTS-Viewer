@@ -89,9 +89,13 @@
 	cursor: pointer;
 	transition: background 0.15s, border-color 0.15s;
 }
-.authm-provider:hover {
+.authm-provider:hover:not(:disabled) {
 	background: rgba(0, 0, 0, 0.03);
 	border-color: rgba(0, 0, 0, 0.28);
+}
+.authm-provider:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
 }
 
 .authm-divider {

@@ -1,8 +1,14 @@
-// MOCK authentication. No backend: any email/password "works", and the signed-in
-// user is persisted to localStorage so the state survives reloads. This is the
-// single seam the whole account feature reads through — when real auth lands,
-// only signIn/signOut/loadUser here change (call the API, store a real token),
-// and every consumer (AuthButton, LoginPage, AccountPage, UploadPage) stays put.
+// Real authentication against the Flask backend (B1: email/password).
+//
+// The session lives in an httponly cookie the JS can't read, so on mount we ask
+// GET /api/auth/me to restore it; sign in/up/out hit the auth endpoints. Every
+// request uses credentials:"include" so the cookie is sent (also cross-origin in
+// dev). This is the single seam the whole account UI reads through.
+//
+// Not wired yet (backend phases still to come):
+//   - signInWithProvider (Google/GitHub) -> B2 OAuth. Rejects for now; the modal
+//     shows the buttons disabled.
+//   - emailNotifications -> B3. Kept as a client-only preference in localStorage.
 import {
 	createContext,
 	useCallback,
@@ -12,12 +18,13 @@ import {
 	useState,
 	type ReactNode,
 } from "react";
+import { API_BASE } from "../helpers/constants";
 
 export type AuthUser = {
+	id: string;
 	email: string;
-	name: string;
-	// Mock preferences that a real account would persist server-side.
-	emailNotifications: boolean;
+	name: string; // derived from the email until the backend stores a name
+	emailNotifications: boolean; // client-only preference until B3
 };
 
 export type AuthProvider2 = "google" | "github";
@@ -25,10 +32,12 @@ export type AuthProvider2 = "google" | "github";
 type AuthContextValue = {
 	user: AuthUser | null;
 	isAuthenticated: boolean;
+	/** True until the initial /me check resolves (avoids a signed-out flash). */
+	loading: boolean;
 	signIn: (email: string, password: string) => Promise<AuthUser>;
 	signUp: (email: string, password: string) => Promise<AuthUser>;
 	signInWithProvider: (provider: AuthProvider2) => Promise<AuthUser>;
-	signOut: () => void;
+	signOut: () => Promise<void>;
 	updatePreferences: (patch: Partial<Pick<AuthUser, "emailNotifications">>) => void;
 	// Global auth popup, opened from the header or any gated action.
 	authPrompt: { open: boolean; mode: "signin" | "signup" };
@@ -36,96 +45,135 @@ type AuthContextValue = {
 	closeAuthPrompt: () => void;
 };
 
-const STORAGE_KEY = "mockAuthUser";
+// Cross-tab sync: writing this key on any auth change nudges other tabs to
+// re-check /me (we can't watch the httponly cookie directly).
+const AUTH_PING_KEY = "authChangePing";
 
-const loadUser = (): AuthUser | null => {
-	try {
-		const raw = localStorage.getItem(STORAGE_KEY);
-		if (!raw) return null;
-		const parsed = JSON.parse(raw);
-		if (parsed && typeof parsed.email === "string") {
-			return {
-				email: parsed.email,
-				name: typeof parsed.name === "string" ? parsed.name : parsed.email.split("@")[0],
-				emailNotifications: Boolean(parsed.emailNotifications),
-			};
-		}
-	} catch {
-		/* corrupt/unavailable storage — treat as signed out */
-	}
-	return null;
-};
-
-const persist = (user: AuthUser | null) => {
-	try {
-		if (user) localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
-		else localStorage.removeItem(STORAGE_KEY);
-	} catch {
-		/* ignore quota/availability errors in the mock */
-	}
-};
-
-// Derive a friendly display name from an email local-part ("jane.doe" -> "Jane Doe").
 const nameFromEmail = (email: string): string => {
 	const local = email.split("@")[0] || email;
-	return local
-		.split(/[._-]+/)
-		.filter(Boolean)
-		.map((p) => p.charAt(0).toUpperCase() + p.slice(1))
-		.join(" ") || email;
+	return (
+		local
+			.split(/[._-]+/)
+			.filter(Boolean)
+			.map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+			.join(" ") || email
+	);
 };
+
+// Email-notification preference is client-only until the backend supports it.
+const prefKey = (id: string) => `emailNotif:${id}`;
+const loadPref = (id: string): boolean => {
+	try {
+		const v = localStorage.getItem(prefKey(id));
+		return v === null ? true : v === "1";
+	} catch {
+		return true;
+	}
+};
+const savePref = (id: string, on: boolean) => {
+	try {
+		localStorage.setItem(prefKey(id), on ? "1" : "0");
+	} catch {
+		/* ignore */
+	}
+};
+
+type ApiUser = { id: string; email: string };
+const mapApiUser = (u: ApiUser): AuthUser => ({
+	id: u.id,
+	email: u.email,
+	name: nameFromEmail(u.email),
+	emailNotifications: loadPref(u.id),
+});
+
+const authFetch = (path: string, init?: RequestInit) =>
+	fetch(`${API_BASE}${path}`, {
+		credentials: "include",
+		headers: { "Content-Type": "application/json" },
+		...init,
+	});
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-	const [user, setUser] = useState<AuthUser | null>(() => loadUser());
+	const [user, setUser] = useState<AuthUser | null>(null);
+	const [loading, setLoading] = useState(true);
 	const [authPrompt, setAuthPrompt] = useState<{ open: boolean; mode: "signin" | "signup" }>({
 		open: false,
 		mode: "signin",
 	});
 
-	// Keep other tabs in sync: a sign-in/out in one tab updates the rest.
+	const refreshMe = useCallback(async () => {
+		try {
+			const res = await authFetch("/api/auth/me");
+			if (res.ok) {
+				const { user: u } = await res.json();
+				setUser(u ? mapApiUser(u) : null);
+			} else {
+				setUser(null);
+			}
+		} catch {
+			setUser(null); // network error -> treat as signed out
+		} finally {
+			setLoading(false);
+		}
+	}, []);
+
+	// Restore the session from the cookie on mount.
+	useEffect(() => {
+		refreshMe();
+	}, [refreshMe]);
+
+	// Cross-tab: another tab signed in/out -> re-check.
 	useEffect(() => {
 		const onStorage = (e: StorageEvent) => {
-			if (e.key === STORAGE_KEY) setUser(loadUser());
+			if (e.key === AUTH_PING_KEY) refreshMe();
 		};
 		window.addEventListener("storage", onStorage);
 		return () => window.removeEventListener("storage", onStorage);
+	}, [refreshMe]);
+
+	const pingOtherTabs = () => {
+		try {
+			localStorage.setItem(AUTH_PING_KEY, String(Date.now()));
+		} catch {
+			/* ignore */
+		}
+	};
+
+	const authAction = useCallback(async (path: string, email: string, password: string) => {
+		const res = await authFetch(path, { method: "POST", body: JSON.stringify({ email, password }) });
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(data.error || "Something went wrong. Try again.");
+		const mapped = mapApiUser(data.user);
+		setUser(mapped);
+		pingOtherTabs();
+		return mapped;
 	}, []);
 
-	const establish = useCallback((email: string): AuthUser => {
-		const next: AuthUser = {
-			email: email.trim(),
-			name: nameFromEmail(email.trim()),
-			emailNotifications: true, // mock default: on
-		};
-		setUser(next);
-		persist(next);
-		return next;
-	}, []);
-
-	// signIn / signUp are identical in the mock (any credentials accepted); they
-	// stay separate so the real implementation can diverge without touching callers.
 	const signIn = useCallback(
-		async (email: string, _password: string) => establish(email),
-		[establish]
+		(email: string, password: string) => authAction("/api/auth/login", email, password),
+		[authAction]
 	);
 	const signUp = useCallback(
-		async (email: string, _password: string) => establish(email),
-		[establish]
+		(email: string, password: string) => authAction("/api/auth/register", email, password),
+		[authAction]
 	);
 
-	// Mock OAuth: no real provider round-trip, just establishes a demo user with a
-	// provider-flavoured email. Swap for a real OAuth redirect later.
-	const signInWithProvider = useCallback(
-		async (provider: AuthProvider2) =>
-			establish(provider === "google" ? "you@gmail.com" : "you@users.noreply.github.com"),
-		[establish]
-	);
+	// B2 (OAuth) not implemented server-side yet.
+	const signInWithProvider = useCallback(async (_provider: AuthProvider2): Promise<AuthUser> => {
+		throw new Error("Social sign-in isn't available yet.");
+	}, []);
 
-	const signOut = useCallback(() => {
+	const signOut = useCallback(async () => {
+		// Clear locally first so the UI updates instantly, then revoke server-side.
 		setUser(null);
-		persist(null);
+		pingOtherTabs();
+		try {
+			await authFetch("/api/auth/logout", { method: "POST" });
+		} catch {
+			/* ignore — already cleared locally */
+		}
 	}, []);
 
 	const promptAuth = useCallback((mode: "signin" | "signup" = "signin") => {
@@ -145,7 +193,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			setUser((prev) => {
 				if (!prev) return prev;
 				const next = { ...prev, ...patch };
-				persist(next);
+				if (typeof next.emailNotifications === "boolean") savePref(next.id, next.emailNotifications);
 				return next;
 			});
 		},
@@ -156,6 +204,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		() => ({
 			user,
 			isAuthenticated: user !== null,
+			loading,
 			signIn,
 			signUp,
 			signInWithProvider,
@@ -165,7 +214,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			promptAuth,
 			closeAuthPrompt,
 		}),
-		[user, signIn, signUp, signInWithProvider, signOut, updatePreferences, authPrompt, promptAuth, closeAuthPrompt]
+		[user, loading, signIn, signUp, signInWithProvider, signOut, updatePreferences, authPrompt, promptAuth, closeAuthPrompt]
 	);
 
 	return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
