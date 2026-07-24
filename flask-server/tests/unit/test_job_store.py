@@ -8,6 +8,10 @@ import os
 
 import pytest
 
+# Jobs now require an owner (job.user_id NOT NULL + FK). The fixture seeds the
+# reserved system user, and tests own their jobs with it.
+from models.user import SYSTEM_USER_ID as OWNER
+
 
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
@@ -24,17 +28,22 @@ def store(tmp_path, monkeypatch):
     import models.engine as engine
     importlib.reload(engine)
     import models.job  # noqa: F401
+    import models.user  # noqa: F401
+    import models.auth_session  # noqa: F401
+    import services.auth_store as auth_store
+    importlib.reload(auth_store)
     import services.job_store as job_store
     importlib.reload(job_store)
 
     engine.reset_engine_for_tests()
     engine.create_all()
+    auth_store.ensure_system_user()  # FK target for job.user_id
     yield job_store
     engine.reset_engine_for_tests()
 
 
 def test_create_and_get(store):
-    job = store.create_job("s1", "ePAI", "/in/ct.nii.gz", "/sess/s1", "/sess/s1/out.zip")
+    job = store.create_job("s1", "ePAI", "/in/ct.nii.gz", "/sess/s1", "/sess/s1/out.zip", user_id=OWNER)
     assert job["status"] == "queued"
     assert job["model"] == "ePAI"
     got = store.get_job("s1")
@@ -44,7 +53,7 @@ def test_create_and_get(store):
 
 def test_upsert_creates_then_patches(store):
     # First upsert must carry the NOT NULL columns (mirrors the real first call).
-    store.upsert_job("s1", status="queued", model="ePAI")
+    store.upsert_job("s1", status="queued", model="ePAI", user_id=OWNER)
     store.upsert_job("s1", status="running")
     store.upsert_job("s1", status="completed", zip_path="/z.zip")
     job = store.get_job("s1")
@@ -54,7 +63,7 @@ def test_upsert_creates_then_patches(store):
 
 
 def test_update_unknown_field_raises(store):
-    store.create_job("s1", "ePAI", None, None, None)
+    store.create_job("s1", "ePAI", None, None, None, user_id=OWNER)
     with pytest.raises(AttributeError):
         store.update_job("s1", not_a_column=1)
 
@@ -64,8 +73,8 @@ def test_update_missing_job_returns_none(store):
 
 
 def test_claim_is_exclusive_and_oldest_first(store):
-    store.create_job("old", "ePAI", None, None, None)
-    store.create_job("new", "ePAI", None, None, None)
+    store.create_job("old", "ePAI", None, None, None, user_id=OWNER)
+    store.create_job("new", "ePAI", None, None, None, user_id=OWNER)
     # Force a deterministic ordering rather than relying on wall-clock ties.
     store.update_job("old", created_at=_dt("2026-01-01T00:00:00"))
     store.update_job("new", created_at=_dt("2026-01-02T00:00:00"))
@@ -81,7 +90,7 @@ def test_claim_is_exclusive_and_oldest_first(store):
 
 
 def test_heartbeat_owner_semantics(store):
-    store.create_job("s1", "ePAI", None, None, None)
+    store.create_job("s1", "ePAI", None, None, None, user_id=OWNER)
     store.claim_next_job("w1")
     assert store.heartbeat("s1", "w1") is True
     assert store.heartbeat("s1", "w2") is False   # wrong owner
@@ -93,7 +102,7 @@ def test_expired_lease_is_reclaimable(store):
     from datetime import timedelta
     from models.job import utcnow
 
-    store.create_job("s1", "ePAI", None, None, None)
+    store.create_job("s1", "ePAI", None, None, None, user_id=OWNER)
     store.claim_next_job("dead")
     store.update_job("s1", lease_expires_at=utcnow() - timedelta(seconds=1))
 
@@ -111,7 +120,7 @@ def test_expired_lease_is_reclaimable(store):
 
 
 def test_cancel_queued_moves_to_cancelled(store):
-    store.create_job("s1", "ePAI", None, None, None)
+    store.create_job("s1", "ePAI", None, None, None, user_id=OWNER)
     store.request_cancel("s1")
     assert store.get_job("s1")["status"] == "cancelled"
     # A cancelled/flagged job is never handed to a worker.
@@ -119,7 +128,7 @@ def test_cancel_queued_moves_to_cancelled(store):
 
 
 def test_cancel_running_sets_flag_only(store):
-    store.create_job("s1", "ePAI", None, None, None)
+    store.create_job("s1", "ePAI", None, None, None, user_id=OWNER)
     store.claim_next_job("w1")
     store.request_cancel("s1")
     job = store.get_job("s1")
@@ -129,8 +138,8 @@ def test_cancel_running_sets_flag_only(store):
 
 
 def test_reap_fails_orphaned_jobs(store):
-    store.create_job("queued", "ePAI", None, None, None)
-    store.create_job("running", "ePAI", None, None, None)
+    store.create_job("queued", "ePAI", None, None, None, user_id=OWNER)
+    store.create_job("running", "ePAI", None, None, None, user_id=OWNER)
     store.claim_next_job("w1")  # claims "queued" (oldest) -> running
 
     # Both are in-flight with no live lease window that outlasts a restart:
@@ -149,7 +158,7 @@ def test_reap_leaves_live_lease_alone(store):
     from datetime import timedelta
     from models.job import utcnow
 
-    store.create_job("s1", "ePAI", None, None, None)
+    store.create_job("s1", "ePAI", None, None, None, user_id=OWNER)
     store.claim_next_job("w1")
     # Fresh, future lease => a live worker holds it; reap must not touch it.
     store.update_job("s1", lease_expires_at=utcnow() + timedelta(minutes=30))
@@ -158,8 +167,8 @@ def test_reap_leaves_live_lease_alone(store):
 
 
 def test_fail_all_active(store):
-    store.create_job("a", "ePAI", None, None, None)
-    store.create_job("b", "ePAI", None, None, None)
+    store.create_job("a", "ePAI", None, None, None, user_id=OWNER)
+    store.create_job("b", "ePAI", None, None, None, user_id=OWNER)
     store.update_job("b", status="completed")
     n = store.fail_all_active()
     assert n == 1

@@ -20,17 +20,20 @@ from models.job import (
     Job, utcnow, TERMINAL_STATUSES,
     STATUS_QUEUED, STATUS_RUNNING, STATUS_FAILED, STATUS_CANCELLED,
 )
+from models.user import SYSTEM_USER_ID
 
 
 def create_job(session_id: str, model: str, ct_path: str | None,
-               session_path: str | None, zip_path: str | None) -> dict:
-    """Insert (or reset) a queued job. Re-submitting a session id overwrites the
-    prior row (frontend reuses the id on retry; last-write-wins)."""
+               session_path: str | None, zip_path: str | None,
+               user_id: str) -> dict:
+    """Insert (or reset) a queued job owned by user_id. Re-submitting a session
+    id overwrites the prior row (frontend reuses the id on retry)."""
     with session_scope() as s:
         job = s.get(Job, session_id)
         if job is None:
             job = Job(session_id=session_id)
             s.add(job)
+        job.user_id = user_id
         job.model = model
         job.status = STATUS_QUEUED
         job.error = None
@@ -67,6 +70,13 @@ def get_job(session_id: str) -> dict | None:
     with session_scope() as s:
         job = s.get(Job, session_id)
         return job.to_dict() if job else None
+
+
+def list_jobs_for_user(user_id: str) -> list[dict]:
+    """All of a user's jobs, most recent first — backs GET /api/me/jobs."""
+    with session_scope() as s:
+        stmt = select(Job).where(Job.user_id == user_id).order_by(Job.created_at.desc())
+        return [dict(session_id=j.session_id, **j.to_dict()) for j in s.execute(stmt).scalars()]
 
 
 def update_job(session_id: str, **fields) -> dict | None:
@@ -174,6 +184,8 @@ def import_legacy_job_json(sessions_dir: str) -> int:
                 if s.get(Job, name) is not None:
                     continue
                 job = Job(session_id=name)
+                # Pre-account jobs have no owner -> the reserved system user.
+                job.user_id = SYSTEM_USER_ID
                 job.model = data.get("model") or "unknown"
                 job.status = data.get("status") or STATUS_FAILED
                 for key in ("error", "ct_path", "session_path", "zip_path", "output_mask_dir"):

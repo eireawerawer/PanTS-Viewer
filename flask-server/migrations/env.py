@@ -17,6 +17,8 @@ from models.base import ModelBase  # noqa: E402
 # Import models for their registration side effects (add new ones here so
 # autogenerate sees their tables).
 from models import job as _job  # noqa: E402,F401
+from models import user as _user  # noqa: E402,F401
+from models import auth_session as _auth_session  # noqa: E402,F401
 from models import application_session as _app_session  # noqa: E402,F401
 from models import combined_labels as _combined_labels  # noqa: E402,F401
 

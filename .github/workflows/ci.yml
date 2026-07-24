@@ -64,22 +64,27 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Dependency-light on purpose: the path-safety guard is pure (re + werkzeug)
-      # and the job store needs only SQLAlchemy + Flask-SQLAlchemy + alembic, so we
-      # skip the full requirements.txt (heavy: nibabel/scipy) and install just what
-      # these fast unit tests need. numpy is required because constants.py imports it.
+      # Dependency-light on purpose: the auth + job store need only SQLAlchemy +
+      # Flask-SQLAlchemy + alembic + argon2, so we skip the full requirements.txt
+      # (heavy: nibabel/scipy) and install just what these fast tests need. numpy
+      # is required because constants.py imports it.
       - name: Install test deps
-        run: python -m pip install --upgrade pip pytest werkzeug SQLAlchemy Flask-SQLAlchemy alembic numpy python-dotenv
+        run: python -m pip install --upgrade pip pytest werkzeug SQLAlchemy Flask-SQLAlchemy alembic argon2-cffi numpy python-dotenv
 
       - name: Path-safety unit tests
         run: python -m pytest tests/unit/test_path_safety.py -v
 
-      # Locks in the SQLite-backed inference job store: leasing/claim exclusivity,
-      # cancellation, boot-time reap, and the legacy job.json import.
+      # SQLite-backed inference job store: leasing/claim exclusivity, cancellation,
+      # boot-time reap, legacy import, and job ownership.
       - name: Job-store unit tests
         run: python -m pytest tests/unit/test_job_store.py -v
 
-      # The initial migration must apply cleanly against a fresh SQLite DB.
+      # Accounts: argon2 hashing, sessions (create/resolve/expire/revoke), and the
+      # register -> cookie -> me -> logout endpoint flow + require_auth guard.
+      - name: Auth unit + endpoint tests
+        run: python -m pytest tests/unit/test_auth_store.py tests/functional/test_auth_endpoints.py -v
+
+      # Both migrations must apply cleanly against a fresh SQLite DB and round-trip.
       - name: Alembic migration smoke
         env:
           DATABASE_URL: sqlite:///ci_migration_check.db

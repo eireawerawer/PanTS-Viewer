@@ -32,8 +32,10 @@ def _set_sqlite_pragmas(dbapi_conn, _record):
     finally:
         cur.close()
 
-# Imported for its side effect: registering the table on ModelBase.metadata.
+# Imported for their side effect: registering the tables on ModelBase.metadata.
 from models import job as _job  # noqa: F401,E402
+from models import user as _user  # noqa: F401,E402
+from models import auth_session as _auth_session  # noqa: F401,E402
 
 _engine = None
 _SessionLocal = None

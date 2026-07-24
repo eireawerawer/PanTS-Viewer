@@ -14,6 +14,7 @@ from services.ollama_client import (
 )
 from services.segmentation_metrics import calculate_session_metrics
 from services import job_store
+from api.auth import current_user, require_auth
 from models.application_session import ApplicationSession
 from models.combined_labels import CombinedLabels
 from models.base import db
@@ -885,9 +886,15 @@ def _job_status_of(session_id):
     return (job.get("status") or "").lower() if job else ""
 
 
-def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_path=None):
+def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_path=None, user_id=None):
     if not _is_safe_id(session_id):
         return jsonify({"error": "Invalid session ID"}), 400
+    # Running inference requires an account; the endpoint's @require_auth
+    # guarantees a user, and we record ownership on the job.
+    if not user_id:
+        user_id = (current_user() or {}).get("id")
+    if not user_id:
+        return jsonify({"error": "Authentication required"}), 401
     session_path = os.path.join(SESSIONS_DIR, session_id)
     os.makedirs(session_path, exist_ok=True)
 
@@ -913,6 +920,7 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
     # job to "running" when it actually gets the GPU.
     _set_inference_job(
         session_id,
+        user_id=user_id,
         status="queued",
         model=model_name,
         error=None,
@@ -979,6 +987,7 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
     return jsonify({"message": "Segmentation started", "session_id": session_id}), 200
 
 @api_blueprint.route('/auto_segment/<session_id>', methods=['POST'])
+@require_auth
 def auto_segment(session_id):
 
     model_name = request.form.get("MODEL_NAME", None)
@@ -999,6 +1008,7 @@ def auto_segment(session_id):
 
 @api_blueprint.route('/run-epai-inference', methods=['POST'])
 @api_blueprint.route('/run-inference', methods=['POST'])
+@require_auth
 def run_epai_inference():
     """
     Runs ePAI inference with either:

@@ -13,6 +13,7 @@ from constants import Constants
 #print("DEBUG_CONSTANT:", Constants.SESSIONS_DIR_NAME)
 
 from api.api_blueprint import api_blueprint
+from api.auth_blueprint import auth_blueprint
 from models.base import db
 from models.combined_labels import CombinedLabels
 from models.engine import get_engine
@@ -27,7 +28,8 @@ def create_app():
     create_session_dir()
     app = Flask(__name__)
     app.register_blueprint(api_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
-    
+    app.register_blueprint(auth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
+
     app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB, for overcoming size limits in file uploads
 
     # Point Flask-SQLAlchemy at the same URL as the job store. FSA builds its own
@@ -39,10 +41,12 @@ def create_app():
     with app.app_context():
         get_engine()  # init at boot, not first request
 
-    # Import any pre-DB job.json (keeps pre-deploy results viewable), then fail
-    # jobs orphaned by the restart so pollers see the truth, not a phantom "running".
+    # Seed the reserved system user first (legacy-imported jobs are assigned to
+    # it, and job.user_id is NOT NULL with an FK), then import any pre-DB
+    # job.json, then fail jobs orphaned by the restart.
     try:
-        from services import job_store
+        from services import auth_store, job_store
+        auth_store.ensure_system_user()
         imported = job_store.import_legacy_job_json(Constants.SESSIONS_DIR_NAME)
         if imported:
             print(f"[boot] imported {imported} legacy job.json record(s)")
@@ -50,7 +54,7 @@ def create_app():
         if reaped:
             print(f"[boot] reaped {reaped} orphaned inference job(s)")
     except Exception as e:
-        print(f"[boot] job store init skipped: {e}")
+        print(f"[boot] account/job store init skipped: {e}")
 
     class FilterProgressRequests(logging.Filter):
         def filter(self, record):
@@ -58,7 +62,15 @@ def create_app():
 
     logging.getLogger('werkzeug').addFilter(FilterProgressRequests())
 
-    CORS(app)
+    # Pin CORS to an explicit allowlist and allow credentials — required now that
+    # auth rides in a cookie (a wildcard origin can't be combined with cookies,
+    # and would let any site make authenticated requests as a logged-in user).
+    # Set ALLOWED_ORIGINS on the server (comma-separated); defaults to local dev.
+    allowed_origins = [
+        o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+        if o.strip()
+    ]
+    CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True)
 
     return app
 

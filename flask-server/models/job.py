@@ -9,7 +9,7 @@ Timestamps are naive UTC (SQLite has no tz type). Always write via ``utcnow()``.
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, Index
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from models.base import db
@@ -36,6 +36,12 @@ class Job(db.Model):
     # The session id the frontend already generates and polls with, reused as PK
     # so existing URLs (/inference-status/<id>, /get_result/<id>) keep working.
     session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+
+    # Owner. NOT NULL: running inference requires an account. Legacy/imported
+    # jobs are assigned the reserved system user (models.user.SYSTEM_USER_ID).
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("user_account.id"), nullable=False, index=True
+    )
 
     model: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default=STATUS_QUEUED)
