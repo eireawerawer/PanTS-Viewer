@@ -31,12 +31,8 @@ export default function LandingPage() {
   const [structures, setStructures] = useState(0);
   const [organClasses, setOrganClasses] = useState(0);
 
-  /* ── active tab ── */
-  const [activeTab, setActiveTab] = useState<TabType>("overview");
-
   /* ── tab navigation handler ── */
   const handleTabClick = (tab: TabType) => {
-    setActiveTab(tab);
     if (tab === "dataset") {
       navigate("/dashboard");
     } else if (tab === "upload") {
