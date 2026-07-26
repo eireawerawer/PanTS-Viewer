@@ -1,21 +1,52 @@
-import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import React, {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
-  { id: "None",      label: "None",       desc: "View only — files never leave your browser" },
-  { id: "ePAI",      label: "ePAI",       desc: "For detailed pancreas and tumor analysis" },
-  { id: "SuPreM",    label: "SuPreM",     desc: "For whole-body scans from lungs to legs" },
-  { id: "MedFormer", label: "MedFormer",  desc: "For reliable abdominal segmentation" },
-  { id: "R-Super",   label: "R-Super",    desc: "For the highest tumor detection accuracy" },
-  { id: "Atlas-Net", label: "Atlas-Net",  desc: "For anatomically consistent results" },
+  {
+    id: "None",
+    label: "None",
+    desc: "View only — files never leave your browser",
+  },
+  {
+    id: "ePAI",
+    label: "ePAI",
+    desc: "For detailed pancreas and tumor analysis",
+  },
+  {
+    id: "SuPreM",
+    label: "SuPreM",
+    desc: "For whole-body scans from lungs to legs",
+  },
+  {
+    id: "MedFormer",
+    label: "MedFormer",
+    desc: "For reliable abdominal segmentation",
+  },
+  {
+    id: "R-Super",
+    label: "R-Super",
+    desc: "For the highest tumor detection accuracy",
+  },
+  {
+    id: "Atlas-Net",
+    label: "Atlas-Net",
+    desc: "For anatomically consistent results",
+  },
 ];
-import { useNavigate } from 'react-router-dom';
-import './UploadPage.css';
+import { useNavigate } from "react-router-dom";
+import "./UploadPage.css";
 
 // Lazy so NiiVue / Cornerstone aren't pulled into the upload bundle until a file
 // is actually previewed. CtPreview handles NIfTI, DicomPreview handles a DICOM series.
-const CtPreview = lazy(() => import('../components/CtPreview/CtPreview'));
-const DicomPreview = lazy(() => import('../components/CtPreview/DicomPreview'));
-import { API_BASE } from '../helpers/constants';
+const CtPreview = lazy(() => import("../components/CtPreview/CtPreview"));
+const DicomPreview = lazy(() => import("../components/CtPreview/DicomPreview"));
+import { API_BASE } from "../helpers/constants";
 import {
   addRecentUpload,
   formatRelativeTime,
@@ -24,17 +55,17 @@ import {
   removeRecentUpload,
   updateRecentUploadStatus,
   type RecentUpload,
-} from '../helpers/recentUploads';
-import Header from '../components/Header';
-import { looksLikeDicom, setLocalDicomFiles } from '../helpers/dicomLocal';
-import { setLocalNiftiFile } from '../helpers/localNifti';
+} from "../helpers/recentUploads";
+import Header from "../components/Header";
+import { looksLikeDicom, setLocalDicomFiles } from "../helpers/dicomLocal";
+import { setLocalNiftiFile } from "../helpers/localNifti";
 import {
   deletePendingUpload,
   loadPendingUploads,
   savePendingUpload,
   setPendingNextChunk,
   type PendingUpload,
-} from '../helpers/pendingUploads';
+} from "../helpers/pendingUploads";
 
 const parseApiResponse = async (res: Response): Promise<any> => {
   const contentType = res.headers.get("content-type") || "";
@@ -44,15 +75,15 @@ const parseApiResponse = async (res: Response): Promise<any> => {
   const text = await res.text();
   const shortBody = text.slice(0, 200).replace(/\s+/g, " ").trim();
   throw new Error(
-    `Expected JSON but got ${contentType || "unknown content-type"} (HTTP ${res.status}). Body: ${shortBody}`
+    `Expected JSON but got ${contentType || "unknown content-type"} (HTTP ${res.status}). Body: ${shortBody}`,
   );
 };
 
 // A selection is either a single NIfTI file or a picked DICOM folder (the series'
 // raw .dcm slices). Both are previewable individually and runnable through inference.
 type SelectedItem =
-  | { id: string; kind: 'nifti'; file: File }
-  | { id: string; kind: 'dicom'; files: File[]; label: string };
+  | { id: string; kind: "nifti"; file: File }
+  | { id: string; kind: "dicom"; files: File[]; label: string };
 
 const UploadPage: React.FC = () => {
   const navigate = useNavigate();
@@ -60,7 +91,9 @@ const UploadPage: React.FC = () => {
   // Folder picker for a DICOM series (run inference, or view-only when model is "None").
   const dicomUploadInputRef = useRef<HTMLInputElement | null>(null);
   // One poll timer per in-flight session so runs can proceed in parallel.
-  const pollTimersRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+  const pollTimersRef = useRef<Map<string, ReturnType<typeof setInterval>>>(
+    new Map(),
+  );
   // Whether the current foreground upload got stored in IndexedDB (resumable).
   // If IDB was unavailable we fall back to warning before an unload instead.
   const uploadResumableRef = useRef<boolean>(false);
@@ -77,7 +110,16 @@ const UploadPage: React.FC = () => {
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [inferenceCompleted, setInferenceCompleted] = useState<boolean>(false);
-  const [selectedModel, setSelectedModel] = useState<"None" | "ePAI" | "SuPreM" | "OpenVAE" | "MedFormer" | "R-Super" | "Atlas-Net" | "">("None");
+  const [selectedModel, setSelectedModel] = useState<
+    | "None"
+    | "ePAI"
+    | "SuPreM"
+    | "OpenVAE"
+    | "MedFormer"
+    | "R-Super"
+    | "Atlas-Net"
+    | ""
+  >("None");
   const [modelDropOpen, setModelDropOpen] = useState(false);
   const modelDropRef = useRef<HTMLDivElement>(null);
   const [preDropOpen, setPreDropOpen] = useState(false);
@@ -87,12 +129,16 @@ const UploadPage: React.FC = () => {
   const postDropRef = useRef<HTMLDivElement>(null);
   const [postValue, setPostValue] = useState("");
   const [isDragOver, setIsDragOver] = useState(false);
-  const [recentUploads, setRecentUploads] = useState<RecentUpload[]>(() => loadRecentUploads());
+  const [recentUploads, setRecentUploads] = useState<RecentUpload[]>(() =>
+    loadRecentUploads(),
+  );
   // Sub-state of each Active card: "uploading" | "queued" | "running".
-  const [sessionPhases, setSessionPhases] = useState<Record<string, string>>({});
+  const [sessionPhases, setSessionPhases] = useState<Record<string, string>>(
+    {},
+  );
 
   const setPhase = (sid: string, phase?: string) =>
-    setSessionPhases(prev => {
+    setSessionPhases((prev) => {
       if (phase === undefined) {
         if (!(sid in prev)) return prev;
         const { [sid]: _dropped, ...rest } = prev;
@@ -106,28 +152,42 @@ const UploadPage: React.FC = () => {
   /* ── File handling ── */
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
-    const filteredFiles = Array.from(e.target.files).filter(file =>
-      allowedExtensions.some(ext => file.name.toLowerCase().endsWith(ext))
+    const filteredFiles = Array.from(e.target.files).filter((file) =>
+      allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
     );
     if (filteredFiles.length === 0) {
       alert("Please select .nii or .nii.gz files only");
       return;
     }
-    setSelectedItems(prev => [...prev, ...filteredFiles.map(f => ({ id: crypto.randomUUID(), kind: 'nifti' as const, file: f }))]);
+    setSelectedItems((prev) => [
+      ...prev,
+      ...filteredFiles.map((f) => ({
+        id: crypto.randomUUID(),
+        kind: "nifti" as const,
+        file: f,
+      })),
+    ]);
   };
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
     if (!e.dataTransfer.files) return;
-    const filteredFiles = Array.from(e.dataTransfer.files).filter(file =>
-      allowedExtensions.some(ext => file.name.toLowerCase().endsWith(ext))
+    const filteredFiles = Array.from(e.dataTransfer.files).filter((file) =>
+      allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
     );
     if (filteredFiles.length === 0) {
       alert("Please drop .nii or .nii.gz files only");
       return;
     }
-    setSelectedItems(prev => [...prev, ...filteredFiles.map(f => ({ id: crypto.randomUUID(), kind: 'nifti' as const, file: f }))]);
+    setSelectedItems((prev) => [
+      ...prev,
+      ...filteredFiles.map((f) => ({
+        id: crypto.randomUUID(),
+        kind: "nifti" as const,
+        file: f,
+      })),
+    ]);
   }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -140,13 +200,15 @@ const UploadPage: React.FC = () => {
   }, []);
 
   const removeItem = (id: string) => {
-    setSelectedItems(prev => prev.filter(item => item.id !== id));
-    setPreviewItemId(prev => (prev === id ? null : prev));
+    setSelectedItems((prev) => prev.filter((item) => item.id !== id));
+    setPreviewItemId((prev) => (prev === id ? null : prev));
   };
 
   // Pick a DICOM folder to RUN INFERENCE on (distinct from the view-only opener):
   // the raw slices are added as one selectable item, previewable and runnable.
-  const handleDicomInferenceSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleDicomInferenceSelect = (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = ""; // allow re-picking the same folder later
     const candidates = files.filter(looksLikeDicom);
@@ -154,9 +216,14 @@ const UploadPage: React.FC = () => {
       alert("No DICOM files (.dcm) found in the selected folder.");
       return;
     }
-    setSelectedItems(prev => [
+    setSelectedItems((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), kind: 'dicom', files: candidates, label: `DICOM series (${candidates.length} slices)` },
+      {
+        id: crypto.randomUUID(),
+        kind: "dicom",
+        files: candidates,
+        label: `DICOM series (${candidates.length} slices)`,
+      },
     ]);
   };
 
@@ -170,7 +237,7 @@ const UploadPage: React.FC = () => {
   };
 
   const stopAllPolling = () => {
-    pollTimersRef.current.forEach(timer => clearInterval(timer));
+    pollTimersRef.current.forEach((timer) => clearInterval(timer));
     pollTimersRef.current.clear();
   };
 
@@ -182,9 +249,11 @@ const UploadPage: React.FC = () => {
     setSessionId(sid);
     setInferenceCompleted(true);
     // Only auto-open the viewer when no other run is still in flight.
-    if (!uploads.some(u => u.status === "Processing")) {
+    if (!uploads.some((u) => u.status === "Processing")) {
       setTimeout(() => {
-        navigate(model === "OpenVAE" ? `/reconstruction/${sid}` : `/session/${sid}`);
+        navigate(
+          model === "OpenVAE" ? `/reconstruction/${sid}` : `/session/${sid}`,
+        );
       }, 600);
     }
   };
@@ -207,13 +276,16 @@ const UploadPage: React.FC = () => {
             stopPolling(sid);
             setPhase(sid);
             setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
-            setMessage("Session no longer exists on the server - marked as Failed.");
+            setMessage(
+              "Session no longer exists on the server - marked as Failed.",
+            );
           }
           return;
         }
         notFoundCount = 0;
 
-        if (!res.ok) throw new Error(data.error || data.status || "Status check failed");
+        if (!res.ok)
+          throw new Error(data.error || data.status || "Status check failed");
 
         if (status === "completed") {
           finishSession(sid, model);
@@ -252,7 +324,9 @@ const UploadPage: React.FC = () => {
 
     // Fire-and-forget: if the job never reached the server (upload phase)
     // this 404s, which is fine - the client side is already torn down.
-    fetch(`${API_BASE}/api/cancel-inference/${sid}`, { method: "POST" }).catch(() => {});
+    fetch(`${API_BASE}/api/cancel-inference/${sid}`, { method: "POST" }).catch(
+      () => {},
+    );
 
     if (foregroundUploadSidRef.current === sid) {
       foregroundUploadSidRef.current = null;
@@ -269,30 +343,39 @@ const UploadPage: React.FC = () => {
     // inferencing server-side, so we reconnect their pollers.
     let cancelled = false;
     (async () => {
-      const processing = loadRecentUploads().filter(u => u.status === "Processing");
+      const processing = loadRecentUploads().filter(
+        (u) => u.status === "Processing",
+      );
       const pending = await loadPendingUploads();
       if (cancelled) return;
-      const pendingById = new Map(pending.map(p => [p.sessionId, p]));
+      const pendingById = new Map(pending.map((p) => [p.sessionId, p]));
 
       for (const u of processing) {
         if (pendingById.has(u.sessionId)) {
-          runUpload(pendingById.get(u.sessionId)!, false);  // resume the upload
+          runUpload(pendingById.get(u.sessionId)!, false); // resume the upload
         } else {
-          startInferencePolling(u.sessionId, u.model);       // resume polling
+          startInferencePolling(u.sessionId, u.model); // resume polling
         }
       }
 
       // Clean up IndexedDB entries whose card no longer exists (deleted or
       // trimmed off the 8-entry list) so the store can't leak.
-      const known = new Set(loadRecentUploads().map(u => u.sessionId));
-      pending.filter(p => !known.has(p.sessionId)).forEach(p => deletePendingUpload(p.sessionId));
+      const known = new Set(loadRecentUploads().map((u) => u.sessionId));
+      pending
+        .filter((p) => !known.has(p.sessionId))
+        .forEach((p) => deletePendingUpload(p.sessionId));
 
       if (processing.length > 0) {
         setSessionId(processing[0].sessionId);
-        setMessage(`Reconnected · ${processing.length} run${processing.length === 1 ? "" : "s"} in progress`);
+        setMessage(
+          `Reconnected · ${processing.length} run${processing.length === 1 ? "" : "s"} in progress`,
+        );
       }
     })();
-    return () => { cancelled = true; stopAllPolling(); };
+    return () => {
+      cancelled = true;
+      stopAllPolling();
+    };
   }, []);
 
   // Only warn before an unload if the current upload could NOT be stored in
@@ -311,7 +394,10 @@ const UploadPage: React.FC = () => {
   useEffect(() => {
     if (!modelDropOpen) return;
     const handler = (e: MouseEvent) => {
-      if (modelDropRef.current && !modelDropRef.current.contains(e.target as Node))
+      if (
+        modelDropRef.current &&
+        !modelDropRef.current.contains(e.target as Node)
+      )
         setModelDropOpen(false);
     };
     document.addEventListener("mousedown", handler);
@@ -331,7 +417,10 @@ const UploadPage: React.FC = () => {
   useEffect(() => {
     if (!postDropOpen) return;
     const handler = (e: MouseEvent) => {
-      if (postDropRef.current && !postDropRef.current.contains(e.target as Node))
+      if (
+        postDropRef.current &&
+        !postDropRef.current.contains(e.target as Node)
+      )
         setPostDropOpen(false);
     };
     document.addEventListener("mousedown", handler);
@@ -347,7 +436,14 @@ const UploadPage: React.FC = () => {
   // left off. `foreground` = the run the user just clicked (drives the progress
   // bar); resumed background runs show only their Active-section spinner.
   const runUpload = async (p: PendingUpload, foreground: boolean) => {
-    const { sessionId: sid, file, filename, model, bdmapId: bid, totalChunks } = p;
+    const {
+      sessionId: sid,
+      file,
+      filename,
+      model,
+      bdmapId: bid,
+      totalChunks,
+    } = p;
     const controller = new AbortController();
     uploadAbortRef.current.set(sid, controller);
     setPhase(sid, "uploading");
@@ -360,7 +456,10 @@ const UploadPage: React.FC = () => {
       }
 
       for (let i = p.nextChunk; i < totalChunks; i++) {
-        const chunk = file.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, file.size));
+        const chunk = file.slice(
+          i * CHUNK_SIZE,
+          Math.min((i + 1) * CHUNK_SIZE, file.size),
+        );
         const formData = new FormData();
         formData.append("session_id", sid);
         formData.append("chunk_index", i.toString());
@@ -368,9 +467,14 @@ const UploadPage: React.FC = () => {
         formData.append("file", chunk);
 
         const res = await fetch(`${API_BASE}/api/upload-inference-chunk`, {
-          method: "POST", body: formData, signal: controller.signal,
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
         });
-        if (res.status === 413) throw new Error("Upload chunk too large for server/proxy limit (HTTP 413).");
+        if (res.status === 413)
+          throw new Error(
+            "Upload chunk too large for server/proxy limit (HTTP 413).",
+          );
         const data = await parseApiResponse(res);
         if (!res.ok) throw new Error(data.error || "Chunk upload failed");
 
@@ -378,7 +482,8 @@ const UploadPage: React.FC = () => {
         // lot of IDB writes). On resume we re-send at most a few already-stored
         // chunks, which the backend just overwrites. Harmless.
         if (i % 16 === 0) await setPendingNextChunk(sid, i + 1);
-        if (foreground) setUploadProgress(Math.round(((i + 1) / totalChunks) * 100));
+        if (foreground)
+          setUploadProgress(Math.round(((i + 1) / totalChunks) * 100));
       }
 
       if (foreground) setMessage("Finalizing upload...");
@@ -411,7 +516,9 @@ const UploadPage: React.FC = () => {
       inferFd.append("model_name", model);
       inferFd.append("uploaded_filename", uploadedName);
       const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
-        method: "POST", body: inferFd, signal: controller.signal,
+        method: "POST",
+        body: inferFd,
+        signal: controller.signal,
       });
       const data = await parseApiResponse(res);
       if (!res.ok) throw new Error(data.error || "Failed to start inference");
@@ -461,9 +568,14 @@ const UploadPage: React.FC = () => {
         formData.append("session_id", sid);
         formData.append("file", files[i]);
         const res = await fetch(`${API_BASE}/api/upload-dicom-slice`, {
-          method: "POST", body: formData, signal: controller.signal,
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
         });
-        if (res.status === 413) throw new Error("DICOM slice too large for server/proxy limit (HTTP 413).");
+        if (res.status === 413)
+          throw new Error(
+            "DICOM slice too large for server/proxy limit (HTTP 413).",
+          );
         const data = await parseApiResponse(res);
         if (!res.ok) throw new Error(data.error || "DICOM slice upload failed");
         setUploadProgress(Math.round(((i + 1) / files.length) * 100));
@@ -471,11 +583,13 @@ const UploadPage: React.FC = () => {
 
       setMessage("Converting DICOM series to NIfTI...");
       const finalizeRes = await fetch(`${API_BASE}/api/finalize-dicom`, {
-        method: "POST", signal: controller.signal,
+        method: "POST",
+        signal: controller.signal,
         body: new URLSearchParams({ session_id: sid }),
       });
       const finalizeData = await parseApiResponse(finalizeRes);
-      if (!finalizeRes.ok) throw new Error(finalizeData.error || "DICOM conversion failed");
+      if (!finalizeRes.ok)
+        throw new Error(finalizeData.error || "DICOM conversion failed");
       const uploadedName = finalizeData.uploaded_filename || "ct.nii.gz";
 
       foregroundUploadSidRef.current = null;
@@ -488,7 +602,9 @@ const UploadPage: React.FC = () => {
       inferFd.append("model_name", model);
       inferFd.append("uploaded_filename", uploadedName);
       const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
-        method: "POST", body: inferFd, signal: controller.signal,
+        method: "POST",
+        body: inferFd,
+        signal: controller.signal,
       });
       const data = await parseApiResponse(res);
       if (!res.ok) throw new Error(data.error || "Failed to start inference");
@@ -521,7 +637,10 @@ const UploadPage: React.FC = () => {
     // "None" model = view only: open the scan in its full local viewer, nothing is
     // uploaded or run. DICOM opens the /dicom viewer, NIfTI the /local-nifti viewer.
     if (selectedModel === "None") {
-      if (!item) { alert("Select a scan to view first."); return; }
+      if (!item) {
+        alert("Select a scan to view first.");
+        return;
+      }
       if (item.kind === "dicom") {
         setLocalDicomFiles(item.files);
         navigate("/dicom");
@@ -539,7 +658,7 @@ const UploadPage: React.FC = () => {
 
     const model = selectedModel;
     const sid = crypto.randomUUID();
-    const label = (item.kind === 'dicom' ? item.label : item.file.name) || sid;
+    const label = (item.kind === "dicom" ? item.label : item.file.name) || sid;
 
     setInferenceCompleted(false);
     setRecentUploads(
@@ -550,15 +669,15 @@ const UploadPage: React.FC = () => {
         status: "Processing",
         timestamp: Date.now(),
         isReconstruction: model === "OpenVAE",
-      })
+      }),
     );
 
     // Consume the first item so the next can be queued. A DICOM folder uploads its
     // slices and converts server-side; a NIfTI file rides the resumable path (stashed
     // in IndexedDB so an interrupted upload can resume).
-    setSelectedItems(prev => prev.slice(1));
+    setSelectedItems((prev) => prev.slice(1));
 
-    if (item.kind === 'dicom') {
+    if (item.kind === "dicom") {
       runDicomUpload(sid, item.files, model);
       return;
     }
@@ -578,12 +697,18 @@ const UploadPage: React.FC = () => {
   };
 
   const handleCheckStatus = async () => {
-    if (!sessionId) { setMessage("No session id yet."); return; }
+    if (!sessionId) {
+      setMessage("No session id yet.");
+      return;
+    }
     try {
       const res = await fetch(`${API_BASE}/api/inference-status/${sessionId}`);
       const data = await parseApiResponse(res);
-      if (!res.ok) throw new Error(data.error || data.status || "Status check failed");
-      setMessage(`Status: ${data.status}${data.error ? ` (${data.error})` : ""}`);
+      if (!res.ok)
+        throw new Error(data.error || data.status || "Status check failed");
+      setMessage(
+        `Status: ${data.status}${data.error ? ` (${data.error})` : ""}`,
+      );
       const status = (data.status || "").toLowerCase();
       if (status === "completed") {
         setInferenceCompleted(true);
@@ -597,7 +722,9 @@ const UploadPage: React.FC = () => {
         if (!pollTimersRef.current.has(sessionId)) {
           // Use the model recorded on the card - the dropdown may have changed
           // since this run started, and the model decides the viewer route.
-          const model = loadRecentUploads().find(u => u.sessionId === sessionId)?.model || selectedModel;
+          const model =
+            loadRecentUploads().find((u) => u.sessionId === sessionId)?.model ||
+            selectedModel;
           startInferencePolling(sessionId, model);
         }
       }
@@ -608,14 +735,24 @@ const UploadPage: React.FC = () => {
   };
 
   const handleDownloadResult = async () => {
-    if (!sessionId) { setMessage("No session id yet."); return; }
+    if (!sessionId) {
+      setMessage("No session id yet.");
+      return;
+    }
     setMessage("Preparing download...");
     try {
-      const statusRes = await fetch(`${API_BASE}/api/inference-status/${sessionId}`);
+      const statusRes = await fetch(
+        `${API_BASE}/api/inference-status/${sessionId}`,
+      );
       const statusData = await parseApiResponse(statusRes);
-      if (!statusRes.ok) throw new Error(statusData.error || statusData.status || "Status check failed");
+      if (!statusRes.ok)
+        throw new Error(
+          statusData.error || statusData.status || "Status check failed",
+        );
       if (statusData.status !== "completed") {
-        setMessage(`Status: ${statusData.status || "unknown"}. Please wait until completed.`);
+        setMessage(
+          `Status: ${statusData.status || "unknown"}. Please wait until completed.`,
+        );
         return;
       }
       stopPolling(sessionId);
@@ -634,7 +771,9 @@ const UploadPage: React.FC = () => {
       link.click();
       document.body.removeChild(link);
       window.URL.revokeObjectURL(objectUrl);
-      setMessage("Download started: zip includes combined_labels.nii.gz and output.csv");
+      setMessage(
+        "Download started: zip includes combined_labels.nii.gz and output.csv",
+      );
     } catch (err) {
       console.error(err);
       setMessage("Download failed: " + (err as Error).message);
@@ -661,7 +800,10 @@ const UploadPage: React.FC = () => {
         body: formData,
       });
       const data = await parseApiResponse(res);
-      if (!res.ok) throw new Error(data.error || "Failed to start ePAI inference on reconstruction");
+      if (!res.ok)
+        throw new Error(
+          data.error || "Failed to start ePAI inference on reconstruction",
+        );
 
       const sid = data.session_id || newSessionId;
       setSessionId(sid);
@@ -675,18 +817,20 @@ const UploadPage: React.FC = () => {
             model: "ePAI",
             status: "Processing",
             timestamp: Date.now(),
-          })
+          }),
         );
         startInferencePolling(sid, "ePAI");
       }
     } catch (err) {
       console.error(err);
-      setMessage("Failed to start ePAI on reconstruction: " + (err as Error).message);
+      setMessage(
+        "Failed to start ePAI on reconstruction: " + (err as Error).message,
+      );
     }
   };
 
   /* ── Render ── */
-  const previewItem = selectedItems.find(i => i.id === previewItemId) ?? null;
+  const previewItem = selectedItems.find((i) => i.id === previewItemId) ?? null;
 
   return (
     <div className="upload-page-wrapper">
@@ -702,7 +846,7 @@ const UploadPage: React.FC = () => {
         <div className="upload-card">
           {/* ── Drop zone ── */}
           <div
-            className={`dropzone${isDragOver ? ' drag-over' : ''}`}
+            className={`dropzone${isDragOver ? " drag-over" : ""}`}
             onClick={() => fileInputRef.current?.click()}
             onDrop={handleDrop}
             onDragOver={handleDragOver}
@@ -713,43 +857,57 @@ const UploadPage: React.FC = () => {
               type="file"
               multiple
               accept=".nii,.gz"
-              style={{ display: 'none' }}
+              style={{ display: "none" }}
               onChange={handleFileSelect}
             />
             <input
               // Set the folder-picker attributes imperatively — passing webkitdirectory
               // as a JSX/spread prop doesn't reliably apply it, so the picker falls back
               // to single files. directory is the Firefox spelling.
-              ref={el => {
+              ref={(el) => {
                 dicomUploadInputRef.current = el;
                 if (el) {
-                  el.setAttribute('webkitdirectory', '');
-                  el.setAttribute('directory', '');
+                  el.setAttribute("webkitdirectory", "");
+                  el.setAttribute("directory", "");
                 }
               }}
               type="file"
               multiple
-              style={{ display: 'none' }}
+              style={{ display: "none" }}
               onChange={handleDicomInferenceSelect}
             />
-            <svg className="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <svg
+              className="dropzone-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
               <polyline points="17 8 12 3 7 8" />
               <line x1="12" y1="3" x2="12" y2="15" />
             </svg>
             <div className="dropzone-text">Click or drag to upload</div>
-            <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+            <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
               <button
                 type="button"
                 className="dropzone-btn"
-                onClick={e => { e.stopPropagation(); fileInputRef.current?.click(); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  fileInputRef.current?.click();
+                }}
               >
                 Select NIfTI file
               </button>
               <button
                 type="button"
                 className="dropzone-btn"
-                onClick={e => { e.stopPropagation(); dicomUploadInputRef.current?.click(); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  dicomUploadInputRef.current?.click();
+                }}
               >
                 Select DICOM folder
               </button>
@@ -760,18 +918,31 @@ const UploadPage: React.FC = () => {
           {selectedItems.length > 0 && (
             <div className="file-chips">
               {selectedItems.map((item) => {
-                const name = item.kind === 'dicom' ? item.label : item.file.name;
+                const name =
+                  item.kind === "dicom" ? item.label : item.file.name;
                 const isOpen = previewItemId === item.id;
                 return (
-                  <div key={item.id} className={`file-chip${isOpen ? ' file-chip--active' : ''}`}>
+                  <div
+                    key={item.id}
+                    className={`file-chip${isOpen ? " file-chip--active" : ""}`}
+                  >
                     <span className="file-chip-name">{name}</span>
                     <button
                       className="file-chip-preview"
-                      onClick={() => setPreviewItemId(prev => (prev === item.id ? null : item.id))}
+                      onClick={() =>
+                        setPreviewItemId((prev) =>
+                          prev === item.id ? null : item.id,
+                        )
+                      }
                     >
-                      {isOpen ? 'Hide' : 'Preview'}
+                      {isOpen ? "Hide" : "Preview"}
                     </button>
-                    <button className="file-chip-remove" onClick={() => removeItem(item.id)}>×</button>
+                    <button
+                      className="file-chip-remove"
+                      onClick={() => removeItem(item.id)}
+                    >
+                      ×
+                    </button>
                   </div>
                 );
               })}
@@ -782,12 +953,23 @@ const UploadPage: React.FC = () => {
           {previewItem && !isUploading && (
             <>
               <div className="ct-preview-label">
-                Preview · {previewItem.kind === 'dicom' ? previewItem.label : previewItem.file.name}
+                Preview ·{" "}
+                {previewItem.kind === "dicom"
+                  ? previewItem.label
+                  : previewItem.file.name}
               </div>
-              <Suspense fallback={<div className="ct-preview ct-preview--msg">Loading preview…</div>}>
-                {previewItem.kind === 'dicom'
-                  ? <DicomPreview files={previewItem.files} />
-                  : <CtPreview file={previewItem.file} />}
+              <Suspense
+                fallback={
+                  <div className="ct-preview ct-preview--msg">
+                    Loading preview…
+                  </div>
+                }
+              >
+                {previewItem.kind === "dicom" ? (
+                  <DicomPreview files={previewItem.files} />
+                ) : (
+                  <CtPreview file={previewItem.file} />
+                )}
               </Suspense>
             </>
           )}
@@ -803,34 +985,73 @@ const UploadPage: React.FC = () => {
               </div>
               <div className="model-dropdown" ref={preDropRef}>
                 <button
-                  className={`model-dropdown-btn${preValue ? ' has-value' : ''}${preDropOpen ? ' open' : ''}`}
-                  onClick={() => setPreDropOpen(o => !o)}
+                  className={`model-dropdown-btn${preValue ? " has-value" : ""}${preDropOpen ? " open" : ""}`}
+                  onClick={() => setPreDropOpen((o) => !o)}
                   type="button"
                 >
-                  <span>{preValue || 'None (skip)'}</span>
-                  <svg className={`model-dropdown-chevron${preDropOpen ? ' rotated' : ''}`} width="10" height="6" viewBox="0 0 10 6" fill="none">
-                    <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  <span>{preValue || "None (skip)"}</span>
+                  <svg
+                    className={`model-dropdown-chevron${preDropOpen ? " rotated" : ""}`}
+                    width="10"
+                    height="6"
+                    viewBox="0 0 10 6"
+                    fill="none"
+                  >
+                    <path
+                      d="M1 1l4 4 4-4"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
                   </svg>
                 </button>
                 {preDropOpen && (
                   <div className="model-dropdown-menu">
                     {[
-                      { id: "", label: "None (skip)", desc: "Upload and segment as-is" },
-                      { id: "OpenVAE", label: "OpenVAE", desc: "Enhance the scan quality before segmenting" },
-                    ].map(opt => (
+                      {
+                        id: "",
+                        label: "None (skip)",
+                        desc: "Upload and segment as-is",
+                      },
+                      {
+                        id: "OpenVAE",
+                        label: "OpenVAE",
+                        desc: "Enhance the scan quality before segmenting",
+                      },
+                    ].map((opt) => (
                       <div
                         key={opt.id}
-                        className={`model-dropdown-item${preValue === opt.id ? ' selected' : ''}`}
-                        onClick={() => { setPreValue(opt.id); setPreDropOpen(false); }}
+                        className={`model-dropdown-item${preValue === opt.id ? " selected" : ""}`}
+                        onClick={() => {
+                          setPreValue(opt.id);
+                          setPreDropOpen(false);
+                        }}
                       >
                         <div className="model-dropdown-item-content">
-                          <span className="model-dropdown-item-name">{opt.label}</span>
-                          <span className="model-dropdown-item-desc">{opt.desc}</span>
+                          <span className="model-dropdown-item-name">
+                            {opt.label}
+                          </span>
+                          <span className="model-dropdown-item-desc">
+                            {opt.desc}
+                          </span>
                         </div>
                         <div className="model-dropdown-item-side">
                           {preValue === opt.id && (
-                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="model-dropdown-check">
-                              <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 12 12"
+                              fill="none"
+                              className="model-dropdown-check"
+                            >
+                              <path
+                                d="M2 6l3 3 5-5"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
                             </svg>
                           )}
                         </div>
@@ -851,31 +1072,67 @@ const UploadPage: React.FC = () => {
               </div>
               <div className="model-dropdown" ref={modelDropRef}>
                 <button
-                  className={`model-dropdown-btn${selectedModel && selectedModel !== 'None' ? ' has-value' : ''}${modelDropOpen ? ' open' : ''}`}
-                  onClick={() => setModelDropOpen(o => !o)}
+                  className={`model-dropdown-btn${selectedModel && selectedModel !== "None" ? " has-value" : ""}${modelDropOpen ? " open" : ""}`}
+                  onClick={() => setModelDropOpen((o) => !o)}
                   type="button"
                 >
-                  <span>{selectedModel === 'None' ? 'None (view scan)' : MODEL_OPTIONS.find(m => m.id === selectedModel)?.label || 'Select a model'}</span>
-                  <svg className={`model-dropdown-chevron${modelDropOpen ? ' rotated' : ''}`} width="10" height="6" viewBox="0 0 10 6" fill="none">
-                    <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  <span>
+                    {selectedModel === "None"
+                      ? "None (view scan)"
+                      : MODEL_OPTIONS.find((m) => m.id === selectedModel)
+                          ?.label || "Select a model"}
+                  </span>
+                  <svg
+                    className={`model-dropdown-chevron${modelDropOpen ? " rotated" : ""}`}
+                    width="10"
+                    height="6"
+                    viewBox="0 0 10 6"
+                    fill="none"
+                  >
+                    <path
+                      d="M1 1l4 4 4-4"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
                   </svg>
                 </button>
                 {modelDropOpen && (
                   <div className="model-dropdown-menu">
-                    {MODEL_OPTIONS.map(m => (
+                    {MODEL_OPTIONS.map((m) => (
                       <div
                         key={m.id}
-                        className={`model-dropdown-item${selectedModel === m.id ? ' selected' : ''}`}
-                        onClick={() => { setSelectedModel(m.id as typeof selectedModel); setModelDropOpen(false); }}
+                        className={`model-dropdown-item${selectedModel === m.id ? " selected" : ""}`}
+                        onClick={() => {
+                          setSelectedModel(m.id as typeof selectedModel);
+                          setModelDropOpen(false);
+                        }}
                       >
                         <div className="model-dropdown-item-content">
-                          <span className="model-dropdown-item-name">{m.label}</span>
-                          <span className="model-dropdown-item-desc">{m.desc}</span>
+                          <span className="model-dropdown-item-name">
+                            {m.label}
+                          </span>
+                          <span className="model-dropdown-item-desc">
+                            {m.desc}
+                          </span>
                         </div>
                         <div className="model-dropdown-item-side">
                           {selectedModel === m.id && (
-                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="model-dropdown-check">
-                              <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 12 12"
+                              fill="none"
+                              className="model-dropdown-check"
+                            >
+                              <path
+                                d="M2 6l3 3 5-5"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
                             </svg>
                           )}
                         </div>
@@ -897,34 +1154,73 @@ const UploadPage: React.FC = () => {
               </div>
               <div className="model-dropdown" ref={postDropRef}>
                 <button
-                  className={`model-dropdown-btn${postValue ? ' has-value' : ''}${postDropOpen ? ' open' : ''}`}
-                  onClick={() => setPostDropOpen(o => !o)}
+                  className={`model-dropdown-btn${postValue ? " has-value" : ""}${postDropOpen ? " open" : ""}`}
+                  onClick={() => setPostDropOpen((o) => !o)}
                   type="button"
                 >
-                  <span>{postValue || 'None (skip)'}</span>
-                  <svg className={`model-dropdown-chevron${postDropOpen ? ' rotated' : ''}`} width="10" height="6" viewBox="0 0 10 6" fill="none">
-                    <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  <span>{postValue || "None (skip)"}</span>
+                  <svg
+                    className={`model-dropdown-chevron${postDropOpen ? " rotated" : ""}`}
+                    width="10"
+                    height="6"
+                    viewBox="0 0 10 6"
+                    fill="none"
+                  >
+                    <path
+                      d="M1 1l4 4 4-4"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
                   </svg>
                 </button>
                 {postDropOpen && (
                   <div className="model-dropdown-menu">
                     {[
-                      { id: "", label: "None (skip)", desc: "Use results as-is" },
-                      { id: "ShapeKit", label: "ShapeKit", desc: "Clean up and smooth organ outlines" },
-                    ].map(opt => (
+                      {
+                        id: "",
+                        label: "None (skip)",
+                        desc: "Use results as-is",
+                      },
+                      {
+                        id: "ShapeKit",
+                        label: "ShapeKit",
+                        desc: "Clean up and smooth organ outlines",
+                      },
+                    ].map((opt) => (
                       <div
                         key={opt.id}
-                        className={`model-dropdown-item${postValue === opt.id ? ' selected' : ''}`}
-                        onClick={() => { setPostValue(opt.id); setPostDropOpen(false); }}
+                        className={`model-dropdown-item${postValue === opt.id ? " selected" : ""}`}
+                        onClick={() => {
+                          setPostValue(opt.id);
+                          setPostDropOpen(false);
+                        }}
                       >
                         <div className="model-dropdown-item-content">
-                          <span className="model-dropdown-item-name">{opt.label}</span>
-                          <span className="model-dropdown-item-desc">{opt.desc}</span>
+                          <span className="model-dropdown-item-name">
+                            {opt.label}
+                          </span>
+                          <span className="model-dropdown-item-desc">
+                            {opt.desc}
+                          </span>
                         </div>
                         <div className="model-dropdown-item-side">
                           {postValue === opt.id && (
-                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="model-dropdown-check">
-                              <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 12 12"
+                              fill="none"
+                              className="model-dropdown-check"
+                            >
+                              <path
+                                d="M2 6l3 3 5-5"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
                             </svg>
                           )}
                         </div>
@@ -948,8 +1244,12 @@ const UploadPage: React.FC = () => {
           {/* ── Action bar ── */}
           {sessionId && (
             <div className="action-bar">
-              <button className="action-btn" onClick={handleCheckStatus}>Check Status</button>
-              <button className="action-btn" onClick={handleDownloadResult}>Download</button>
+              <button className="action-btn" onClick={handleCheckStatus}>
+                Check Status
+              </button>
+              <button className="action-btn" onClick={handleDownloadResult}>
+                Download
+              </button>
             </div>
           )}
 
@@ -962,7 +1262,10 @@ const UploadPage: React.FC = () => {
                   <span className="progress-label-pct">{uploadProgress}%</span>
                 </div>
                 <div className="progress-track">
-                  <div className="progress-fill progress-fill-upload" style={{ width: `${uploadProgress}%` }} />
+                  <div
+                    className="progress-fill progress-fill-upload"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
                 </div>
               </div>
             </div>
@@ -975,22 +1278,37 @@ const UploadPage: React.FC = () => {
               <div className="result-btns">
                 {selectedModel === "OpenVAE" ? (
                   <>
-                    <button className="result-btn" onClick={() => navigate(`/reconstruction/${sessionId}`)}>
+                    <button
+                      className="result-btn"
+                      onClick={() => navigate(`/reconstruction/${sessionId}`)}
+                    >
                       View Reconstruction
                     </button>
-                    <button className="result-btn" onClick={handleRunEpaiOnReconstruction}>
+                    <button
+                      className="result-btn"
+                      onClick={handleRunEpaiOnReconstruction}
+                    >
                       Run ePAI on Result
                     </button>
-                    <button className="result-btn" onClick={handleDownloadResult}>
+                    <button
+                      className="result-btn"
+                      onClick={handleDownloadResult}
+                    >
                       Download
                     </button>
                   </>
                 ) : (
                   <>
-                    <button className="result-btn result-btn-primary" onClick={() => navigate(`/session/${sessionId}`)}>
+                    <button
+                      className="result-btn result-btn-primary"
+                      onClick={() => navigate(`/session/${sessionId}`)}
+                    >
                       View Visualization
                     </button>
-                    <button className="result-btn" onClick={handleDownloadResult}>
+                    <button
+                      className="result-btn"
+                      onClick={handleDownloadResult}
+                    >
                       Download Results
                     </button>
                   </>
@@ -1001,15 +1319,136 @@ const UploadPage: React.FC = () => {
 
           {/* ── Status messages ── */}
           {sessionId && !inferenceCompleted && (
-            <div className="status-msg status-msg-session">Session: {sessionId}</div>
+            <div className="status-msg status-msg-session">
+              Session: {sessionId}
+            </div>
           )}
           {message && <div className="status-msg">{message}</div>}
         </div>
 
         {/* ── Active (in-progress) Uploads ── */}
-        {recentUploads.some(u => u.status === "Processing") && (
+        {recentUploads.some((u) => u.status === "Processing") && (
           <div style={{ marginTop: "32px" }}>
-            <div style={{
+            <div
+              style={{
+                fontFamily: "'Space Grotesk', sans-serif",
+                fontSize: "11px",
+                fontWeight: 600,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                color: "#8f8f8f",
+                marginBottom: "16px",
+                paddingLeft: "4px",
+              }}
+            >
+              Active
+            </div>
+            <div
+              style={{ display: "flex", flexDirection: "column", gap: "8px" }}
+            >
+              {recentUploads
+                .filter((u) => u.status === "Processing")
+                .map((upload) => {
+                  const phase = sessionPhases[upload.sessionId];
+                  const phaseLabel =
+                    phase === "uploading"
+                      ? "Uploading…"
+                      : phase === "queued"
+                        ? "Queued for GPU"
+                        : "Running…";
+                  return (
+                    <div
+                      key={upload.sessionId}
+                      style={{
+                        background: "#f5f5f5",
+                        border: "1px solid rgba(0,45,114,0.14)",
+                        borderRadius: "12px",
+                        padding: "16px 20px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "16px",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: "36px",
+                            height: "36px",
+                            borderRadius: "8px",
+                            background: "rgba(0,45,114,0.04)",
+                            border: "1px solid rgba(0,45,114,0.12)",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          <div className="upload-spinner" />
+                        </div>
+                        <div>
+                          <div
+                            style={{
+                              fontFamily: "'Space Grotesk', sans-serif",
+                              fontSize: "14px",
+                              fontWeight: 600,
+                              color: "#111111",
+                            }}
+                          >
+                            {upload.label}
+                          </div>
+                          <div
+                            style={{
+                              fontFamily: "'JetBrains Mono', monospace",
+                              fontSize: "11px",
+                              color: "#6a6a6a",
+                              marginTop: "2px",
+                            }}
+                          >
+                            {upload.model ? `${upload.model} · ` : ""}
+                            {formatRelativeTime(upload.timestamp)}
+                          </div>
+                        </div>
+                      </div>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "12px",
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontFamily: "'Space Grotesk', sans-serif",
+                            fontSize: "12px",
+                            fontWeight: 500,
+                            color: phase === "queued" ? "#6a6a6a" : "#002D72",
+                          }}
+                        >
+                          {phaseLabel}
+                        </span>
+                        <button
+                          className="active-cancel-btn"
+                          onClick={() => cancelRun(upload)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        )}
+
+        {/* ── Recent Uploads ── */}
+        <div style={{ marginTop: "32px" }}>
+          <div
+            style={{
               fontFamily: "'Space Grotesk', sans-serif",
               fontSize: "11px",
               fontWeight: 600,
@@ -1017,163 +1456,198 @@ const UploadPage: React.FC = () => {
               textTransform: "uppercase",
               color: "#8f8f8f",
               marginBottom: "16px",
-              paddingLeft: "4px"
-            }}>
-              Active
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              {recentUploads.filter(u => u.status === "Processing").map((upload) => {
-                const phase = sessionPhases[upload.sessionId];
-                const phaseLabel =
-                  phase === "uploading" ? "Uploading…" :
-                  phase === "queued"    ? "Queued for GPU" :
-                  "Running…";
-                return (
-                  <div key={upload.sessionId} style={{
-                    background: "#f5f5f5",
-                    border: "1px solid rgba(0,45,114,0.14)",
-                    borderRadius: "12px",
-                    padding: "16px 20px",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                  }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-                      <div style={{
-                        width: "36px", height: "36px", borderRadius: "8px",
-                        background: "rgba(0,45,114,0.04)", border: "1px solid rgba(0,45,114,0.12)",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                      }}>
-                        <div className="upload-spinner" />
-                      </div>
-                      <div>
-                        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>
-                          {upload.label}
-                        </div>
-                        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
-                          {upload.model ? `${upload.model} · ` : ""}{formatRelativeTime(upload.timestamp)}
-                        </div>
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                      <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: phase === "queued" ? "#6a6a6a" : "#002D72" }}>
-                        {phaseLabel}
-                      </span>
-                      <button className="active-cancel-btn" onClick={() => cancelRun(upload)}>
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* ── Recent Uploads ── */}
-        <div style={{ marginTop: "32px" }}>
-          <div style={{
-            fontFamily: "'Space Grotesk', sans-serif",
-            fontSize: "11px",
-            fontWeight: 600,
-            letterSpacing: "0.12em",
-            textTransform: "uppercase",
-            color: "#8f8f8f",
-            marginBottom: "16px",
-            paddingLeft: "4px"
-          }}>
+              paddingLeft: "4px",
+            }}
+          >
             Recent Uploads
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-            {recentUploads.filter(u => u.status !== "Processing").length === 0 ? (
-              <div style={{
-                background: "#f5f5f5",
-                border: "1px dashed rgba(0,0,0,0.12)",
-                borderRadius: "12px",
-                padding: "24px 20px",
-                textAlign: "center",
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: "12px",
-                color: "#8f8f8f"
-              }}>
-                No uploads yet - run a model above and your results will appear here.
+            {recentUploads.filter((u) => u.status !== "Processing").length ===
+            0 ? (
+              <div
+                style={{
+                  background: "#f5f5f5",
+                  border: "1px dashed rgba(0,0,0,0.12)",
+                  borderRadius: "12px",
+                  padding: "24px 20px",
+                  textAlign: "center",
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: "12px",
+                  color: "#8f8f8f",
+                }}
+              >
+                No uploads yet - run a model above and your results will appear
+                here.
               </div>
             ) : (
-              recentUploads.filter(u => u.status !== "Processing").map((upload) => {
-                const clickable = upload.status !== "Failed" && upload.status !== "Cancelled";
-                const openSession = () => {
-                  if (!clickable) return;
-                  navigate(`/${upload.isReconstruction ? "reconstruction" : "session"}/${upload.sessionId}`);
-                };
-                return (
-                  <div key={upload.sessionId} onClick={openSession} style={{
-                    background: "#f5f5f5",
-                    border: "1px solid rgba(0,0,0,0.06)",
-                    borderRadius: "12px",
-                    padding: "16px 20px",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    cursor: clickable ? "pointer" : "default"
-                  }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-                      <div style={{
-                        width: "36px", height: "36px", borderRadius: "8px",
-                        background: "rgba(0,0,0,0.06)", border: "1px solid rgba(0,0,0,0.12)",
-                        display: "flex", alignItems: "center", justifyContent: "center"
-                      }}>
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#111111" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                          <polyline points="14 2 14 8 20 8"></polyline>
-                          <line x1="16" y1="13" x2="8" y2="13"></line>
-                          <line x1="16" y1="17" x2="8" y2="17"></line>
-                          <polyline points="10 9 9 9 8 9"></polyline>
-                        </svg>
-                      </div>
-                      <div>
-                        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>
-                          {upload.label}
-                        </div>
-                        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
-                          {upload.model ? `${upload.model} · ` : ""}{formatRelativeTime(upload.timestamp)}
-                        </div>
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                      <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: recentStatusColor(upload.status) }}>
-                        {upload.status}
-                      </span>
-                      {clickable && (
-                        <button onClick={(e) => { e.stopPropagation(); openSession(); }} style={{
-                          background: "transparent", border: "1px solid rgba(0,0,0,0.1)",
-                          borderRadius: "6px", padding: "6px 12px", color: "#111111",
-                          fontFamily: "'Space Grotesk', sans-serif", fontSize: "11px", cursor: "pointer"
-                        }}>
-                          View
-                        </button>
-                      )}
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setRecentUploads(removeRecentUpload(upload.sessionId)); }}
-                        title="Remove"
+              recentUploads
+                .filter((u) => u.status !== "Processing")
+                .map((upload) => {
+                  const clickable =
+                    upload.status !== "Failed" && upload.status !== "Cancelled";
+                  const openSession = () => {
+                    if (!clickable) return;
+                    navigate(
+                      `/${upload.isReconstruction ? "reconstruction" : "session"}/${upload.sessionId}`,
+                    );
+                  };
+                  return (
+                    <div
+                      key={upload.sessionId}
+                      onClick={openSession}
+                      style={{
+                        background: "#f5f5f5",
+                        border: "1px solid rgba(0,0,0,0.06)",
+                        borderRadius: "12px",
+                        padding: "16px 20px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        cursor: clickable ? "pointer" : "default",
+                      }}
+                    >
+                      <div
                         style={{
-                          background: "transparent", border: "none", padding: "4px",
-                          cursor: "pointer", color: "rgba(0,0,0,0.2)", lineHeight: 0,
-                          borderRadius: "4px", transition: "color 0.15s",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "16px",
                         }}
-                        onMouseEnter={e => (e.currentTarget.style.color = "#ef4444")}
-                        onMouseLeave={e => (e.currentTarget.style.color = "rgba(0,0,0,0.2)")}
                       >
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <polyline points="3 6 5 6 21 6" />
-                          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                          <path d="M10 11v6M14 11v6" />
-                          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                        </svg>
-                      </button>
+                        <div
+                          style={{
+                            width: "36px",
+                            height: "36px",
+                            borderRadius: "8px",
+                            background: "rgba(0,0,0,0.06)",
+                            border: "1px solid rgba(0,0,0,0.12)",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          <svg
+                            width="18"
+                            height="18"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="#111111"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                            <line x1="16" y1="13" x2="8" y2="13"></line>
+                            <line x1="16" y1="17" x2="8" y2="17"></line>
+                            <polyline points="10 9 9 9 8 9"></polyline>
+                          </svg>
+                        </div>
+                        <div>
+                          <div
+                            style={{
+                              fontFamily: "'Space Grotesk', sans-serif",
+                              fontSize: "14px",
+                              fontWeight: 600,
+                              color: "#111111",
+                            }}
+                          >
+                            {upload.label}
+                          </div>
+                          <div
+                            style={{
+                              fontFamily: "'JetBrains Mono', monospace",
+                              fontSize: "11px",
+                              color: "#6a6a6a",
+                              marginTop: "2px",
+                            }}
+                          >
+                            {upload.model ? `${upload.model} · ` : ""}
+                            {formatRelativeTime(upload.timestamp)}
+                          </div>
+                        </div>
+                      </div>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "12px",
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontFamily: "'Space Grotesk', sans-serif",
+                            fontSize: "12px",
+                            fontWeight: 500,
+                            color: recentStatusColor(upload.status),
+                          }}
+                        >
+                          {upload.status}
+                        </span>
+                        {clickable && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openSession();
+                            }}
+                            style={{
+                              background: "transparent",
+                              border: "1px solid rgba(0,0,0,0.1)",
+                              borderRadius: "6px",
+                              padding: "6px 12px",
+                              color: "#111111",
+                              fontFamily: "'Space Grotesk', sans-serif",
+                              fontSize: "11px",
+                              cursor: "pointer",
+                            }}
+                          >
+                            View
+                          </button>
+                        )}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRecentUploads(
+                              removeRecentUpload(upload.sessionId),
+                            );
+                          }}
+                          title="Remove"
+                          style={{
+                            background: "transparent",
+                            border: "none",
+                            padding: "4px",
+                            cursor: "pointer",
+                            color: "rgba(0,0,0,0.2)",
+                            lineHeight: 0,
+                            borderRadius: "4px",
+                            transition: "color 0.15s",
+                          }}
+                          onMouseEnter={(e) =>
+                            (e.currentTarget.style.color = "#ef4444")
+                          }
+                          onMouseLeave={(e) =>
+                            (e.currentTarget.style.color = "rgba(0,0,0,0.2)")
+                          }
+                        >
+                          <svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <polyline points="3 6 5 6 21 6" />
+                            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                            <path d="M10 11v6M14 11v6" />
+                            <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                          </svg>
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                );
-              })
+                  );
+                })
             )}
           </div>
         </div>

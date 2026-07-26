@@ -2,17 +2,25 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { segmentation_categories } from "../helpers/constants";
 import styles from "./LandingPage.module.css";
+import Header from "../components/Header";
 
 /* ── counter targets ── */
 // organClasses is derived from the viewer's actual label set (not hardcoded) so the
 // landing page can't drift out of sync with what the platform actually segments.
-const TARGETS = { ctVol: 36390, medCenters: 145, structures: 993000, organClasses: segmentation_categories.length };
+const TARGETS = {
+  ctVol: 36390,
+  medCenters: 145,
+  structures: 993000,
+  organClasses: segmentation_categories.length,
+};
 
 function formatStructures(v: number): string {
   if (v >= 993000) return "993K+";
   if (v >= 1000) return `${Math.floor(v / 1000)}K+`;
   return String(v);
 }
+
+type TabType = "overview" | "dataset" | "upload" | "team";
 
 export default function LandingPage() {
   const navigate = useNavigate();
@@ -24,10 +32,10 @@ export default function LandingPage() {
   const [organClasses, setOrganClasses] = useState(0);
 
   /* ── active tab ── */
-  const [activeTab, setActiveTab] = useState<"overview" | "dataset" | "upload" | "team">("overview");
+  const [activeTab, setActiveTab] = useState<TabType>("overview");
 
   /* ── tab navigation handler ── */
-  const handleTabClick = (tab: "overview" | "dataset" | "upload" | "team") => {
+  const handleTabClick = (tab: TabType) => {
     setActiveTab(tab);
     if (tab === "dataset") {
       navigate("/dashboard");
@@ -64,44 +72,18 @@ export default function LandingPage() {
     { value: String(organClasses), label: "Organ Classes" },
   ];
 
-  /* ── tab helper ── */
-  const tabClass = (name: string) =>
-    `${styles.tabPill} ${activeTab === name ? styles.tabPillActive : ""}`;
-
   return (
     <div className={styles.root}>
-      {/* ═══════ TOP NAV BAR ═══════ */}
-      <nav className={styles.nav}>
-        {/* Logo */}
-        <div className={styles.logoPill} onClick={() => handleTabClick("overview")}>
-          <img src="/bodymaps-logo.svg" alt="" className={styles.logoImg} />
-          <div className={styles.logoTitle}>BodyMaps</div>
-        </div>
-
-        {/* Center Tabs */}
-        <div className={styles.tabBar}>
-          <button className={tabClass("overview")} onClick={() => handleTabClick("overview")}>
-            OVERVIEW
-          </button>
-          <button className={tabClass("dataset")} onClick={() => handleTabClick("dataset")}>
-            DATASET
-          </button>
-          <button className={tabClass("upload")} onClick={() => handleTabClick("upload")}>
-            UPLOAD
-          </button>
-          <button className={tabClass("team")} onClick={() => handleTabClick("team")}>
-            TEAM
-          </button>
-        </div>
-
-        {/* Spacer for balance */}
-        <div className={styles.navSpacer} />
-      </nav>
+      <Header />
 
       {/* ═══════ CENTERED HERO ═══════ */}
       <main className={styles.hero}>
-        <h1 className={styles.heroTitle}>Body<span className={styles.heroTitleAlt}>Maps</span></h1>
-        <p className={styles.heroSubtitle}>The open library of labeled body CT scans</p>
+        <h1 className={styles.heroTitle}>
+          Body<span className={styles.heroTitleAlt}>Maps</span>
+        </h1>
+        <p className={styles.heroSubtitle}>
+          The open library of labeled body CT scans
+        </p>
 
         <div className={styles.heroStats}>
           {stats.map((s, i) => (
@@ -110,16 +92,24 @@ export default function LandingPage() {
                 <div className={styles.heroStatValue}>{s.value}</div>
                 <div className={styles.heroStatLabel}>{s.label}</div>
               </div>
-              {i < stats.length - 1 && <div className={styles.heroStatDivider} />}
+              {i < stats.length - 1 && (
+                <div className={styles.heroStatDivider} />
+              )}
             </div>
           ))}
         </div>
 
         <div className={styles.heroActions}>
-          <button className={styles.btnPrimary} onClick={() => handleTabClick("dataset")}>
+          <button
+            className={styles.btnPrimary}
+            onClick={() => handleTabClick("dataset")}
+          >
             Browse Dataset
           </button>
-          <button className={styles.btnSecondary} onClick={() => handleTabClick("upload")}>
+          <button
+            className={styles.btnSecondary}
+            onClick={() => handleTabClick("upload")}
+          >
             Upload Dataset
           </button>
         </div>

@@ -8,28 +8,50 @@
   font-family: "Inter";
   line-height: 1.5;
   font-weight: 400;
-  
-  /* color-scheme: light dark; */
-  /* color: rgba(0, 0, 0, 0.87); */
-  /* background-color: #242424; */
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-    --bg: #0e1a2b;
-    --panel: #12243b;
-    --panel-soft: #132a45;
-    --ink: #e8eff9;
-    --sub: #a9b7cc;
-    --line: #243a57;
-    --brand: #111111;
-    --brand-ink: #fff;
-    --accent: #111111;
-    --good: #16a34a;
-    --bad: #ef4444;
-    --control-h: 44px
 
+  /* ── Breakpoints (use via Tailwind sm/md/lg/xl ou via comentário abaixo em CSS puro) ──
+     sm: 640px | md: 768px | lg: 1024px | xl: 1280px                                    */
+
+  /* ── Paleta global ── */
+  --bg: #0e1a2b;
+  --panel: #12243b;
+  --panel-soft: #132a45;
+  --ink: #e8eff9;
+  --sub: #a9b7cc;
+  --line: #243a57;
+  --brand: #111111;
+  --brand-ink: #fff;
+  --accent: #111111;
+  --good: #16a34a;
+  --bad: #ef4444;
+  --control-h: 44px;
+  --header-h: 70px;
+
+  /* ── Z-index ── */
+  --z-modal: 1000;
+  --z-dropdown: 90;
+  --z-sidebar: 70;
+  --z-overlay: 60;
+  --z-tooltip: 50;
+
+  /* ── Tokens do Viewer 3D (VisualizationPage) ── */
+  --vp-bg: #08090b;
+  --vp-panel: rgba(255, 255, 255, 0.045);
+  --vp-panel-strong: rgba(255, 255, 255, 0.07);
+  --vp-border: rgba(255, 255, 255, 0.09);
+  --vp-border-strong: rgba(255, 255, 255, 0.16);
+  --vp-text: rgba(255, 255, 255, 0.92);
+  --vp-text-dim: rgba(255, 255, 255, 0.5);
+  --vp-text-faint: rgba(255, 255, 255, 0.36);
+  --vp-hover: rgba(255, 255, 255, 0.1);
+  --vp-accent: #6ea8fe;
+  --vp-font: "Space Grotesk", system-ui, sans-serif;
+  --vp-mono: "JetBrains Mono", ui-monospace, monospace;
 }
 
 
