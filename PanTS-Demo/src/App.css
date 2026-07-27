@@ -2,16 +2,6 @@
 /* @import "tailwindcss/preflight"; */
 @tailwind utilities;
 
-/* ── Breakpoints explícitos (Tailwind 4 — @theme sobrescreve os defaults) ──
-   Valores idênticos aos defaults do Tailwind 4 — declarados aqui para documentar
-   o sistema e impedir que o time adicione valores avulsos em outros arquivos.     */
-@theme {
-  --breakpoint-sm: 640px;
-  --breakpoint-md: 768px;
-  --breakpoint-lg: 1024px;
-  --breakpoint-xl: 1280px;
-  --breakpoint-2xl: 1536px;
-}
 
 @layer base {
   input[type='number']::-webkit-outer-spin-button,
