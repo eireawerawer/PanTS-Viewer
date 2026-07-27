@@ -14,10 +14,9 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
-  /* ── Breakpoints (use via Tailwind sm/md/lg/xl ou via comentário abaixo em CSS puro) ──
-     sm: 640px | md: 768px | lg: 1024px | xl: 1280px                                    */
+  /* ── Breakpoints: sm: 640px | md: 768px | lg: 1024px | xl: 1280px ── */
 
-  /* ── Paleta global ── */
+  /* ── Global palette ── */
   --bg: #0e1a2b;
   --panel: #12243b;
   --panel-soft: #132a45;
@@ -39,7 +38,7 @@
   --z-overlay: 60;
   --z-tooltip: 50;
 
-  /* ── Tokens do Viewer 3D (VisualizationPage) ── */
+  /* ── 3D Viewer tokens (VisualizationPage) ── */
   --vp-bg: #08090b;
   --vp-panel: rgba(255, 255, 255, 0.045);
   --vp-panel-strong: rgba(255, 255, 255, 0.07);
