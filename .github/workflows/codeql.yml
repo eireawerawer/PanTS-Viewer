@@ -3,8 +3,7 @@ name: CodeQL
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  pull_request: # run on all PRs regardless of target branch
   schedule:
     - cron: "0 6 * * 1" # weekly, Mondays 06:00 UTC
 
