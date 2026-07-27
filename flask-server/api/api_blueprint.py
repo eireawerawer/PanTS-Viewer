@@ -1670,15 +1670,20 @@ def finalize_dicom():
 
         sitk.WriteImage(image, final_path)
 
-        # Clean up temp DICOM slices — realpath+commonpath containment so
-        # CodeQL's taint tracker sees this as sanitized (custom _is_safe_id
-        # is not recognised as a sanitizer by the static analyser).
+        # Clean up temp DICOM slices. The session's chunk dir is found by
+        # matching session_id against the real entries of CHUNK_DIR rather than
+        # joining it into a path, so the path handed to rmtree is built purely
+        # from os.listdir output and no request value can ever steer it.
+        # (_is_safe_id already guards the route; this also keeps CodeQL happy,
+        # which models neither _is_safe_id nor commonpath as a sanitizer.)
         import shutil
-        chunk_root = os.path.realpath(CHUNK_DIR)
-        session_chunk_dir = os.path.realpath(os.path.join(CHUNK_DIR, session_id))
-        if os.path.commonpath([chunk_root, session_chunk_dir]) != chunk_root:
-            return jsonify({"error": "Invalid session path"}), 400
-        shutil.rmtree(session_chunk_dir, ignore_errors=True)
+        try:
+            for entry in os.listdir(CHUNK_DIR):
+                if entry == session_id:
+                    shutil.rmtree(os.path.join(CHUNK_DIR, entry), ignore_errors=True)
+                    break
+        except OSError:
+            pass
 
         uploaded_filename = os.path.relpath(final_path, base_path)
         return jsonify({
