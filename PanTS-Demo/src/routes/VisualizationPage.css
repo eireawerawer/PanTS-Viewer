@@ -138,7 +138,7 @@
   background-color: #333;
 }
 
-/* Tokens --vp-* definidos em src/index.css (:root) */
+/* --vp-* tokens are defined in src/index.css (:root) */
 
 /* ---- Floating control surface (the toggleable sidebar) ---- */
 .vp-sidebar {
