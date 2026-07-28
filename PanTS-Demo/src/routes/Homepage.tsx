@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Header from "../components/Header";
 import Preview from "../components/Preview";
+import styles from "./Homepage.module.css";
 import { API_BASE } from "../helpers/constants";
 import {
   buildSearchParams,
@@ -89,41 +90,11 @@ const AGE_OPTIONS = [
   { value: "UNKNOWN", label: "Unknown" },
 ];
 
-const pillStyle = (active: boolean): React.CSSProperties => ({
-  padding: "7px 16px",
-  borderRadius: "8px",
-  fontFamily: "'Space Grotesk', sans-serif",
-  fontSize: "13px",
-  fontWeight: 600,
-  cursor: "pointer",
-  border: active ? "1px solid #002D72" : "1px solid rgba(0,0,0,0.08)",
-  background: active ? "#002D72" : "rgba(0,0,0,0.04)",
-  color: active ? "#ffffff" : "rgba(0,0,0,0.6)",
-  transition: "all 0.15s",
-  outline: "none",
-});
+const pillClass = (active: boolean) =>
+  `${styles.pill} ${active ? styles.pillActive : ""}`;
 
-const pagerBtnStyle = (disabled: boolean): React.CSSProperties => ({
-  padding: "8px 16px",
-  borderRadius: "8px",
-  fontFamily: "'Space Grotesk', sans-serif",
-  fontSize: "13px",
-  fontWeight: 600,
-  border: "1px solid rgba(0,0,0,0.12)",
-  background: disabled ? "rgba(0,0,0,0.03)" : "#ffffff",
-  color: disabled ? "rgba(0,0,0,0.25)" : "#111111",
-  cursor: disabled ? "default" : "pointer",
-  outline: "none",
-});
-
-const filterLabelStyle: React.CSSProperties = {
-  fontFamily: "'Space Grotesk', sans-serif",
-  fontSize: "12px",
-  fontWeight: 700,
-  letterSpacing: "0.04em",
-  textTransform: "uppercase",
-  color: "rgba(0,0,0,0.75)",
-};
+const pagerBtnClass = (disabled: boolean) =>
+  `${styles.pagerBtn} ${disabled ? styles.pagerBtnDisabled : ""}`;
 
 export default function Homepage() {
   const [PREVIEW_IDS, SET_PREVIEW_IDS] = useState<CaseId[]>([]);
@@ -417,16 +388,7 @@ export default function Homepage() {
   // Small mono count shown inside a pill, e.g. "Male 4,210".
   const countBadge = (count: number | null) =>
     count == null ? null : (
-      <span
-        style={{
-          marginLeft: "7px",
-          fontFamily: "'JetBrains Mono', monospace",
-          fontSize: "10px",
-          opacity: 0.6,
-        }}
-      >
-        {count.toLocaleString()}
-      </span>
+      <span className={styles.countBadge}>{count.toLocaleString()}</span>
     );
 
   const handleApplyFilters = () => {
@@ -454,154 +416,36 @@ export default function Homepage() {
   };
 
   return (
-    <div
-      className="min-h-screen text-black relative overflow-x-hidden"
-      style={{ background: "#ffffff" }}
-    >
+    <div className="min-h-screen bg-white text-black relative overflow-x-hidden">
       {/* Ambient background orbs */}
       <div
         className="pointer-events-none fixed inset-0 overflow-hidden"
         aria-hidden="true"
       >
-        <div
-          className="absolute rounded-full"
-          style={{
-            top: "-160px",
-            left: "-160px",
-            width: "700px",
-            height: "700px",
-            background:
-              "radial-gradient(circle, rgba(0,0,0,0.04) 0%, transparent 70%)",
-            filter: "blur(40px)",
-          }}
-        />
-        <div
-          className="absolute rounded-full"
-          style={{
-            top: "35%",
-            right: "-192px",
-            width: "600px",
-            height: "600px",
-            background:
-              "radial-gradient(circle, rgba(0,0,0,0.03) 0%, transparent 70%)",
-            filter: "blur(40px)",
-          }}
-        />
-        <div
-          className="absolute rounded-full"
-          style={{
-            bottom: "80px",
-            left: "33%",
-            width: "500px",
-            height: "400px",
-            background:
-              "radial-gradient(circle, rgba(0,0,0,0.025) 0%, transparent 70%)",
-            filter: "blur(40px)",
-          }}
-        />
+        <div className={styles.orb1} />
+        <div className={styles.orb2} />
+        <div className={styles.orb3} />
       </div>
 
       <Header />
 
       {/* Case library */}
       <section className="mx-auto max-w-6xl px-6 pt-8 pb-16">
-        <div
-          style={{
-            background: "#f5f5f5",
-            border: "1px solid rgba(0,0,0,0.06)",
-            borderRadius: "16px",
-            padding: "24px 32px",
-            marginBottom: "24px",
-          }}
-        >
+        <div className={styles.libraryCard}>
           {/* Section header */}
-          <div
-            style={{
-              fontFamily: "'Space Grotesk', sans-serif",
-              fontSize: "11px",
-              fontWeight: 600,
-              letterSpacing: "0.12em",
-              textTransform: "uppercase",
-              color: "#8f8f8f",
-              marginBottom: "20px",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
+          <div className={styles.sectionHeader}>
             <span>Browse Library</span>
             <div className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2">
-              <button
-                className="flex items-center gap-1.5 transition-all duration-200"
-                style={{
-                  fontSize: "11px",
-                  color: "rgba(0,0,0,0.45)",
-                  background: "transparent",
-                  border: "none",
-                  cursor: "pointer",
-                  textTransform: "none",
-                  letterSpacing: "0.04em",
-                  fontFamily: "'JetBrains Mono', monospace",
-                }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLElement).style.color =
-                    "rgba(0,0,0,0.85)";
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLElement).style.color =
-                    "rgba(0,0,0,0.45)";
-                }}
-                onClick={handleBrowseAll}
-              >
+              <button className={styles.actionBtn} onClick={handleBrowseAll}>
                 <IconDatabase size={14} />
                 Browse all
               </button>
-              <button
-                className="flex items-center gap-1.5 transition-all duration-200"
-                style={{
-                  fontSize: "11px",
-                  color: "rgba(0,0,0,0.45)",
-                  background: "transparent",
-                  border: "none",
-                  cursor: "pointer",
-                  textTransform: "none",
-                  letterSpacing: "0.04em",
-                  fontFamily: "'JetBrains Mono', monospace",
-                }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLElement).style.color =
-                    "rgba(0,0,0,0.85)";
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLElement).style.color =
-                    "rgba(0,0,0,0.45)";
-                }}
-                onClick={handleShuffle}
-              >
+              <button className={styles.actionBtn} onClick={handleShuffle}>
                 <IconArrowsShuffle size={14} />
                 Shuffle Cases
               </button>
               <button
-                className="flex items-center gap-1.5 transition-all duration-200"
-                style={{
-                  fontSize: "11px",
-                  color: showSaved ? "rgba(0,0,0,0.85)" : "rgba(0,0,0,0.45)",
-                  background: "transparent",
-                  border: "none",
-                  cursor: "pointer",
-                  textTransform: "none",
-                  letterSpacing: "0.04em",
-                  fontFamily: "'JetBrains Mono', monospace",
-                }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLElement).style.color =
-                    "rgba(0,0,0,0.85)";
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLElement).style.color = showSaved
-                    ? "rgba(0,0,0,0.85)"
-                    : "rgba(0,0,0,0.45)";
-                }}
+                className={`${styles.actionBtn} ${showSaved ? styles.actionBtnActive : ""}`}
                 onClick={() => setShowSaved((v) => !v)}
               >
                 <IconBookmark size={14} />
@@ -610,17 +454,7 @@ export default function Homepage() {
                   : `Saved${savedCases.length ? ` (${savedCases.length})` : ""}`}
               </button>
               {!showSaved && matchTotal !== null && (
-                <span
-                  aria-live="polite"
-                  style={{
-                    fontFamily: "'JetBrains Mono', monospace",
-                    fontSize: "11px",
-                    fontWeight: 400,
-                    letterSpacing: "0.04em",
-                    textTransform: "none",
-                    color: "rgba(0,0,0,0.45)",
-                  }}
-                >
+                <span aria-live="polite" className={styles.matchTotal}>
                   {`${matchTotal.toLocaleString()} ${
                     matchTotal === 1 ? "case matches" : "cases match"
                   }`}
@@ -634,17 +468,7 @@ export default function Homepage() {
             <input
               type="text"
               placeholder="Search by case ID, e.g. 17, 35, 121"
-              style={{
-                flex: 1,
-                padding: "10px 16px",
-                background: "rgba(0,0,0,.04)",
-                border: "1px solid rgba(0,0,0,.08)",
-                borderRadius: "8px",
-                color: "#111111",
-                fontFamily: "'Space Grotesk', sans-serif",
-                fontSize: "13px",
-                outline: "none",
-              }}
+              className={styles.searchInput}
               value={searchId || ""}
               onChange={(e) => {
                 const val = e.target.value;
@@ -662,90 +486,35 @@ export default function Homepage() {
 
             <button
               onClick={() => setShowFilters((v) => !v)}
-              style={{
-                flex: 1,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "10px 16px",
-                background: showFilters ? "rgba(0,0,0,.07)" : "rgba(0,0,0,.04)",
-                border: "1px solid rgba(0,0,0,.08)",
-                borderRadius: "8px",
-                color: "#6a6a6a",
-                fontFamily: "'Space Grotesk', sans-serif",
-                fontSize: "13px",
-                outline: "none",
-                cursor: "pointer",
-              }}
+              className={`${styles.filterToggle} ${showFilters ? styles.filterToggleOpen : ""}`}
             >
               <span className="flex items-center gap-2">
                 <IconAdjustmentsHorizontal size={15} />
                 Advanced filters
                 {activeFilterCount > 0 && (
-                  <span
-                    style={{
-                      background: "#002D72",
-                      color: "#ffffff",
-                      fontSize: "10px",
-                      fontWeight: 700,
-                      borderRadius: "999px",
-                      minWidth: "16px",
-                      height: "16px",
-                      display: "inline-flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      padding: "0 5px",
-                    }}
-                  >
-                    {activeFilterCount}
-                  </span>
+                  <span className={styles.filterBadge}>{activeFilterCount}</span>
                 )}
               </span>
               <IconChevronDown
                 size={15}
-                style={{
-                  transform: showFilters ? "rotate(180deg)" : "none",
-                  transition: "transform 0.2s",
-                }}
+                className={`${styles.chevron} ${showFilters ? styles.chevronOpen : ""}`}
               />
             </button>
 
-            <button
-              style={{
-                padding: "10px 32px",
-                background: "#002D72",
-                border: "none",
-                borderRadius: "8px",
-                color: "#ffffff",
-                fontFamily: "'Space Grotesk', sans-serif",
-                fontSize: "13px",
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
-              onClick={handleSearch}
-            >
+            <button className={styles.searchBtn} onClick={handleSearch}>
               Search
             </button>
           </div>
 
           {/* Advanced search panel */}
           {showFilters && (
-            <div
-              style={{
-                marginTop: "16px",
-                paddingTop: "20px",
-                borderTop: "1px solid rgba(0,0,0,0.07)",
-                display: "flex",
-                flexDirection: "column",
-                gap: "20px",
-              }}
-            >
+            <div className={styles.filterPanel}>
               {/* Dataset */}
               <div className="flex flex-col gap-2.5">
-                <span style={filterLabelStyle}>Dataset</span>
+                <span className={styles.filterLabel}>Dataset</span>
                 <div className="flex flex-wrap gap-2">
                   <button
-                    style={pillStyle(filters.dataset.length === 0)}
+                    className={pillClass(filters.dataset.length === 0)}
                     onClick={() => setFilters((f) => ({ ...f, dataset: [] }))}
                   >
                     Any
@@ -753,7 +522,7 @@ export default function Homepage() {
                   {DATASET_OPTIONS.map((opt) => (
                     <button
                       key={opt.value}
-                      style={pillStyle(filters.dataset.includes(opt.value))}
+                      className={pillClass(filters.dataset.includes(opt.value))}
                       onClick={() => toggleMulti("dataset", opt.value)}
                     >
                       {opt.label}
@@ -765,12 +534,12 @@ export default function Homepage() {
 
               {/* Tumor */}
               <div className="flex flex-col gap-2.5">
-                <span style={filterLabelStyle}>Tumor</span>
+                <span className={styles.filterLabel}>Tumor</span>
                 <div className="flex flex-wrap gap-2">
                   {TUMOR_OPTIONS.map((opt) => (
                     <button
                       key={opt.value}
-                      style={pillStyle(filters.tumor === opt.value)}
+                      className={pillClass(filters.tumor === opt.value)}
                       onClick={() =>
                         setFilters((f) => ({ ...f, tumor: opt.value }))
                       }
@@ -790,10 +559,10 @@ export default function Homepage() {
 
               {/* Sex */}
               <div className="flex flex-col gap-2.5">
-                <span style={filterLabelStyle}>Sex</span>
+                <span className={styles.filterLabel}>Sex</span>
                 <div className="flex flex-wrap gap-2">
                   <button
-                    style={pillStyle(filters.sex.length === 0)}
+                    className={pillClass(filters.sex.length === 0)}
                     onClick={() => setFilters((f) => ({ ...f, sex: [] }))}
                   >
                     Any
@@ -801,7 +570,7 @@ export default function Homepage() {
                   {SEX_OPTIONS.map((opt) => (
                     <button
                       key={opt.value}
-                      style={pillStyle(filters.sex.includes(opt.value))}
+                      className={pillClass(filters.sex.includes(opt.value))}
                       onClick={() => toggleMulti("sex", opt.value)}
                     >
                       {opt.label}
@@ -817,10 +586,10 @@ export default function Homepage() {
 
               {/* Age */}
               <div className="flex flex-col gap-2.5">
-                <span style={filterLabelStyle}>Age</span>
+                <span className={styles.filterLabel}>Age</span>
                 <div className="flex flex-wrap gap-2">
                   <button
-                    style={pillStyle(filters.age.length === 0)}
+                    className={pillClass(filters.age.length === 0)}
                     onClick={() => setFilters((f) => ({ ...f, age: [] }))}
                   >
                     Any
@@ -828,7 +597,7 @@ export default function Homepage() {
                   {AGE_OPTIONS.map((opt) => (
                     <button
                       key={opt.value}
-                      style={pillStyle(filters.age.includes(opt.value))}
+                      className={pillClass(filters.age.includes(opt.value))}
                       onClick={() => toggleMulti("age", opt.value)}
                     >
                       {opt.label}
@@ -843,10 +612,10 @@ export default function Homepage() {
                 const selected = filters[g.key];
                 return (
                   <div key={g.key} className="flex flex-col gap-2.5">
-                    <span style={filterLabelStyle}>{g.title}</span>
+                    <span className={styles.filterLabel}>{g.title}</span>
                     <div className="flex flex-wrap gap-2">
                       <button
-                        style={pillStyle(selected.length === 0)}
+                        className={pillClass(selected.length === 0)}
                         onClick={() =>
                           setFilters((f) => ({ ...f, [g.key]: [] }))
                         }
@@ -854,14 +623,7 @@ export default function Homepage() {
                         Any
                       </button>
                       {rows.length === 0 ? (
-                        <span
-                          style={{
-                            alignSelf: "center",
-                            fontFamily: "'JetBrains Mono', monospace",
-                            fontSize: "11px",
-                            color: "rgba(0,0,0,0.35)",
-                          }}
-                        >
+                        <span className={styles.facetsLoading}>
                           {facetData ? "—" : "Loading…"}
                         </span>
                       ) : (
@@ -870,7 +632,7 @@ export default function Homepage() {
                           return (
                             <button
                               key={val}
-                              style={pillStyle(selected.includes(val))}
+                              className={pillClass(selected.includes(val))}
                               onClick={() => toggleMulti(g.key, val)}
                             >
                               {r.label ?? val}
@@ -890,35 +652,15 @@ export default function Homepage() {
 
         {/* Results summary */}
         {!showSaved && resultCount !== null && (
-          <div
-            className="flex items-center justify-between"
-            style={{ marginBottom: "16px", padding: "0 4px" }}
-          >
-            <span
-              style={{
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: "12px",
-                color: "rgba(0,0,0,0.55)",
-              }}
-            >
+          <div className={styles.resultsSummary}>
+            <span className={styles.resultsText}>
               {resultCount === 0
                 ? "No cases match these filters"
                 : `${resultCount.toLocaleString()} ${
                     resultCount === 1 ? "result" : "results"
                   } · page ${page} of ${Math.max(1, Math.ceil(resultCount / PER_PAGE)).toLocaleString()}`}
             </span>
-            <button
-              onClick={handleResetFilters}
-              className="flex items-center gap-1.5"
-              style={{
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: "12px",
-                color: "rgba(0,0,0,0.45)",
-                background: "transparent",
-                border: "none",
-                cursor: "pointer",
-              }}
-            >
+            <button onClick={handleResetFilters} className={styles.clearBtn}>
               <IconX size={13} />
               Clear filters
             </button>
@@ -927,22 +669,11 @@ export default function Homepage() {
 
         {/* Grid */}
         {showSaved && savedCases.length === 0 ? (
-          <div
-            style={{
-              padding: "48px 0",
-              textAlign: "center",
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: "13px",
-              color: "rgba(0,0,0,0.5)",
-            }}
-          >
+          <div className={styles.emptyState}>
             No saved cases yet — click the bookmark on any case to save it here.
           </div>
         ) : (
-          <div
-            className="grid gap-4"
-            style={{ gridTemplateColumns: "repeat(4, 1fr)" }}
-          >
+          <div className="grid gap-4 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
             {showSaved
               ? savedCases.map((c) => (
                   <Preview
@@ -967,8 +698,7 @@ export default function Homepage() {
                   }).map((_, i) => (
                     <div
                       key={i}
-                      className="bm-card-skeleton rounded-xl"
-                      style={{ aspectRatio: "3/4" }}
+                      className={`bm-card-skeleton rounded-xl ${styles.skeleton}`}
                     />
                   ))
                 : PREVIEW_IDS.map((id) => (
@@ -992,43 +722,31 @@ export default function Homepage() {
           (() => {
             const pages = Math.max(1, Math.ceil(resultCount / PER_PAGE));
             return (
-              <div
-                className="flex items-center justify-center gap-4"
-                style={{ marginTop: "28px" }}
-              >
+              <div className={styles.pager}>
                 <button
-                  style={pagerBtnStyle(page <= 1)}
+                  className={pagerBtnClass(page <= 1)}
                   disabled={page <= 1}
                   onClick={() => goToPage(page - 1)}
                 >
                   ‹ Prev
                 </button>
-                <span
-                  style={{
-                    fontFamily: "'JetBrains Mono', monospace",
-                    fontSize: "12px",
-                    color: "rgba(0,0,0,0.55)",
-                    minWidth: "120px",
-                    textAlign: "center",
-                  }}
-                >
+                <span className={styles.pagerInfo}>
                   Page {page.toLocaleString()} of {pages.toLocaleString()}
                 </span>
                 <button
-                  style={pagerBtnStyle(page >= pages)}
+                  className={pagerBtnClass(page >= pages)}
                   disabled={page >= pages}
                   onClick={() => goToPage(page + 1)}
                 >
                   Next ›
                 </button>
                 <form
-                  className="flex items-center gap-2"
-                  style={{ marginLeft: "8px" }}
+                  className={styles.pagerGoForm}
                   onSubmit={(e) => {
                     e.preventDefault();
                     const n = parseInt(pageInput, 10);
                     if (!Number.isNaN(n)) {
-                      goToPage(n); // goToPage clamps to [1, pages]
+                      goToPage(n);
                       setPageInput("");
                     }
                   }}
@@ -1041,22 +759,12 @@ export default function Homepage() {
                     onChange={(e) => setPageInput(e.target.value)}
                     placeholder={`Go to… (1–${pages})`}
                     aria-label="Go to page"
-                    style={{
-                      width: "132px",
-                      padding: "8px 10px",
-                      borderRadius: "8px",
-                      border: "1px solid rgba(0,0,0,0.12)",
-                      fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: "12px",
-                      color: "#111111",
-                      background: "#ffffff",
-                      outline: "none",
-                    }}
+                    className={styles.pagerInput}
                   />
                   <button
                     type="submit"
                     disabled={pageInput.trim() === ""}
-                    style={pagerBtnStyle(pageInput.trim() === "")}
+                    className={pagerBtnClass(pageInput.trim() === "")}
                   >
                     Go
                   </button>
@@ -1069,41 +777,17 @@ export default function Homepage() {
       {/* Floating comparison tray — appears once a case is picked via the compare button
 			    on a card; links to the /compare view when two are selected. */}
       {compareIds.length > 0 && (
-        <div
-          style={{
-            position: "fixed",
-            bottom: "24px",
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 60,
-            display: "flex",
-            alignItems: "center",
-            gap: "14px",
-            background: "rgba(14,15,18,0.94)",
-            backdropFilter: "blur(12px)",
-            border: "1px solid rgba(255,255,255,0.14)",
-            borderRadius: "12px",
-            padding: "10px 14px",
-            boxShadow: "0 16px 40px -12px rgba(0,0,0,0.6)",
-            color: "#fff",
-            fontSize: "13px",
-          }}
-        >
-          <span
-            style={{
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: "12px",
-            }}
-          >
+        <div className={styles.compareTray}>
+          <span className={styles.compareTrayIds}>
             {compareIds.map((id) => `#${id}`).join("  vs  ")}
           </span>
           {compareIds.length < 2 && (
             <form
+              className={styles.compareTrayForm}
               onSubmit={(e) => {
                 e.preventDefault();
                 submitTypedCompare();
               }}
-              style={{ display: "flex", alignItems: "center", gap: "6px" }}
             >
               <input
                 value={compareTyped}
@@ -1113,31 +797,12 @@ export default function Homepage() {
                 placeholder="type case #"
                 inputMode="numeric"
                 aria-label="Add a case by number"
-                style={{
-                  width: "96px",
-                  padding: "5px 8px",
-                  borderRadius: "8px",
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  background: "rgba(255,255,255,0.06)",
-                  color: "#fff",
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: "12px",
-                }}
+                className={styles.compareTrayInput}
               />
               <button
                 type="submit"
                 disabled={compareTyped.trim() === ""}
-                style={{
-                  background: "transparent",
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  color: "#fff",
-                  borderRadius: "8px",
-                  padding: "5px 10px",
-                  cursor:
-                    compareTyped.trim() === "" ? "not-allowed" : "pointer",
-                  fontSize: "12px",
-                  opacity: compareTyped.trim() === "" ? 0.5 : 1,
-                }}
+                className={styles.compareTrayAddBtn}
               >
                 Add
               </button>
@@ -1145,15 +810,7 @@ export default function Homepage() {
           )}
           <button
             onClick={() => setCompareIds([])}
-            style={{
-              background: "transparent",
-              border: "1px solid rgba(255,255,255,0.2)",
-              color: "#fff",
-              borderRadius: "8px",
-              padding: "5px 10px",
-              cursor: "pointer",
-              fontSize: "12px",
-            }}
+            className={styles.compareTrayBtn}
           >
             Clear
           </button>
@@ -1162,17 +819,7 @@ export default function Homepage() {
             onClick={() =>
               navigation(`/compare?a=${compareIds[0]}&b=${compareIds[1]}`)
             }
-            style={{
-              background:
-                compareIds.length < 2 ? "rgba(37,99,235,0.4)" : "#2563eb",
-              border: "none",
-              color: "#fff",
-              borderRadius: "8px",
-              padding: "5px 12px",
-              cursor: compareIds.length < 2 ? "not-allowed" : "pointer",
-              fontSize: "12px",
-              fontWeight: 600,
-            }}
+            className={styles.compareTrayCompareBtn}
           >
             Compare →
           </button>

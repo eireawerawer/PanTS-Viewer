@@ -1,0 +1,399 @@
+/* ===== Homepage.module.css ===== */
+
+/* ── Library panel container ── */
+.libraryCard {
+  background: #f5f5f5;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 16px;
+  padding: 24px 32px;
+  margin-bottom: 24px;
+}
+
+/* ── Section header row ── */
+.sectionHeader {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #8f8f8f;
+  margin-bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+/* ── Action link buttons (Browse all / Shuffle / Saved) ── */
+.actionBtn {
+  font-size: 11px;
+  color: rgba(0, 0, 0, 0.45);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0.04em;
+  font-family: 'JetBrains Mono', monospace;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.2s;
+  padding: 0;
+}
+.actionBtn:hover {
+  color: rgba(0, 0, 0, 0.85);
+}
+.actionBtnActive {
+  color: rgba(0, 0, 0, 0.85);
+}
+.actionBtnActive:hover {
+  color: rgba(0, 0, 0, 0.85);
+}
+
+/* ── "N cases match" text ── */
+.matchTotal {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: rgba(0, 0, 0, 0.45);
+}
+
+/* ── Search text input ── */
+.searchInput {
+  flex: 1;
+  padding: 10px 16px;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  color: #111111;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 13px;
+  outline: none;
+  min-width: 0;
+}
+
+/* ── Filter toggle button ── */
+.filterToggle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  color: #6a6a6a;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+  min-width: 0;
+}
+.filterToggleOpen {
+  background: rgba(0, 0, 0, 0.07);
+}
+
+/* ── Active filter count badge ── */
+.filterBadge {
+  background: #002D72;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 999px;
+  min-width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+}
+
+/* ── Search submit button ── */
+.searchBtn {
+  padding: 10px 32px;
+  background: #002D72;
+  border: none;
+  border-radius: 8px;
+  color: #ffffff;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* ── Advanced filter panel ── */
+.filterPanel {
+  margin-top: 16px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(0, 0, 0, 0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ── Filter section label ── */
+.filterLabel {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(0, 0, 0, 0.75);
+}
+
+/* ── "Loading…" placeholder in facet groups ── */
+.facetsLoading {
+  align-self: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: rgba(0, 0, 0, 0.35);
+}
+
+/* ── Pill toggle buttons (filter options) ── */
+.pill {
+  padding: 7px 16px;
+  border-radius: 8px;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(0, 0, 0, 0.04);
+  color: rgba(0, 0, 0, 0.6);
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  outline: none;
+}
+.pillActive {
+  border-color: #002D72;
+  background: #002D72;
+  color: #ffffff;
+}
+
+/* ── Count badge inside pill ── */
+.countBadge {
+  margin-left: 7px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+/* ── Results summary bar ── */
+.resultsSummary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding: 0 4px;
+}
+.resultsText {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.55);
+}
+.clearBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.45);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* ── Pagination ── */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 28px;
+  flex-wrap: wrap;
+}
+.pagerBtn {
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: #ffffff;
+  color: #111111;
+  cursor: pointer;
+  outline: none;
+}
+.pagerBtnDisabled {
+  background: rgba(0, 0, 0, 0.03);
+  color: rgba(0, 0, 0, 0.25);
+  cursor: default;
+}
+.pagerInfo {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.55);
+  min-width: 120px;
+  text-align: center;
+}
+.pagerGoForm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 8px;
+}
+.pagerInput {
+  width: 132px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: #111111;
+  background: #ffffff;
+  outline: none;
+}
+
+/* ── Ambient background orbs ── */
+.orb1 {
+  position: absolute;
+  border-radius: 50%;
+  top: -160px;
+  left: -160px;
+  width: 700px;
+  height: 700px;
+  background: radial-gradient(circle, rgba(0, 0, 0, 0.04) 0%, transparent 70%);
+  filter: blur(40px);
+}
+.orb2 {
+  position: absolute;
+  border-radius: 50%;
+  top: 35%;
+  right: -192px;
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, rgba(0, 0, 0, 0.03) 0%, transparent 70%);
+  filter: blur(40px);
+}
+.orb3 {
+  position: absolute;
+  border-radius: 50%;
+  bottom: 80px;
+  left: 33%;
+  width: 500px;
+  height: 400px;
+  background: radial-gradient(circle, rgba(0, 0, 0, 0.025) 0%, transparent 70%);
+  filter: blur(40px);
+}
+
+/* ── Filter chevron ── */
+.chevron {
+  transition: transform 0.2s;
+}
+.chevronOpen {
+  transform: rotate(180deg);
+}
+
+/* ── Empty saved state ── */
+.emptyState {
+  padding: 48px 0;
+  text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.5);
+}
+
+/* ── Skeleton card ── */
+.skeleton {
+  aspect-ratio: 3 / 4;
+}
+
+/* ── Comparison tray ── */
+.compareTray {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-overlay);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 32px);
+  background: rgba(14, 15, 18, 0.94);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  padding: 10px 14px;
+  box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.6);
+  color: #ffffff;
+  font-size: 13px;
+}
+.compareTrayIds {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+}
+.compareTrayForm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.compareTrayInput {
+  width: 96px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.06);
+  color: #ffffff;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  outline: none;
+}
+.compareTrayBtn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+  border-radius: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.compareTrayAddBtn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.compareTrayAddBtn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.compareTrayCompareBtn {
+  background: #2563eb;
+  border: none;
+  color: #ffffff;
+  border-radius: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+.compareTrayCompareBtn:disabled {
+  background: rgba(37, 99, 235, 0.4);
+  cursor: not-allowed;
+}
+
+/* ── Responsive ── */
+@media (max-width: 767px) {
+  .libraryCard { padding: 16px; }
+  .sectionHeader { margin-bottom: 16px; }
+  .pagerGoForm { display: none; }
+  .pagerInfo { min-width: unset; }
+}
