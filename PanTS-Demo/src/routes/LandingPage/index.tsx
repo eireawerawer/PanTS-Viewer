@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { segmentation_categories } from "../helpers/constants";
-import Header from "../components/Header";
+import { segmentation_categories } from "../../helpers/constants";
+import Header from "../../components/Header";
 import styles from "./LandingPage.module.css";
 
 const TARGETS = {
