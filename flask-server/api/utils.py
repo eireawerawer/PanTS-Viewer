@@ -3,6 +3,8 @@ from flask import Blueprint, send_file, make_response, request, jsonify
 from services.nifti_processor import NiftiProcessor
 from services.session_manager import SessionManager, generate_uuid
 from services.auto_segmentor import run_auto_segmentation
+from services.manufacturer_normalization import canonicalize_manufacturer
+from services.site_normalization import split_site_codes
 from models.application_session import ApplicationSession
 from models.combined_labels import CombinedLabels
 from models.base import db
@@ -1084,7 +1086,7 @@ def _norm_cols(df_raw: pd.DataFrame) -> pd.DataFrame:
         keyword_sets=[["manufactur"],["vendor"],["brand"],["maker"]],
     )
     if mfr_col:
-        df["__mfr"] = df[mfr_col].astype(str).str.strip()
+        df["__mfr"] = df[mfr_col].map(canonicalize_manufacturer)
         df["__mfr_lc"] = df["__mfr"].str.lower()
         df["_orig_cols"] = [{**(df["_orig_cols"].iat[i] or {}), "manufacturer": mfr_col} for i in range(len(df))]
     else:
@@ -1162,6 +1164,7 @@ def _norm_cols(df_raw: pd.DataFrame) -> pd.DataFrame:
     )
     if sn_col:
         df["site_nationality"] = df[sn_col].astype(str)
+        df["__sn_tokens"] = df["site_nationality"].map(split_site_codes)
         df["__sn_lc"] = df["site_nationality"].astype(str).str.strip().str.lower()
         df["_orig_cols"] = [
             {**(df["_orig_cols"].iat[i] or {}), "site_nationality": sn_col}
@@ -1169,6 +1172,7 @@ def _norm_cols(df_raw: pd.DataFrame) -> pd.DataFrame:
         ]
     else:
         df["site_nationality"] = ""
+        df["__sn_tokens"] = [()] * len(df)
         df["__sn_lc"] = ""
 
     return df
@@ -1234,6 +1238,17 @@ def _shape_sum(row) -> Optional[float]:
     if any(v is None for v in vals): return None
     return float(vals[0] + vals[1] + vals[2])
 
+def _tuple_product(row, name_candidates: List[str]) -> Optional[float]:
+    vals = _parse_3tuple_from_row(row, name_candidates)
+    if any(v is None or v <= 0 for v in vals): return None
+    return float(vals[0] * vals[1] * vals[2])
+
+def _voxel_count(row) -> Optional[float]:
+    return _tuple_product(row, ["shape","dim","size","image_shape","resolution"])
+
+def _spacing_volume(row) -> Optional[float]:
+    return _tuple_product(row, ["spacing","voxel_spacing","voxel_size","pixel_spacing"])
+
 def ensure_sort_cols(df: pd.DataFrame) -> pd.DataFrame:
     if "__case_sortkey" not in df.columns:
         df["__case_sortkey"] = df.apply(_case_key, axis=1)
@@ -1241,8 +1256,12 @@ def ensure_sort_cols(df: pd.DataFrame) -> pd.DataFrame:
         df["__spacing_sum"] = df.apply(_spacing_sum, axis=1)
     if "__shape_sum" not in df.columns:
         df["__shape_sum"] = df.apply(_shape_sum, axis=1)
+    if "__voxel_count" not in df.columns:
+        df["__voxel_count"] = df.apply(_voxel_count, axis=1)
+    if "__spacing_volume" not in df.columns:
+        df["__spacing_volume"] = df.apply(_spacing_volume, axis=1)
 
-    # 完整度：Browse 與 top 排序會用到
+    # Completeness remains useful to keep shuffle candidates fully described.
     need_cols = ["__spacing_sum", "__shape_sum", "__sex", "__age"]
     complete = pd.Series(True, index=df.index)
     for c in need_cols:
@@ -1398,7 +1417,8 @@ def apply_filters(base: pd.DataFrame, exclude: Optional[Set[str]] = None) -> pd.
     if m_raw and not m_list:
         m_list = [p.strip() for p in m_raw.split(",") if p.strip()]
     if m_list and "__mfr_lc" in df.columns:
-        m_lc = [s.lower() for s in m_list]
+        m_lc = [canonicalize_manufacturer(value) for value in m_list]
+        m_lc = [value.lower() for value in m_lc if value]
         df = df[df["__mfr_lc"].isin(m_lc)]
 
     # --- Model（canonical；可 fuzzy）---
@@ -1431,10 +1451,18 @@ def apply_filters(base: pd.DataFrame, exclude: Optional[Set[str]] = None) -> pd.
     nat_raw = (_arg("site_nationality", "") or _arg("site_nat", "") or "").strip()
     if nat_raw and not nat_list:
         nat_list = [p.strip() for p in re.split(r"[;,/|]+", nat_raw) if p.strip()]
-    if nat_list and "__sn_lc" in df.columns and "site_nationality" not in exclude:
-        parts = [p.lower() for p in nat_list]
-        patt = "|".join(re.escape(p) for p in parts)
-        df = df[df["__sn_lc"].str.contains(patt, na=False)]
+    if nat_list and "__sn_tokens" in df.columns and "site_nationality" not in exclude:
+        wanted_codes = {
+            code
+            for value in nat_list
+            for code in split_site_codes(value)
+        }
+        if wanted_codes:
+            df = df[
+                df["__sn_tokens"].map(
+                    lambda codes: bool(wanted_codes.intersection(codes))
+                )
+            ]
 
     # --- Year（新增）---
     # 支援 year / year[]（多選精確）、year_from / year_to（範圍）與 year_is_null（Unknown）

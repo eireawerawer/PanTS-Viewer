@@ -111,8 +111,9 @@ export default function Preview({
 						decoding="async"
 						onLoad={() => setImgLoaded(true)}
 						onError={handleImgError}
-						className="w-full h-full object-cover"
+						className="w-full h-full object-contain object-center"
 						style={{
+							objectPosition: "center",
 							opacity: imgLoaded ? (hovered ? 1 : 0.97) : 0,
 							transform: hovered ? "scale(1.05)" : "scale(1)",
 							transition: "opacity 0.4s, transform 0.5s",

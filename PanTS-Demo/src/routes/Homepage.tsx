@@ -33,7 +33,7 @@ import {
 import type { PreviewType } from "../types";
 
 // Live facet counts from /api/facets (conditioned on the current filters).
-type FacetRow = { value: string | number; count: number };
+type FacetRow = { value: string | number; label?: string; count: number };
 type FacetData = {
   counts: Record<string, FacetRow[]>;
   unknown: Record<string, number>;
@@ -116,19 +116,6 @@ const pagerBtnStyle = (disabled: boolean): React.CSSProperties => ({
   outline: "none",
 });
 
-const multiSelectTagStyle: React.CSSProperties = {
-  fontFamily: "'JetBrains Mono', monospace",
-  fontSize: "9px",
-  fontWeight: 600,
-  letterSpacing: "0.06em",
-  textTransform: "uppercase",
-  color: "rgba(0,0,0,0.4)",
-  background: "rgba(0,0,0,0.05)",
-  border: "1px solid rgba(0,0,0,0.08)",
-  borderRadius: "5px",
-  padding: "2px 7px",
-};
-
 const filterLabelStyle: React.CSSProperties = {
   fontFamily: "'Space Grotesk', sans-serif",
   fontSize: "12px",
@@ -153,7 +140,6 @@ export default function Homepage() {
   );
   const [facetData, setFacetData] = useState<FacetData | null>(null);
   const [matchTotal, setMatchTotal] = useState<number | null>(null);
-  const [copied, setCopied] = useState(false);
   const [page, setPage] = useState(1);
   const [pageInput, setPageInput] = useState("");
   const [resultCount, setResultCount] = useState<number | null>(null);
@@ -306,7 +292,7 @@ export default function Homepage() {
 
   // Facet OPTION lists + baseline counts — fetched once, UNFILTERED, so the available
   // pills and the numbers on them stay stable (picking one filter never hides or
-  // re-counts the others). Only the bottom "cases match" total reacts to the filters.
+  // re-counts the others). Only the header "cases match" total reacts to the filters.
   const loadFacetOptions = async () => {
     try {
       const params = new URLSearchParams();
@@ -325,7 +311,7 @@ export default function Homepage() {
     }
   };
 
-  // Live count of cases matching the current draft filters (shown only at the bottom).
+  // Live count of cases matching the current draft filters (shown in the panel header).
   const loadMatchTotal = async (f: Filters) => {
     try {
       const params = buildSearchParams(f, { perPage: 1 });
@@ -356,12 +342,11 @@ export default function Homepage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showFilters]);
 
-  // Update only the bottom "cases match" total as the draft filters change (debounced).
+  // Keep the header "cases match" total in sync with the current filters (debounced).
   useEffect(() => {
-    if (!showFilters) return;
     const t = setTimeout(() => loadMatchTotal(filters), 200);
     return () => clearTimeout(t);
-  }, [filters, showFilters]);
+  }, [filters]);
 
   // Warm the code-split viewer chunk once the dashboard is idle, so the first
   // case-open is instant even when navigating via the case-ID search (no hover).
@@ -459,18 +444,13 @@ export default function Homepage() {
     loadCurated();
   };
 
-  // Copy a shareable link to the current (draft) cohort so it can be sent/bookmarked.
-  const handleCopyLink = async () => {
-    const qs = buildSearchParams(filters).toString();
-    const url = `${window.location.origin}${window.location.pathname}${qs ? `?${qs}` : ""}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard API unavailable (e.g. non-secure context) — fall back to a prompt.
-      window.prompt("Copy this link:", url);
+  const handleSearch = () => {
+    if (searchId) {
+      const clamped = Math.max(1, Math.min(9901, searchId));
+      navigation("/case/" + clamped);
+      return;
     }
+    handleApplyFilters();
   };
 
   return (
@@ -550,7 +530,7 @@ export default function Homepage() {
             }}
           >
             <span>Browse Library</span>
-            <div className="flex items-center gap-5">
+            <div className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2">
               <button
                 className="flex items-center gap-1.5 transition-all duration-200"
                 style={{
@@ -629,11 +609,28 @@ export default function Homepage() {
                   ? "Back to browse"
                   : `Saved${savedCases.length ? ` (${savedCases.length})` : ""}`}
               </button>
+              {!showSaved && matchTotal !== null && (
+                <span
+                  aria-live="polite"
+                  style={{
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontSize: "11px",
+                    fontWeight: 400,
+                    letterSpacing: "0.04em",
+                    textTransform: "none",
+                    color: "rgba(0,0,0,0.45)",
+                  }}
+                >
+                  {`${matchTotal.toLocaleString()} ${
+                    matchTotal === 1 ? "case matches" : "cases match"
+                  }`}
+                </span>
+              )}
             </div>
           </div>
 
           {/* Case search */}
-          <div className="flex gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row">
             <input
               type="text"
               placeholder="Search by case ID, e.g. 17, 35, 121"
@@ -657,9 +654,8 @@ export default function Homepage() {
                 }
               }}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && searchId) {
-                  const clamped = Math.max(1, Math.min(9901, searchId));
-                  navigation("/case/" + clamped);
+                if (e.key === "Enter") {
+                  handleSearch();
                 }
               }}
             />
@@ -726,12 +722,7 @@ export default function Homepage() {
                 fontWeight: 600,
                 cursor: "pointer",
               }}
-              onClick={() => {
-                if (searchId) {
-                  const clamped = Math.max(1, Math.min(9901, searchId));
-                  navigation("/case/" + clamped);
-                }
-              }}
+              onClick={handleSearch}
             >
               Search
             </button>
@@ -751,10 +742,7 @@ export default function Homepage() {
             >
               {/* Dataset */}
               <div className="flex flex-col gap-2.5">
-                <span className="flex items-center gap-2">
-                  <span style={filterLabelStyle}>Dataset</span>
-                  <span style={multiSelectTagStyle}>Multi-Select</span>
-                </span>
+                <span style={filterLabelStyle}>Dataset</span>
                 <div className="flex flex-wrap gap-2">
                   <button
                     style={pillStyle(filters.dataset.length === 0)}
@@ -802,10 +790,7 @@ export default function Homepage() {
 
               {/* Sex */}
               <div className="flex flex-col gap-2.5">
-                <span className="flex items-center gap-2">
-                  <span style={filterLabelStyle}>Sex</span>
-                  <span style={multiSelectTagStyle}>Multi-Select</span>
-                </span>
+                <span style={filterLabelStyle}>Sex</span>
                 <div className="flex flex-wrap gap-2">
                   <button
                     style={pillStyle(filters.sex.length === 0)}
@@ -832,10 +817,7 @@ export default function Homepage() {
 
               {/* Age */}
               <div className="flex flex-col gap-2.5">
-                <span className="flex items-center gap-2">
-                  <span style={filterLabelStyle}>Age</span>
-                  <span style={multiSelectTagStyle}>Multi-Select</span>
-                </span>
+                <span style={filterLabelStyle}>Age</span>
                 <div className="flex flex-wrap gap-2">
                   <button
                     style={pillStyle(filters.age.length === 0)}
@@ -861,10 +843,7 @@ export default function Homepage() {
                 const selected = filters[g.key];
                 return (
                   <div key={g.key} className="flex flex-col gap-2.5">
-                    <span className="flex items-center gap-2">
-                      <span style={filterLabelStyle}>{g.title}</span>
-                      <span style={multiSelectTagStyle}>Multi-Select</span>
-                    </span>
+                    <span style={filterLabelStyle}>{g.title}</span>
                     <div className="flex flex-wrap gap-2">
                       <button
                         style={pillStyle(selected.length === 0)}
@@ -894,7 +873,7 @@ export default function Homepage() {
                               style={pillStyle(selected.includes(val))}
                               onClick={() => toggleMulti(g.key, val)}
                             >
-                              {val}
+                              {r.label ?? val}
                               {countBadge(r.count)}
                             </button>
                           );
@@ -905,79 +884,6 @@ export default function Homepage() {
                 );
               })}
 
-              {/* Footer actions */}
-              <div
-                className="flex items-center justify-between"
-                style={{
-                  paddingTop: "16px",
-                  borderTop: "1px solid rgba(0,0,0,0.07)",
-                }}
-              >
-                <span
-                  style={{
-                    fontFamily: "'JetBrains Mono', monospace",
-                    fontSize: "11px",
-                    color: "rgba(0,0,0,0.45)",
-                  }}
-                >
-                  {matchTotal !== null
-                    ? `${matchTotal.toLocaleString()} ${
-                        matchTotal === 1 ? "case matches" : "cases match"
-                      }`
-                    : "Filter by tumor, sex, age, manufacturer, phase, site & year"}
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={handleCopyLink}
-                    style={{
-                      padding: "9px 18px",
-                      background: "transparent",
-                      border: "1px solid rgba(0,0,0,0.12)",
-                      borderRadius: "8px",
-                      color: copied ? "#10b981" : "rgba(0,0,0,0.6)",
-                      fontFamily: "'Space Grotesk', sans-serif",
-                      fontSize: "13px",
-                      fontWeight: 600,
-                      cursor: "pointer",
-                      transition: "color 0.15s",
-                    }}
-                  >
-                    {copied ? "Link copied!" : "Copy link"}
-                  </button>
-                  <button
-                    onClick={handleResetFilters}
-                    style={{
-                      padding: "9px 18px",
-                      background: "transparent",
-                      border: "1px solid rgba(0,0,0,0.12)",
-                      borderRadius: "8px",
-                      color: "rgba(0,0,0,0.6)",
-                      fontFamily: "'Space Grotesk', sans-serif",
-                      fontSize: "13px",
-                      fontWeight: 600,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Reset
-                  </button>
-                  <button
-                    onClick={handleApplyFilters}
-                    style={{
-                      padding: "9px 24px",
-                      background: "#002D72",
-                      border: "none",
-                      borderRadius: "8px",
-                      color: "#ffffff",
-                      fontFamily: "'Space Grotesk', sans-serif",
-                      fontSize: "13px",
-                      fontWeight: 600,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Apply filters
-                  </button>
-                </div>
-              </div>
             </div>
           )}
         </div>

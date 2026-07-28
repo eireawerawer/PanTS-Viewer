@@ -13,6 +13,8 @@ from services.ollama_client import (
     list_ollama_models,
 )
 from services.segmentation_metrics import calculate_session_metrics
+from services.search_ranking import rank_quality_results
+from services.site_normalization import site_country_label, split_site_codes
 from models.application_session import ApplicationSession
 from models.combined_labels import CombinedLabels
 from models.base import db
@@ -1763,8 +1765,20 @@ def api_search():
     sort_dir = (_arg("sort_dir", "asc") or "asc").strip().lower()
 
     if sort_by in ("top", "quality"):
-        by  = ["__complete", "__spacing_sum", "__shape_sum", "__case_sortkey"]
-        asc = [False, True, False, True]
+        has_sex_filter = any(
+            key in request.args for key in ("sex", "sex[]", "sex_is_null")
+        )
+        has_age_filter = any(
+            key in request.args
+            for key in ("age_bin", "age_bin[]", "age_from", "age_to", "age_is_null")
+        )
+        df = rank_quality_results(
+            df,
+            balance_sex=not has_sex_filter,
+            balance_age=not has_age_filter,
+        )
+        by = []
+        asc = []
     elif sort_by in ("id", "id_asc"):
         by, asc = ["__case_sortkey"], [True]
     elif sort_by == "id_desc":
@@ -1783,7 +1797,8 @@ def api_search():
         by, asc = [k, "__case_sortkey"], [(sort_dir != "desc"), True]
 
     # ---- 排序 ----
-    df = df.sort_values(by=by, ascending=asc, na_position="last", kind="mergesort")
+    if by:
+        df = df.sort_values(by=by, ascending=asc, na_position="last", kind="mergesort")
 
     # ---- 分頁：注意 total 先算完篩選後的完整筆數 ----
     total    = int(len(df))
@@ -1832,6 +1847,39 @@ def _facet_counts_with_unknown(df: pd.DataFrame, col_key: str, top_k: int = 6) -
         return {"rows": [], "unknown": 0}
 
     ser = df[col_name]
+
+    # ---- Site nationality: count each country token, not the raw multi-country string ----
+    if col_key in ("site_nat", "site_nationality"):
+        token_series = (
+            df["__sn_tokens"]
+            if "__sn_tokens" in df.columns
+            else ser.map(split_site_codes)
+        )
+        counts: Dict[str, int] = {}
+        for raw_tokens in token_series:
+            tokens = (
+                raw_tokens
+                if isinstance(raw_tokens, (list, tuple, set))
+                else split_site_codes(raw_tokens)
+            )
+            if not tokens:
+                unknown += 1
+                continue
+            for code in set(tokens):
+                counts[code] = counts.get(code, 0) + 1
+
+        rows = [
+            {
+                "value": code,
+                "label": site_country_label(code),
+                "count": count,
+            }
+            for code, count in counts.items()
+        ]
+        rows.sort(key=lambda row: (-row["count"], row["label"]))
+        if top_k and top_k > 0:
+            rows = rows[:top_k]
+        return {"rows": rows, "unknown": unknown}
 
     # ---- Year：數值化、NaN 視為 unknown ----
     if col_key == "year":
@@ -1970,12 +2018,12 @@ def api_facets():
 @api_blueprint.route("/random", methods=['GET'])
 def api_random_topk_rotate_norand():
     """
-    推薦：完整資料優先 → 取 Top-K(預設100) → 環狀位移 → 可排除最近看過
-    排序：__spacing_sum ↑, __shape_sum ↓, __case_sortkey ↑
+    Recommend complete, tumor-positive, high-resolution cases first, diversify
+    nearby demographics, then rotate through the top-K while excluding recent ids.
     """
     try:
         scope = (request.args.get("scope", "filtered") or "filtered").strip().lower()
-        base_df = apply_filters(DF)
+        base_df = apply_filters(DF).copy()
         if len(base_df) == 0 and scope == "all":
             base_df = DF.copy()
 
@@ -1985,11 +2033,17 @@ def api_random_topk_rotate_norand():
         df_full = base_df[base_df["__complete"]] if "__complete" in base_df.columns else base_df
         if len(df_full) == 0:
             df_full = base_df
-        df = df_full.sort_values(
-            by=["__spacing_sum","__shape_sum","__case_sortkey"],
-            ascending=[True, False, True],
-            na_position="last",
-            kind="mergesort",
+        has_sex_filter = any(
+            key in request.args for key in ("sex", "sex[]", "sex_is_null")
+        )
+        has_age_filter = any(
+            key in request.args
+            for key in ("age_bin", "age_bin[]", "age_from", "age_to", "age_is_null")
+        )
+        df = rank_quality_results(
+            df_full,
+            balance_sex=not has_sex_filter,
+            balance_age=not has_age_filter,
         )
 
         if len(df) == 0:
