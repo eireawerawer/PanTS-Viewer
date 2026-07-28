@@ -1,9 +1,4 @@
 
-.btn {
-  display: none; 
-}
-
-
 @media (max-width: 767px) {
   .btn {
     display: flex;
