@@ -1,8 +1,5 @@
 /* ===== LandingPage.module.css ===== */
 
-/* ---------- Fonts ---------- */
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
-
 /* ---------- Keyframes ---------- */
 @keyframes fadeInUp {
   from { opacity: 0; transform: translateY(14px); }

@@ -79,7 +79,6 @@
 
 /* ── GitHub link container (right side) ── */
 .githubContainer {
-  width: 235px;
   display: flex;
   justify-content: flex-end;
   align-items: center;
