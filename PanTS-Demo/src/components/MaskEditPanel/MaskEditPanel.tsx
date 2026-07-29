@@ -698,7 +698,7 @@ function MaskEditPanel({
 					// re-enabling later is a one-line flip, not a rebuild.
 					<button className="vp-edit__save" disabled title="Coming soon">
 						<IconCloudUpload size={16} />
-						Save to server — coming soon
+						Save to server 
 					</button>
 				)}
 				<div className="vp-edit__hint">

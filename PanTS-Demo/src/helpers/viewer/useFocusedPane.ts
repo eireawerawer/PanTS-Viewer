@@ -9,7 +9,7 @@ interface UseFocusedPaneArgs {
 }
 
 /**
- * Tracks which MPR pane is "focused" — the fullscreen pane in a single 2D
+ * Tracks which MPR pane is "focused": the fullscreen pane in a single 2D
  * view, or whichever of the three panes was most recently scrolled/clicked
  * while in MPR grid view. Used by every single-pane tool: reference lines'
  * source, cine playback, flip, rotate.

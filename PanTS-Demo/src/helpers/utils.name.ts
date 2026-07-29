@@ -1,5 +1,5 @@
 /**
- * Converts a raw organ filename/key (e.g. "adrenal_gland-left.nii.gz") into a
+ * Converts a raw organ filename/key (e.g. "adrenal_gland-left") into a
  * clean, capitalized display name ("Adrenal Gland Left").
  */
 export function filenameToName(filename: string): string {

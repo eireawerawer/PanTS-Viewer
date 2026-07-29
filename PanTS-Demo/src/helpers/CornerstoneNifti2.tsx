@@ -2119,16 +2119,10 @@ function _notifySegmentationChanged() {
 }
 
 // ============================================================================
-// SECTION: Undo / Redo History (Non-Brush Edits)
+// SECTION: Undo / Redo History 
 // ============================================================================
 
-// Self-contained undo/redo stack for smart-fill / morphology / lasso edits —
-// deliberately separate from Cornerstone's own HistoryMemo (whose push API
-// isn't publicly documented). This one is fully under our control, so it's
-// guaranteed to actually work; the tradeoff is it doesn't interleave with
-// brush-stroke undo history — undoing a fill won't touch a brush stroke made
-// after it, and vice versa. Use the dedicated Undo/Redo Fill buttons for
-// this, separate from the general Undo/Redo.
+
 type FillHistoryEntry = { undo: () => void; redo: () => void };
 let _fillHistory: FillHistoryEntry[] = [];
 let _fillHistoryIndex = -1;
@@ -2174,11 +2168,6 @@ export function canvasPointToVoxel(pane: CinePane, canvasPos: Point2): [number, 
     return null;
   }
 }
-
-// Which volume axis (i/j/k) each pane's slice index walks along. Cornerstone
-// orthographic MPR viewports for AXIAL/SAGITTAL/CORONAL each scroll a single
-// IJK axis; this mirrors the same axis assumption used elsewhere in this file
-// for per-pane slice operations.
 function _sliceAxisForPane(pane: CinePane): 0 | 1 | 2 {
   return pane === "sagittal" ? 0 : pane === "coronal" ? 1 : 2;
 }
@@ -2215,7 +2204,7 @@ function _segBBox(vm: any, segmentIndex: number, margin: number) {
 function _tightExtentAxis(i0:number,i1:number,j0:number,j1:number,k0:number,k1:number): number | null {
   const extI = i1 - i0 + 1, extJ = j1 - j0 + 1, extK = k1 - k0 + 1;
   const min = Math.min(extI, extJ, extK);
-  if (min > 2) return null; // genuinely volumetric — full 3D morphology
+  if (min > 2) return null;
   if (extI === min) return 0;
   if (extJ === min) return 1;
   return 2;
@@ -2339,9 +2328,7 @@ export function dilateActiveSegment(iterations = 1, connectivity: 6 | 26 = 6, se
   return _applyMorphSequence(["dilate"], iterations, connectivity, seedVoxel);
 }
 
-// Connected-component labeling on the active segment's voxels (within its own
-// bounding box). Used by _isolateComponentAt so erode/dilate can operate on a
-// single clicked fragment without touching a same-label neighbor.
+
 function _activeSegmentComponents(connectivity: 6 | 26): { vm: any; bbox: NonNullable<ReturnType<typeof _segBBox>>; w: number; h: number; d: number; labels: Int32Array; sizes: number[] } | null {
   const segVolume = cache.getVolume(segmentationId);
   const vm = segVolume?.voxelManager as any;
@@ -2384,13 +2371,6 @@ function _activeSegmentComponents(connectivity: 6 | 26): { vm: any; bbox: NonNul
   }
   return { vm, bbox, w, h, d, labels, sizes };
 }
-
-// Given a voxel inside the active segment, finds which connected component it
-// belongs to and returns a tight local bbox (padded for growth) containing:
-//  - selfMask: voxels belonging to THAT component
-//  - otherMask: voxels of the active segment belonging to any OTHER component
-// otherMask must never be modified — it's what lets you dilate/erode one
-// vertebra fragment without touching its neighbor that shares the same label.
 function _isolateComponentAt(
   seed: [number, number, number],
   connectivity: 6 | 26,
@@ -2447,82 +2427,6 @@ function _isolateComponentAt(
   return { vm, i0, i1, j0, j1, k0, k1, w, h, d, selfMask, otherMask };
 }
 
-// ============================================================================
-// SECTION: Segment Boundary Cleanup (Snap To Neighbors)
-// ============================================================================
-
-export function snapSegmentToNeighbors(
-  activeSegment = _activeEditSegment,
-  marginVoxels = 3
-): { changedVoxels: number } | null {
-  const segVolume = cache.getVolume(segmentationId);
-  const vm = segVolume?.voxelManager as any;
-  if (!segVolume || !vm) return null;
-
-  const bbox = _segBBox(vm, activeSegment, marginVoxels);
-  if (!bbox) return null;
-  const { i0, i1, j0, j1, k0, k1 } = bbox;
-  const w = i1 - i0 + 1, h = j1 - j0 + 1, d = k1 - k0 + 1;
-  const idxLocal = (i: number, j: number, k: number) => (i - i0) + (j - j0) * w + (k - k0) * w * h;
-
-  const labels = new Int32Array(w * h * d);
-  let hasNeighbor = false;
-  for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
-    const v = vm.getAtIJK(i, j, k);
-    labels[idxLocal(i, j, k)] = v;
-    if (v !== 0 && v !== activeSegment) hasNeighbor = true;
-  }
-  if (!hasNeighbor) return { changedVoxels: 0 };
-
-  // Multi-source BFS distance to the nearest voxel that ALREADY belongs to a
-  // neighbor segment (frozen — neighbors are not modified).
-  const INF = 1e9;
-  const distNeighbor = new Float32Array(w * h * d).fill(INF);
-  const q: number[] = [];
-  for (let li = 0; li < labels.length; li++) {
-    if (labels[li] !== 0 && labels[li] !== activeSegment) { distNeighbor[li] = 0; q.push(li); }
-  }
-  let head = 0;
-  while (head < q.length) {
-    const li = q[head++];
-    const k = Math.floor(li / (w * h));
-    const rem = li - k * w * h;
-    const j = Math.floor(rem / w);
-    const i = rem - j * w;
-    for (const [di, dj, dk] of _OFFSETS6) {
-      const ni = i + di, nj = j + dj, nk = k + dk;
-      if (ni < 0 || ni >= w || nj < 0 || nj >= h || nk < 0 || nk >= d) continue;
-      const nli = ni + nj * w + nk * w * h;
-      if (distNeighbor[nli] > distNeighbor[li] + 1) { distNeighbor[nli] = distNeighbor[li] + 1; q.push(nli); }
-    }
-  }
-
-  // Any active-segment voxel that is a neighbor's immediate neighbor
-  // (distance 0, i.e. literally overlapping — can't happen in a single-valued
-  // labelmap) never occurs; what DOES happen is active voxels adjacent
-  // (distance 1) to a frozen neighbor voxel where the active label was
-  // painted over territory that logically belongs to the neighbor. We clear
-  // active voxels at distance 1 from a neighbor — the immediate contact layer.
-  const changes: Array<{ i: number; j: number; k: number; prev: number }> = [];
-  for (let li = 0; li < labels.length; li++) {
-    if (labels[li] !== activeSegment) continue;
-    if (distNeighbor[li] !== 1) continue; // only the immediate contact layer
-    const k = Math.floor(li / (w * h));
-    const rem = li - k * w * h;
-    const j = Math.floor(rem / w);
-    const i = rem - j * w;
-    changes.push({ i: i + i0, j: j + j0, k: k + k0, prev: activeSegment });
-  }
-
-  if (!changes.length) return { changedVoxels: 0 };
-  for (const c of changes) vm.setAtIJK(c.i, c.j, c.k, 0);
-  _pushFillHistory({
-    undo: () => { for (const c of changes) vm.setAtIJK(c.i, c.j, c.k, c.prev); _notifySegmentationChanged(); },
-    redo: () => { for (const c of changes) vm.setAtIJK(c.i, c.j, c.k, 0); _notifySegmentationChanged(); },
-  });
-  _notifySegmentationChanged();
-  return { changedVoxels: changes.length };
-}
 
 // ============================================================================
 // SECTION: Slice Copy & Shape Interpolation (SDT)
@@ -2530,8 +2434,7 @@ export function snapSegmentToNeighbors(
 
 // ---------------------------------------------------------------------------
 // Copy/paste a segment's 2D footprint from the current slice to another
-// slice along the same pane's through-plane axis — cheap stand-in for full
-// interpolation when adjacent slices are near-identical.
+// slice along the same pane's through-plane axis
 // ---------------------------------------------------------------------------
 
 export function copySegmentToAdjacentSlice(
@@ -2563,7 +2466,7 @@ export function copySegmentToAdjacentSlice(
     return [a, atSrc ? srcIndex : dstIndex, b]; // coronal: slices along j
   };
 
-  // Iterate the two in-plane axes only (much cheaper than scanning the volume).
+  // Iterate the two in-plane axes only
   const [dimA, dimB] =
     axis === 2 ? [dimX, dimY] : axis === 0 ? [dimY, dimZ] : [dimX, dimZ];
 
@@ -2597,8 +2500,7 @@ export function copySegmentToAdjacentSlice(
 // ---------------------------------------------------------------------------
 
 // 2D chamfer-style approximate Euclidean SDT (two-pass, sub-pixel accurate
-// enough for interpolation purposes — not exact EDT, but far cheaper and
-// visually indistinguishable for typical organ/vertebra shapes).
+// enough for interpolation purposes
 function _signedDistanceTransform2D(mask: Uint8Array, w: number, h: number, clampDist = 40): Float32Array {
   const INF = 1e6;
   const dist = new Float32Array(w * h);
@@ -2655,7 +2557,7 @@ function _extractSliceMask(vm: any, pane: CinePane, sliceIndex: number, segmentI
 }
 
 // Flood-fills from the border of a dimA x dimB slice grid and returns which
-// background cells were unreachable — i.e., truly enclosed holes, not the
+// background cells were unreachable - i.e., truly enclosed holes, not the
 // exterior. Used to patch the annulus artifact that SDT blending can produce
 // between two anchor slices whose shapes have shifted position.
 function _fillEnclosedHoles(mask: Uint8Array, dimA: number, dimB: number): Uint8Array {
@@ -2968,10 +2870,6 @@ export function lassoCommitPolygon(
 // SECTION: Mouse Tool Release Helper
 // ============================================================================
 
-// Releases the primary mouse button from every navigation/edit tool (crosshair, pan,
-// brush/eraser, measurement tools) so a custom pointer-driven UI — smart-fill scribbles,
-// box-prompt drag, lasso — can read mouse events without a Cornerstone tool consuming
-// them first.
 export function releasePrimaryMouseTools() {
   const toolGroup = ToolGroupManager.getToolGroup(toolGroupId);
   if (!toolGroup) return;
@@ -2985,11 +2883,7 @@ export function releasePrimaryMouseTools() {
 // SECTION: Live Mesh Extraction (Marching Cubes)
 // ============================================================================
 
-/**
- * Extract a live isosurface for one segment index, directly from the currently
- * loaded labelmap. Returns null if the segment is empty/missing or the
- * segmentation isn't loaded yet.
- */
+
 export function extractSegmentSurface(
   segmentIndex: number,
   manifestCenter: [number, number, number]
