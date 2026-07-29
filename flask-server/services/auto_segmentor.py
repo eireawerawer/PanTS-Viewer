@@ -881,6 +881,13 @@ def _run_lesionsegmenter_inference(input_path: str, session_dir: str, conda_path
     (paired Dice delta not significant, 95% CI crosses zero) while running
     roughly 5x faster. Dropping either flag trades speed for nothing -- do not
     remove them to "be safe", the safety case is what's cited above.
+
+    Runs scripts/lesionseg_predict.py instead of the bare nnUNetv2_predict_from_modelfolder
+    CLI every other model here uses -- that CLI has no flag for GPU-accelerated export
+    resampling, and this wrapper applies it (~26-42s -> ~1-6s on the export stage, no
+    accuracy cost, see the script's own docstring). Directly measured on identical
+    case/flags/environment: 2m18s (bare CLI) -> 1m5s (this wrapper) end to end. Still a
+    fresh subprocess per request -- NOT the warm-predictor optimization, that's separate.
     """
     case_id = _normalize_case_id(input_path)
 
@@ -908,20 +915,20 @@ def _run_lesionsegmenter_inference(input_path: str, session_dir: str, conda_path
     if not conda_exe:
         raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
 
+    predict_script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "lesionseg_predict.py")
+
     full_cmd = (
         f"nnUNet_raw={shlex.quote(nnunet_raw)} "
         f"nnUNet_preprocessed={shlex.quote(nnunet_preprocessed)} "
         f"nnUNet_results={shlex.quote(nnunet_results)} "
         f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
         f"{shlex.quote(conda_exe)} run -n {shlex.quote(lesionseg_env_name)} "
-        f"nnUNetv2_predict_from_modelfolder "
+        f"python {shlex.quote(predict_script)} "
         f"-i {shlex.quote(input_dir)} "
         f"-o {shlex.quote(save_dir)} "
         f"-m {shlex.quote(ckpt_path)} "
-        f"-f all "
         f"-step_size 0.7 "
         f"--disable_tta "
-        f"-npp 2 -nps 2 "
         f"-chk checkpoint_final.pth"
     )
 
