@@ -461,7 +461,37 @@ const UploadPage: React.FC = () => {
         setMessage(`Uploading ${filename}...`);
       }
 
-      for (let i = p.nextChunk; i < totalChunks; i++) {
+      // Chunks upload with CONCURRENCY in flight at once instead of one at a time --
+      // each chunk lands in its own server-side file (chunk-<index>), reassembled by
+      // finalize-upload, so arrival order doesn't matter and parallelizing is safe.
+      // Chunk SIZE stays untouched (413 handling above implies a proxy/server limit
+      // this value was deliberately chosen to stay under) -- the win comes from
+      // overlapping round-trip latency across many chunks, not from fewer/bigger
+      // requests. A 256KB-chunk file that took N sequential round trips now takes
+      // roughly N/CONCURRENCY.
+      const CONCURRENCY = 6;
+      let nextIndexToStart = p.nextChunk;
+      let completedCount = p.nextChunk;
+      const completedIndices = new Set<number>();
+      // The resume cursor must only ever advance over a CONTIGUOUS run of completed
+      // chunks -- with parallel uploads, chunk 20 can finish before chunk 15, and
+      // persisting past a gap would make a resumed run skip re-sending chunk 15.
+      let contiguousWatermark = p.nextChunk;
+      const advanceWatermark = async () => {
+        let advanced = false;
+        while (completedIndices.has(contiguousWatermark)) {
+          completedIndices.delete(contiguousWatermark);
+          contiguousWatermark++;
+          advanced = true;
+        }
+        // Same throttling intent as before (avoid an IDB write per chunk) -- persist
+        // on every 16th advance, plus unconditionally once everything is done below.
+        if (advanced && contiguousWatermark % 16 === 0) {
+          await setPendingNextChunk(sid, contiguousWatermark);
+        }
+      };
+
+      const uploadOneChunk = async (i: number) => {
         const chunk = file.slice(
           i * CHUNK_SIZE,
           Math.min((i + 1) * CHUNK_SIZE, file.size),
@@ -484,12 +514,29 @@ const UploadPage: React.FC = () => {
         const data = await parseApiResponse(res);
         if (!res.ok) throw new Error(data.error || "Chunk upload failed");
 
-        // Persist the cursor every so often (not every chunk - that would be a
-        // lot of IDB writes). On resume we re-send at most a few already-stored
-        // chunks, which the backend just overwrites. Harmless.
-        if (i % 16 === 0) await setPendingNextChunk(sid, i + 1);
+        completedCount++;
+        completedIndices.add(i);
+        await advanceWatermark();
         if (foreground)
-          setUploadProgress(Math.round(((i + 1) / totalChunks) * 100));
+          setUploadProgress(Math.round((completedCount / totalChunks) * 100));
+      };
+
+      const worker = async () => {
+        while (true) {
+          const i = nextIndexToStart++;
+          if (i >= totalChunks) return;
+          await uploadOneChunk(i);
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, totalChunks - p.nextChunk) }, worker),
+      );
+      // Final persist in case the last watermark advance(s) landed on a non-multiple
+      // of 16 -- without this, a crash right after the loop could re-send a few
+      // already-uploaded tail chunks on resume (harmless, per the original comment,
+      // but pointless to leave on the table now that we track the exact watermark).
+      if (contiguousWatermark > p.nextChunk) {
+        await setPendingNextChunk(sid, contiguousWatermark);
       }
 
       if (foreground) setMessage("Finalizing upload...");
@@ -537,6 +584,11 @@ const UploadPage: React.FC = () => {
       // A user cancel aborts our fetches - cancelRun already did the cleanup
       // and set the card to Cancelled, so don't overwrite that with Failed.
       if (controller.signal.aborted) return;
+      // A genuine failure (not a user cancel): with chunks now uploading in
+      // parallel, other in-flight chunk requests would otherwise keep running
+      // to completion for no reason after we've already given up on this
+      // upload. Abort them too.
+      controller.abort();
       console.error(err);
       setPhase(sid);
       if (foreground) {
