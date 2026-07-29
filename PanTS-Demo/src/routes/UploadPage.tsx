@@ -38,6 +38,11 @@ const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
     label: "Atlas-Net",
     desc: "For anatomically consistent results",
   },
+  {
+    id: "LesionSegmenter",
+    label: "LesionSegmenter",
+    desc: "For fast pancreatic lesion detection",
+  },
 ];
 import { useNavigate } from "react-router-dom";
 import "./UploadPage.css";
@@ -118,6 +123,7 @@ const UploadPage: React.FC = () => {
     | "MedFormer"
     | "R-Super"
     | "Atlas-Net"
+    | "LesionSegmenter"
     | ""
   >("None");
   const [modelDropOpen, setModelDropOpen] = useState(false);
