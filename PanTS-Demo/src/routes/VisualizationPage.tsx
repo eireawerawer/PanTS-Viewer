@@ -42,11 +42,13 @@ import { buildViewerActions } from "../components/AIAssistant/assistantActions";
 import MaskEditPanel, { type MaskEditMode } from "../components/MaskEditPanel/MaskEditPanel";
 import MeasurementPanel from "../components/MeasurementPanel/MeasurementPanel";
 import { SegmentationMeshViewer } from "../components/MeshViewer";
+import { cache as reportDataCache } from '../components/ReportScreen/ReportScreen';
 import OrganCheckbox from "../components/OrganCheckbox";
 import PercentileBar from "../components/PercentileBar";
 import SessionHUD from "../components/ReadingSession/SessionHUD";
 import SessionSummary from "../components/ReadingSession/SessionSummary";
 import ReportScreen from "../components/ReportScreen/ReportScreen";
+
 import {
     API_BASE,
     APP_CONSTANTS,
@@ -294,6 +296,8 @@ function useToolbarFlyout() {
 		};
 	}, [open]);
 
+	
+
 	return { open, pos, groupRef, btnRef, menuRef, toggle, close };
 }
 
@@ -322,6 +326,15 @@ function VisualizationPage() {
 	const isHd =
 		typeof window !== "undefined" &&
 		new URLSearchParams(window.location.search).get("hd") === "1";
+	
+	useEffect(() => {
+		if (!isDicom && caseId && !reportDataCache[caseId]) {
+			fetch(`${API_BASE}/api/get-report-data/${caseId}`)
+				.then(r => r.json())
+				.then(j => { if (!j.error) reportDataCache[caseId] = j; })
+				.catch(() => {});
+		}
+	}, [caseId, isDicom]);
 
 	useEffect(() => {
 		let cancelled = false;

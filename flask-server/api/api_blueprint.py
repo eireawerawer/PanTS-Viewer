@@ -1,6 +1,5 @@
-from flask import Blueprint, send_file, make_response, request, jsonify, Response
+from flask import Blueprint, send_file, make_response, request, jsonify, Response, current_app
 from werkzeug.utils import secure_filename
-from services.nifti_processor import NiftiProcessor
 from services.session_manager import SessionManager, generate_uuid
 from services.auto_segmentor import run_auto_segmentation, cancel_all_inference
 from services.mesh_generation import generate_mesh_manifest, generate_organ_glb_bytes
@@ -73,6 +72,9 @@ def _load_metadata_cache():
         return {}
 
 _METADATA_CACHE = _load_metadata_cache()
+_REPORT_DATA_CACHE = {}  # {case_id: report_data_dict} — avoids reloading/recomputing
+                          # the full CT+mask volume on every report/PDF request
+progress_tracker = {}  # {session_id: (start_time, expected_total_seconds)}
 
 progress_tracker = {}  # {session_id: (start_time, expected_total_seconds)}
 
@@ -452,18 +454,19 @@ def define_term():
     }), 200
  
  
-@api_blueprint.route('/get-report-data/<id>', methods=['GET'])
-def get_report_data(id):
+def _build_report_data(id):
+    """Gathers everything the report needs (RadGPT text, organ volumes/status/
+    centroid/dimensions, lesions) into a plain dict. Shared by the JSON
+    endpoint and the PDF-generation endpoint so both show identical data."""
     if id is None or not str(id).isdigit():
-        return jsonify({"error": "Invalid id parameter"}), 400
+        return {"error": "Invalid id parameter"}
     case_id = int(id)
+    id = str(case_id)
+
+    if id in _REPORT_DATA_CACHE:
+        return _REPORT_DATA_CACHE[id]
+    
     try:
-        if id is None or not str(id).isdigit():
-            return jsonify({"error": "Invalid id parameter"}), 400
-        id = str(int(id))
-        # ── Try RadGPT structured report from metadata.xlsx first ─────────────
-        # This uses Zongwei Zhou's own RadGPT model output — more accurate
-        # than Ollama-generated impressions. Falls back to Ollama if not found.
         radgpt_comments = None
         radgpt_impression = None
         try:
@@ -481,9 +484,7 @@ def get_report_data(id):
                         row_id = str(row[id_col] or '').strip()
                         if row_id == pants_id:
                             raw = str(row[report_col] or '')
-                            # Clean Windows carriage return artifacts
                             raw = raw.replace('_x000D_', '\n').replace('\r\n', '\n').replace('\r', '\n')
-                            # Collapse multiple blank lines
                             import re as _re
                             raw = _re.sub(r'\n{3,}', '\n\n', raw)
                             findings_match = re.search(r'FINDINGS:(.*?)(?=IMPRESSION:|$)', raw, re.DOTALL)
@@ -492,7 +493,6 @@ def get_report_data(id):
                                 radgpt_comments = findings_match.group(1).strip()
                             if impression_match:
                                 imp_text = impression_match.group(1).strip()
-                                # Keep full impression, split into sentences
                                 sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', imp_text) if s.strip()]
                                 radgpt_impression = sentences if sentences else [imp_text]
                             print(f"[RadGPT] Found report for case {id}: {radgpt_impression}")
@@ -500,24 +500,21 @@ def get_report_data(id):
                 wb.close()
         except Exception as e:
             print(f"[RadGPT] metadata lookup failed: {e}")
-        # ─────────────────────────────────────────────────────────────────────
+
         subfolder = "ImageTr" if case_id < 9000 else "ImageTe"
         label_subfolder = "LabelTr" if case_id < 9000 else "LabelTe"
-        # Check image_only first (new structure), fall back to data/ImageTr
         image_only_path = f"{Constants.PANTS_PATH}/image_only/{get_panTS_id(case_id)}/{Constants.MAIN_NIFTI_FILENAME}"
         data_ct_path = f"{Constants.PANTS_PATH}/data/{subfolder}/{get_panTS_id(case_id)}/{Constants.MAIN_NIFTI_FILENAME}"
         ct_path = image_only_path if os.path.exists(image_only_path) else data_ct_path
-        # Check mask_only first (new structure), fall back to data/LabelTe
         mask_only_path = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(case_id)}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
         data_mask_path = f"{Constants.PANTS_PATH}/data/{label_subfolder}/{get_panTS_id(case_id)}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
         mask_path = mask_only_path if os.path.exists(mask_only_path) else data_mask_path
-        seg_dir = f"{Constants.PANTS_PATH}/data/{label_subfolder}/{get_panTS_id(case_id)}/segmentations"
- 
+        seg_dir = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(case_id)}/segmentations"        
         pid = get_panTS_id(case_id)
         meta = _METADATA_CACHE.get(pid, {})
         age = meta.get("age", "N/A")
         sex = meta.get("sex", "N/A")
- 
+
         wb = load_workbook(os.path.join(Constants.PANTS_PATH, "data", "metadata.xlsx"))
         sheet = wb["PanTS_metadata"]
         contrast = ""
@@ -527,8 +524,7 @@ def get_report_data(id):
                 contrast = row[3]
                 study_detail = row[8]
                 break
- 
-        # If local files don't exist, download from HuggingFace
+
         if not os.path.exists(ct_path) or not os.path.exists(mask_path):
             import requests, tempfile
             pants_id = get_panTS_id(id)
@@ -550,46 +546,27 @@ def get_report_data(id):
                 with open(mask_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
- 
+
         ct_nii = nib.load(ct_path)
         spacing = ct_nii.header.get_zooms()
         shape = ct_nii.shape
         ct_array = ct_nii.get_fdata()
         mask_nii = nib.load(mask_path)
         mask_array = mask_nii.get_fdata().astype(np.uint8)
-        # Crop both arrays to the minimum shape along each axis
-        # to handle slight size mismatches between CT and mask
         min_shape = tuple(min(c, m) for c, m in zip(ct_array.shape, mask_array.shape))
         ct_array = ct_array[:min_shape[0], :min_shape[1], :min_shape[2]]
         mask_array = mask_array[:min_shape[0], :min_shape[1], :min_shape[2]]
         voxel_volume = np.prod(mask_nii.header.get_zooms()) / 1000
-        # World-space affine - converts a voxel index (i, j, k) to real
-        # millimeter coordinates. This is what makes the centroid below a
-        # REAL position usable by moveCornerstoneCrosshairToMm, rather
-        # than a placeholder.
         affine = mask_nii.affine
- 
+
         LABELS = {v: k for k, v in Constants.PREDEFINED_LABELS.items()}
- 
-        # Soft physiological sanity ranges per organ type, used only to
-        # flag "this needs review" vs "looks normal" internally. NOT
-        # shown to the user as raw numbers - the frontend only ever sees
-        # the `status` field. This is a stopgap for a known upstream
-        # segmentation/data issue where some organs read in the air range;
-        # rather than silently showing a wrong number as fact, or trying
-        # to "correct" the data here, we flag it so the UI can say
-        # "needs review" instead of presenting a confident wrong reading.
-        SOLID_ORGAN_HU_RANGE = (-20, 150)      # liver, spleen, kidney, pancreas, etc.
-        GI_HOLLOW_ORGAN_HU_RANGE = (-300, 200)  # colon, stomach, intestine, duodenum - tightened from
-                                                 # -1000 so a mean this close to pure air (e.g. -756 for
-                                                 # colon) correctly flags "check" instead of "normal" -
-                                                 # a real colon has enough wall/stool tissue that a mean
-                                                 # in the deep-air range usually signals a segmentation
-                                                 # issue, not a genuinely normal reading.
-        LUNG_HU_RANGE = (-1000, -200)            # lungs are genuinely air-filled - this range is correct as-is
+
+        SOLID_ORGAN_HU_RANGE = (-20, 150)
+        GI_HOLLOW_ORGAN_HU_RANGE = (-300, 200)
+        LUNG_HU_RANGE = (-1000, -200)
         GI_HOLLOW_ORGANS = {"colon", "stomach", "intestine", "duodenum"}
         LUNG_ORGANS = {"lung_left", "lung_right"}
- 
+
         organ_volumes = {}
         NO_FLAG_ORGANS = {
             "femur_left", "femur_right", "aorta", "postcava", "veins",
@@ -604,7 +581,7 @@ def get_report_data(id):
                 continue
             volume = float(np.sum(mask) * voxel_volume)
             mean_hu = float(np.mean(ct_array[mask]))
- 
+
             if organ in LUNG_ORGANS:
                 lo, hi = LUNG_HU_RANGE
             elif organ in GI_HOLLOW_ORGANS:
@@ -612,61 +589,50 @@ def get_report_data(id):
             else:
                 lo, hi = SOLID_ORGAN_HU_RANGE
             status = "normal" if organ in NO_FLAG_ORGANS else ("check" if (mean_hu < lo or mean_hu > hi) else "normal")
- 
-            # Real centroid: voxel-space center of mass, converted to mm
-            # via the affine. This is genuine anatomical position - not a
-            # placeholder - and feeds the same crosshair-navigation
-            # plumbing already used elsewhere (moveCornerstoneCrosshairToMm
-            # / moveNiiVueCrosshairToMm) for click-to-jump.
+
             voxel_coords = np.argwhere(mask)
-            centroid_voxel = voxel_coords.mean(axis=0)  # (i, j, k) in voxel space
+            centroid_voxel = voxel_coords.mean(axis=0)
             centroid_world = nib.affines.apply_affine(affine, centroid_voxel)
- 
-            # Bounding box dimensions in cm (real physical size of the organ)
+
             bbox_min = voxel_coords.min(axis=0)
             bbox_max = voxel_coords.max(axis=0)
             bbox_voxels = bbox_max - bbox_min + 1
-            # Convert voxel counts to mm using spacing, then to cm
             spacing_mm = np.abs([affine[0,0], affine[1,1], affine[2,2]])
             dims_mm = bbox_voxels * spacing_mm
             dims_cm = [round(float(d)/10, 1) for d in dims_mm]
- 
+
             organ_volumes[organ] = {
-                "volume": round(volume, 2),
-                "mean_hu": round(mean_hu, 1),
+                "volume": round(float(volume), 2),
+                "mean_hu": round(float(mean_hu), 1),
                 "status": status,
                 "centroid_mm": [round(float(c), 2) for c in centroid_world],
                 "dimensions": dims_cm,
             }
- 
+
         lesions = {}
         lesion_files = {
-            "pancreas": "pancreatic_lesion.npz",
-            "liver": "liver_lesion.npz",
-            "kidney": "kidney_lesion.npz",
+            "pancreas": "pancreatic_lesion.nii.gz",
+            "liver": "liver_lesion.nii.gz",
+            "kidney": "kidney_lesion.nii.gz",
         }
         for organ, filename in lesion_files.items():
             path = os.path.join(seg_dir, filename)
             if os.path.exists(path):
-                data = np.load(path)["data"]
-                voxels = int(np.sum(data > 0))
+                lesion_data = nib.load(path).get_fdata()
+                voxels = int(np.sum(lesion_data > 0))
                 if voxels > 0:
                     lesion_volume = round(voxels * voxel_volume, 2)
-                    lesions[organ] = {"voxels": voxels, "volume": lesion_volume}
- 
-        organ_data_str = ""
-        for organ, vals in organ_volumes.items():
-            organ_data_str += f"{organ.replace('_', ' ')}: volume={vals['volume']}cc, mean HU={vals['mean_hu']}\n"
- 
-        # If we have a RadGPT report, it is the authoritative source for organ status.
-        # Reset everything to normal first, then flag only what RadGPT calls abnormal.
+                    lesions[organ] = {"voxels": voxels, "volume": round(float(lesion_volume), 2)}
+
+        print(f"[DEBUG] seg_dir={seg_dir}")
+        print(f"[DEBUG] lesions found: {lesions}")
+
         if radgpt_comments:
             for organ in list(organ_volumes.keys()):
                 organ_volumes[organ]['status'] = 'normal'
             abnormal_keywords = ['enlarged', 'mass', 'lesion', 'tumor', 'abnormal',
                                  'dilated', 'obstruction', 'isoattenuating', 'hypodense',
                                  'hyperdense', 'cyst', 'nodule', 'atrophy', 'bilateral']
-            # Build stripped root for flexible matching
             organ_roots = {}
             for organ in organ_volumes.keys():
                 root = organ.replace('_left','').replace('_right','').replace('_body','') \
@@ -677,20 +643,17 @@ def get_report_data(id):
                 line_stripped = line.lower().replace(' ','').replace('_','')
                 if any(kw in line.lower() for kw in abnormal_keywords):
                     for organ, root in organ_roots.items():
-                        # Skip subtypes unless explicitly mentioned
-                        # e.g. "pancreas enlarged" shouldn't flag pancreas_body/head/tail
                         if '_body' in organ or '_head' in organ or '_tail' in organ or '_duct' in organ:
-                            # Only flag subtype if the subtype word is in the line
                             subtype = organ.split('_')[-1]
                             if root in line_stripped and subtype in line.lower():
                                 organ_volumes[organ]['status'] = 'check'
                         else:
                             if root in line_stripped:
                                 organ_volumes[organ]['status'] = 'check'
+
         comments = radgpt_comments or "Clinical comments unavailable."
         impression_items = radgpt_impression or ["No impression available for this case."]
- 
-        return jsonify({
+        result = {
             "case_id": id,
             "patient": {"age": age, "sex": sex},
             "imaging": {
@@ -703,14 +666,443 @@ def get_report_data(id):
             "lesions": lesions,
             "comments": comments,
             "impression": impression_items,
-        })
+        }
+        _REPORT_DATA_CACHE[id] = result
+        return result
+    except Exception:
+        return {"error": "Failed to build report data for the given id."}
+
+
+@api_blueprint.route('/get-report-data/<id>', methods=['GET'])
+def get_report_data(id):
+    data = _build_report_data(id)
+    if "error" in data:
+        status = 400 if data["error"] == "Invalid id parameter" else 500
+        return jsonify(data), status
+    return jsonify(data)
  
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": "An internal error occurred."}), 500
- 
- 
+
+def _draw_report_pdf(report_data, temp_pdf_path, output_pdf_path):
+    """Lays out report_data onto the report_template_3.pdf template using reportlab."""
+    from reportlab.pdfgen import canvas as _canvas
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.colors import HexColor
+    from PyPDF2 import PdfReader, PdfWriter
+    from PyPDF2._page import PageObject
+
+    # ---- Palette (matches the web app's teal/amber accents) ----
+    INK = HexColor("#1a1a1f")
+    MUTED = HexColor("#6b7280")
+    LINE = HexColor("#e5e7eb")
+    TEAL = HexColor("#0d9488")
+    TEAL_BG = HexColor("#f0fdfa")
+    AMBER = HexColor("#b45309")
+    AMBER_BG = HexColor("#fffbeb")
+    ROW_ALT = HexColor("#f9fafb")
+
+    pdf = _canvas.Canvas(temp_pdf_path, pagesize=letter)
+    width, height = letter
+    left_margin, right_margin, top_margin = 50, 50, 100
+    content_width = width - left_margin - right_margin
+    line_height, section_spacing = 13, 26
+    y_position = height - top_margin
+
+    def reset_page():
+        nonlocal y_position
+        pdf.showPage()
+        y_position = height - 120
+        pdf.setFont("Helvetica", 10)
+        pdf.setFillColor(INK)
+
+    def check_and_reset_page(space_needed):
+        nonlocal y_position
+        if y_position - space_needed < 60:
+            reset_page()
+
+    def section_header(label):
+        nonlocal y_position
+        check_and_reset_page(40)
+        pdf.setFillColor(TEAL)
+        pdf.rect(left_margin, y_position - 3, 3, 14, fill=1, stroke=0)
+        pdf.setFont("Helvetica-Bold", 12)
+        pdf.setFillColor(INK)
+        pdf.drawString(left_margin + 10, y_position, label)
+        y_position -= line_height + 6
+
+    def write_wrapped_text(x, y, content, font_size=10, max_width=None, color=INK):
+        pdf.setFillColor(color)
+        pdf.setFont("Helvetica", font_size)
+        words = str(content).split()
+        current_line = ""
+        max_width = max_width or content_width
+        for word in words:
+            if pdf.stringWidth(current_line + word + " ", "Helvetica", font_size) > max_width:
+                pdf.drawString(x, y, current_line.strip())
+                y -= line_height
+                current_line = f"{word} "
+                if y < 60:
+                    reset_page()
+                    y = height - top_margin
+            else:
+                current_line += f"{word} "
+        if current_line:
+            pdf.drawString(x, y, current_line.strip())
+            y -= line_height
+        pdf.setFillColor(INK)
+        return y
+
+    def draw_status_badge(x, y, status, w=58, h=15):
+        is_check = status == "check"
+        bg = AMBER_BG if is_check else TEAL_BG
+        fg = AMBER if is_check else TEAL
+        pdf.setFillColor(bg)
+        pdf.roundRect(x, y, w, h, 4, fill=1, stroke=0)
+        pdf.setFillColor(fg)
+        pdf.setFont("Helvetica-Bold", 8)
+        label = "REVIEW" if is_check else "NORMAL"
+        text_w = pdf.stringWidth(label, "Helvetica-Bold", 8)
+        pdf.drawString(x + (w - text_w) / 2, y + 4.5, label)
+        pdf.setFillColor(INK)
+
+    def draw_organ_grid(organ_rows, x, y, total_width):
+        """2-column grid: organ name + status icon. Green check for normal,
+        amber flag for organs RadGPT flagged as needing review."""
+        col_width = total_width / 2
+        row_h = 24
+        for i, (name, status) in enumerate(organ_rows):
+            col = i % 2
+            row = i // 2
+            cx = x + col * col_width
+            cy = y - row * row_h
+            is_flagged = status == "check"
+            badge_bg = AMBER_BG if is_flagged else TEAL_BG
+            badge_fg = AMBER if is_flagged else TEAL
+            icon = "!" if is_flagged else "✓"
+            pdf.setFillColor(badge_bg)
+            pdf.roundRect(cx, cy - row_h + 6, 18, 18, 4, fill=1, stroke=0)
+            pdf.setFillColor(badge_fg)
+            pdf.setFont("Helvetica-Bold", 11)
+            pdf.drawString(cx + 6, cy - row_h + 10, icon)
+            pdf.setFillColor(INK)
+            pdf.setFont("Helvetica-Bold" if is_flagged else "Helvetica", 10)
+            pdf.drawString(cx + 26, cy - row_h + 11, name)
+        rows_used = (len(organ_rows) + 1) // 2
+        return y - rows_used * row_h
+    
+    def draw_measurements_table(rows, x, y, total_width):
+        col_organ = total_width * 0.42
+        col_volume = total_width * 0.20
+        col_hu = total_width * 0.20
+        col_status = total_width * 0.18
+        row_h = 22
+
+        # Header row
+        pdf.setFillColor(HexColor("#111827"))
+        pdf.rect(x, y - row_h, total_width, row_h, fill=1, stroke=0)
+        pdf.setFillColor(HexColor("#ffffff"))
+        pdf.setFont("Helvetica-Bold", 9)
+        headers = ["ORGAN", "VOLUME (CC)", "MEAN HU", "STATUS"]
+        col_x = [x + 10, x + col_organ + 5, x + col_organ + col_volume + 5, x + col_organ + col_volume + col_hu + 5]
+        for h_text, hx in zip(headers, col_x):
+            pdf.drawString(hx, y - row_h + 7, h_text)
+        y -= row_h
+
+        for i, row in enumerate(rows):
+            organ, volume, mean_hu, status = row
+            if y - row_h < 60:
+                pdf.showPage()
+                y = height - 120
+                pdf.setFillColor(HexColor("#111827"))
+                pdf.rect(x, y - row_h, total_width, row_h, fill=1, stroke=0)
+                pdf.setFillColor(HexColor("#ffffff"))
+                pdf.setFont("Helvetica-Bold", 9)
+                for h_text, hx in zip(headers, col_x):
+                    pdf.drawString(hx, y - row_h + 7, h_text)
+                y -= row_h
+
+            if i % 2 == 1:
+                pdf.setFillColor(ROW_ALT)
+                pdf.rect(x, y - row_h, total_width, row_h, fill=1, stroke=0)
+
+            pdf.setFillColor(INK)
+            pdf.setFont("Helvetica", 9)
+            pdf.drawString(x + 10, y - row_h + 7, organ)
+            pdf.drawString(x + col_organ + 5, y - row_h + 7, f"{volume:.1f}")
+            pdf.drawString(x + col_organ + col_volume + 5, y - row_h + 7, f"{mean_hu:.1f}")
+            draw_status_badge(x + col_organ + col_volume + col_hu + 5, y - row_h + 4, status)
+
+            pdf.setStrokeColor(LINE)
+            pdf.line(x, y - row_h, x + total_width, y - row_h)
+            y -= row_h
+        return y
+
+    # ==================== TITLE ====================
+    pdf.setFillColor(TEAL)
+    pdf.rect(left_margin, height - 95, content_width, 3, fill=1, stroke=0)
+    pdf.setFillColor(INK)
+    pdf.setFont("Helvetica-Bold", 22)
+    pdf.drawString(left_margin, height - 125, "CT Scan Report")
+    pdf.setFont("Helvetica", 10)
+    pdf.setFillColor(MUTED)
+    pdf.drawString(left_margin, height - 142, "Generated by BodyMaps")
+    pdf.setFillColor(INK)
+    y_position = height - 172
+
+    # ==================== PATIENT / IMAGING (2-column) ====================
+    section_header("PATIENT & IMAGING")
+    patient = report_data.get("patient", {})
+    imaging = report_data.get("imaging", {})
+    col2_x = left_margin + content_width / 2 + 10
+    row_start = y_position
+
+    left_y = write_wrapped_text(left_margin, row_start, f"Case ID:  {report_data.get('case_id', 'N/A')}", color=MUTED, max_width=content_width/2 - 15)
+    left_y = write_wrapped_text(left_margin, left_y, f"Age:  {patient.get('age', 'N/A')}", color=MUTED, max_width=content_width/2 - 15)
+    left_y = write_wrapped_text(left_margin, left_y, f"Sex:  {patient.get('sex', 'N/A')}", color=MUTED, max_width=content_width/2 - 15)
+
+    right_y = write_wrapped_text(col2_x, row_start, f"Study:  {imaging.get('study_type', 'N/A')}", color=MUTED, max_width=content_width/2 - 15)
+    right_y = write_wrapped_text(col2_x, right_y, f"Contrast:  {imaging.get('contrast', 'N/A')}", color=MUTED, max_width=content_width/2 - 15)
+    spacing = imaging.get("spacing") or []
+    right_y = write_wrapped_text(col2_x, right_y, f"Spacing:  {', '.join(str(s) for s in spacing)} mm", color=MUTED, max_width=content_width/2 - 15)
+
+    y_position = min(left_y, right_y) - section_spacing
+
+    # ==================== ORGANS REVIEWED ====================
+    check_and_reset_page(160)
+    section_header("ORGANS REVIEWED")
+    organ_volumes = report_data.get("organ_volumes", {})
+    organ_rows = sorted(
+        (organ.replace("_", " ").title(), vals.get("status", "normal"))
+        for organ, vals in organ_volumes.items()
+    )
+    y_position = draw_organ_grid(organ_rows, left_margin, y_position, content_width)
+    y_position -= section_spacing
+
+    # ==================== COMMENTS ====================
+    check_and_reset_page(100)
+    section_header("COMMENTS")
+    for line in str(report_data.get("comments", "")).split("\n"):
+        if line.strip():
+            y_position = write_wrapped_text(left_margin, y_position, line.strip())
+    y_position -= section_spacing
+
+    # ==================== IMPRESSION ====================
+    check_and_reset_page(120)  # give it more breathing room so it doesn't
+                                 # get stranded with a big gap above it
+    section_header("IMPRESSION")
+    impression_items = report_data.get("impression", [])
+    for i, item in enumerate(impression_items, 1):
+        text = str(item).strip()
+        if text:
+            y_position = write_wrapped_text(left_margin, y_position, f"{i}.  {text}")
+    y_position -= section_spacing
+
+    # ==================== KEY IMAGES ====================
+    lesions = report_data.get("lesions", {})
+    case_id = report_data.get("case_id")
+    pants_id = get_panTS_id(case_id)
+    ct_path = f"{Constants.PANTS_PATH}/image_only/{pants_id}/{Constants.MAIN_NIFTI_FILENAME}"
+    mask_path_combined = f"{Constants.PANTS_PATH}/mask_only/{pants_id}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
+    seg_dir = f"{Constants.PANTS_PATH}/mask_only/{pants_id}/segmentations"
+
+    if os.path.exists(ct_path) and os.path.exists(mask_path_combined):
+        pdf.showPage()
+        y_position = height - top_margin
+        pdf.setFillColor(TEAL)
+        pdf.rect(left_margin, y_position - 3, content_width, 3, fill=1, stroke=0)
+        pdf.setFillColor(INK)
+        pdf.setFont("Helvetica-Bold", 16)
+        pdf.drawString(left_margin, y_position - 25, "Key Images")
+        y_position -= 55
+
+        lesion_files = {
+            "pancreas": "pancreatic_lesion.nii.gz",
+            "liver": "liver_lesion.nii.gz",
+            "kidney": "kidney_lesion.nii.gz",
+        }
+        for organ in lesions.keys():
+            mask_filename = lesion_files.get(organ)
+            if not mask_filename:
+                continue
+            lesion_mask_path = os.path.join(seg_dir, mask_filename)
+            if not os.path.exists(lesion_mask_path):
+                continue
+            check_and_reset_page(230)
+            pdf.setFont("Helvetica-Bold", 12)
+            pdf.setFillColor(AMBER)
+            pdf.drawString(left_margin, y_position, f"{organ.title()} - Lesion")
+            y_position -= 18
+            overlay_path = f"/tmp/report_{case_id}_{organ}_lesion.png"
+            if _create_lesion_overlay_image(ct_path, lesion_mask_path, overlay_path):
+                pdf.drawImage(overlay_path, left_margin, y_position - 200, width=200, height=200)
+                if os.path.exists(overlay_path):
+                    os.remove(overlay_path)
+            y_position -= 220
+
+        check_and_reset_page(40)
+        pdf.setFont("Helvetica-Bold", 12)
+        pdf.setFillColor(INK)
+        pdf.drawString(left_margin, y_position, "All Organs Reviewed")
+        y_position -= 22
+
+        ct_nii = nib.load(ct_path)
+        mask_nii = nib.load(mask_path_combined)
+        ct_array = ct_nii.get_fdata()
+        mask_array = mask_nii.get_fdata().astype(np.uint8)
+        min_shape = tuple(min(c, m) for c, m in zip(ct_array.shape, mask_array.shape))
+        ct_array = ct_array[:min_shape[0], :min_shape[1], :min_shape[2]]
+        mask_array = mask_array[:min_shape[0], :min_shape[1], :min_shape[2]]
+
+        num_cols = 5
+        col_gap, row_gap = 14, 26
+        img_w = (content_width - col_gap * (num_cols - 1)) / num_cols
+        img_h = img_w
+        col_x = [left_margin + i * (img_w + col_gap) for i in range(num_cols)]
+        col_i = 0
+
+        organ_label_map = {v: k for k, v in Constants.PREDEFINED_LABELS.items()}
+        for organ, label_id in organ_label_map.items():
+            if label_id == 0:
+                continue
+            check_and_reset_page(img_h + row_gap + 20)
+            x = col_x[col_i]
+            overlay_path = f"/tmp/report_{case_id}_{organ}_overview.png"
+            if _create_organ_overview_image(ct_array, mask_array, label_id, overlay_path):
+                pdf.drawImage(overlay_path, x, y_position - img_h, width=img_w, height=img_h)
+                if os.path.exists(overlay_path):
+                    os.remove(overlay_path)
+                pdf.setFont("Helvetica", 8)
+                pdf.setFillColor(MUTED)
+                pdf.drawString(x, y_position - img_h - 12, organ.replace("_", " ").title())
+                col_i += 1
+                if col_i >= 2:
+                    col_i = 0
+                    y_position -= (img_h + row_gap)
+
+    pdf.save()
+
+    # ---- Merge onto branded template ----
+    template_pdf_path = os.getenv("TEMPLATE_PATH", "report_template_3.pdf")
+    template_reader = PdfReader(template_pdf_path)
+    content_reader = PdfReader(temp_pdf_path)
+    writer = PdfWriter()
+    for page in content_reader.pages:
+        template_page = template_reader.pages[0]
+        merged_page = PageObject.create_blank_page(
+            width=template_page.mediabox.width,
+            height=template_page.mediabox.height,
+        )
+        merged_page.merge_page(template_page)
+        merged_page.merge_page(page)
+        writer.add_page(merged_page)
+    with open(output_pdf_path, "wb") as f:
+        writer.write(f)
+
+
+def _create_lesion_overlay_image(ct_path, mask_path, output_path):
+    """Finds the most-labeled slice and saves a red-contour overlay PNG.
+    Same technique as Zongwei\'s get_most_labeled_slice, using SimpleITK
+    for consistent RAS reorientation. Returns False (never raises) on
+    any failure so a bad/missing lesion file just skips that image."""
+    try:
+        import SimpleITK as sitk
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        ct_img = sitk.ReadImage(ct_path)
+        mask_img = sitk.ReadImage(mask_path)
+        ct_img = sitk.DICOMOrient(ct_img, "RAS")
+        mask_img = sitk.DICOMOrient(mask_img, "RAS")
+
+        ct_array = sitk.GetArrayFromImage(ct_img)
+        mask_array = sitk.GetArrayFromImage(mask_img)
+        if ct_array.shape != mask_array.shape:
+            return False
+
+        slice_sums = np.sum(mask_array, axis=(1, 2))
+        idx = int(np.argmax(slice_sums))
+        if slice_sums[idx] == 0:
+            return False
+
+        ct_slice = np.fliplr(ct_array[idx])
+        mask_slice = np.fliplr(mask_array[idx])
+        ct_slice = np.clip(ct_slice, -150, 250)
+        ct_slice = ((ct_slice + 150) / 400 * 255).astype(np.uint8)
+
+        plt.figure(figsize=(6, 6))
+        plt.imshow(ct_slice, cmap="gray", origin="lower")
+        plt.contour(mask_slice, colors="red", linewidths=1)
+        plt.axis("off")
+        plt.savefig(output_path, bbox_inches="tight", pad_inches=0)
+        plt.close()
+        return True
+    except Exception:
+        return False
+
+
+def _create_organ_overview_image(ct_array, mask_array, label_id, output_path, contour_color="cyan"):
+    """Same slice-finding + contour-overlay technique as the lesion function,
+    but works from already-loaded ct/mask numpy arrays and a single label id
+    from combined_labels.nii.gz -- so it does not need a separate per-organ
+    file. Used to build a full per-organ Key Images gallery, matching
+    Zongwei\'s oncokit report generator."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        organ_mask = (mask_array == label_id)
+        if not np.any(organ_mask):
+            return False
+
+        slice_sums = np.sum(organ_mask, axis=(1, 2))
+        idx = int(np.argmax(slice_sums))
+        if slice_sums[idx] == 0:
+            return False
+
+        ct_slice = np.fliplr(ct_array[idx])
+        mask_slice = np.fliplr(organ_mask[idx])
+        ct_slice = np.clip(ct_slice, -150, 250)
+        ct_slice = ((ct_slice + 150) / 400 * 255).astype(np.uint8)
+
+        plt.figure(figsize=(4, 4))
+        plt.imshow(ct_slice, cmap="gray", origin="lower")
+        plt.contour(mask_slice, colors=contour_color, linewidths=1)
+        plt.axis("off")
+        plt.savefig(output_path, bbox_inches="tight", pad_inches=0)
+        plt.close()
+        return True
+    except Exception:
+        return False
+
+
+@api_blueprint.route('/generate-report-pdf/<id>', methods=['GET'])
+def generate_report_pdf(id):
+    if not _is_safe_id(id):
+        return jsonify({"error": "Invalid id"}), 400
+    temp_pdf_path = f"{PDF_DIR}/temp_report_{id}.pdf"
+    output_pdf_path = f"{PDF_DIR}/report_{id}.pdf"
+    try:
+        report_data = _build_report_data(id)
+        if "error" in report_data:
+            status = 400 if report_data["error"] == "Invalid id parameter" else 500
+            return jsonify(report_data), status
+
+        _draw_report_pdf(report_data, temp_pdf_path, output_pdf_path)
+
+        return send_file(
+            output_pdf_path,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"case_{id}_report.pdf",
+        )
+    except Exception:
+        current_app.logger.exception("Error generating report PDF for case_id=%s", id)
+        return jsonify({"error": "An internal error has occurred."}), 500
+    finally:
+        if os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+
 @api_blueprint.route('/get-specific-segmentations/<combined_labels_id>', methods=['POST'])
 async def get_specific_segmentations(combined_labels_id):
     combined_labels_id = combined_labels_id.replace("PanTS_", "")

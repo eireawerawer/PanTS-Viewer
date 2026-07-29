@@ -34,7 +34,7 @@ interface ReportData {
 type Lang = 'patient' | 'clinical';
 type Step = number;
 
-const cache: { [k: string]: ReportData } = {};
+export const cache: { [key: string]: ReportData } = {};
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
@@ -403,6 +403,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
   const [modePromptOpen, setModePromptOpen] = useState(false);
   const [plain2, setPlain2] = useState<string[]>([]);
   const [pLoad, setPLoad] = useState(false);
+  const [pdfLoading, setPdfLoading] = useState(false);
   const startRef = useRef(Date.now());
 
   useEffect(() => {
@@ -418,6 +419,28 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
       })
       .catch(() => setLoading(false));
   }, [id]);
+
+
+  const handleDownloadPdf = async () => {
+    setPdfLoading(true);
+    try {
+        const res = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/generate-report-pdf/${id}`);
+        if (!res.ok) throw new Error('PDF generation failed');
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `case_${id}_report.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+    } catch (e) {
+        console.error('PDF download failed:', e);
+    } finally {
+        setPdfLoading(false);
+    }
+  };
 
   const fetchPlain = useCallback(async () => {
     if (plain2.length || !data) return;
@@ -638,6 +661,27 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
                   <button className="rs-toggle" onClick={() => { setLang('clinical'); setModePromptOpen(false); }} style={{ padding: '8px 14px', borderRadius: 999, border: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 720, color: lang === 'clinical' ? '#08090b' : 'rgba(255,255,255,0.58)', background: lang === 'clinical' ? 'rgba(255,255,255,0.86)' : 'transparent', transition: 'all 0.2s' }}>Doctor</button>
                 </div>
               )}
+              <button
+                onClick={handleDownloadPdf}
+                disabled={pdfLoading}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  background: 'transparent',
+                  border: '1px solid rgba(255,255,255,0.16)',
+                  borderRadius: 12,
+                  padding: '9px 13px',
+                  cursor: pdfLoading ? 'default' : 'pointer',
+                  fontFamily: 'inherit',
+                  color: 'rgba(255,255,255,0.78)',
+                  opacity: pdfLoading ? 0.5 : 1,
+                  transition: 'all 0.2s',
+                }}
+              >
+                <span style={{ fontSize: 14, lineHeight: 1 }}>{pdfLoading ? '⏳' : '⇩'}</span>
+                <span style={{ fontSize: 11, letterSpacing: '0.04em' }}>{pdfLoading ? 'Preparing' : 'Share PDF'}</span>
+              </button>
               <button className="rs-exit" onClick={onClose} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'transparent', border: '1px solid rgba(239,68,68,0.24)', borderRadius: 12, padding: '9px 13px', cursor: 'pointer', fontFamily: 'inherit', color: 'rgba(239,68,68,0.78)', transition: 'all 0.2s' }}>
                 <span style={{ fontSize: 14, lineHeight: 1, fontWeight: 300 }}>✕</span>
                 <span style={{ fontSize: 11, letterSpacing: '0.04em' }}>Exit</span>
