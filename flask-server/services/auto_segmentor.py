@@ -911,19 +911,29 @@ def _run_lesionsegmenter_inference(input_path: str, session_dir: str, conda_path
     nnunet_results = os.getenv("LESIONSEG_NNUNET_RESULTS", "/home/visitor/lesionsegmenter/nnUNet/results")
 
     selected_gpu = get_least_used_gpu()
-    conda_exe = shutil.which("conda")
-    if not conda_exe:
-        raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
-
     predict_script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "lesionseg_predict.py")
+
+    # `conda run -n <env> python ...` re-resolves and activates the environment on every
+    # single request -- measured at ~1.75s of pure overhead versus calling that env's
+    # python binary directly (0.013s). Paid once per request just like the cold model
+    # load, so it's worth skipping. Falls back to `conda run` if the env's binary isn't
+    # where conda envs conventionally live (e.g. a differently-configured deployment),
+    # so this degrades to the previous behavior rather than breaking outright.
+    direct_python = os.path.expanduser(f"~/.conda/envs/{lesionseg_env_name}/bin/python")
+    if os.path.exists(direct_python):
+        run_prefix = shlex.quote(direct_python)
+    else:
+        conda_exe = shutil.which("conda")
+        if not conda_exe:
+            raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
+        run_prefix = f"{shlex.quote(conda_exe)} run -n {shlex.quote(lesionseg_env_name)} python"
 
     full_cmd = (
         f"nnUNet_raw={shlex.quote(nnunet_raw)} "
         f"nnUNet_preprocessed={shlex.quote(nnunet_preprocessed)} "
         f"nnUNet_results={shlex.quote(nnunet_results)} "
         f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
-        f"{shlex.quote(conda_exe)} run -n {shlex.quote(lesionseg_env_name)} "
-        f"python {shlex.quote(predict_script)} "
+        f"{run_prefix} {shlex.quote(predict_script)} "
         f"-i {shlex.quote(input_dir)} "
         f"-o {shlex.quote(save_dir)} "
         f"-m {shlex.quote(ckpt_path)} "
