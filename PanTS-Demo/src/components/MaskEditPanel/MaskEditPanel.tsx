@@ -11,7 +11,6 @@ import {
 	IconPlus,
 	IconWand,
 } from "@tabler/icons-react";
-import { API_BASE } from "../../helpers/constants";
 import {
 	colorForNewClass,
 	copySegmentAcrossSlices,

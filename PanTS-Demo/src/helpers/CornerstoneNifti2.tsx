@@ -2458,9 +2458,9 @@ export function copySegmentToAdjacentSlice(
   }
 
   const changes: Array<{ i: number; j: number; k: number; prev: number }> = [];
-  const setIJK = (a: number, b: number, c: number, atSrc: boolean): [number, number, number] => {
-    // Map a 2D (a,b) footprint coordinate + fixed slice index c back to IJK,
-    // depending on which axis is the through-plane one.
+  const setIJK = (a: number, b: number, atSrc: boolean): [number, number, number] => {
+    // Map a 2D (a,b) footprint coordinate back to IJK at either the source or
+    // destination slice, depending on which axis is the through-plane one.
     if (axis === 2) return [a, b, atSrc ? srcIndex : dstIndex]; // axial: slices along k
     if (axis === 0) return [atSrc ? srcIndex : dstIndex, a, b]; // sagittal: slices along i
     return [a, atSrc ? srcIndex : dstIndex, b]; // coronal: slices along j
@@ -2472,16 +2472,15 @@ export function copySegmentToAdjacentSlice(
 
   for (let b = 0; b < dimB; b++) {
     for (let a = 0; a < dimA; a++) {
-      const [si, sj, sk] = setIJK(a, b, 0, true);
+      const [si, sj, sk] = setIJK(a, b, true);
       if (vm.getAtIJK(si, sj, sk) !== activeSegment) continue;
-      const [di, dj, dk] = setIJK(a, b, 0, false);
+      const [di, dj, dk] = setIJK(a, b, false);
       const existing = vm.getAtIJK(di, dj, dk);
       if (existing !== 0 && existing !== activeSegment) continue; // don't steal another organ's voxel
       if (existing === activeSegment) continue; // already set
       changes.push({ i: di, j: dj, k: dk, prev: existing });
     }
   }
-
   if (!changes.length) return { changedVoxels: 0 };
   for (const c of changes) vm.setAtIJK(c.i, c.j, c.k, activeSegment);
   _pushFillHistory({
