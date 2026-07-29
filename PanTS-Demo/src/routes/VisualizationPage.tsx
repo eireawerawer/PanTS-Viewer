@@ -48,6 +48,7 @@ import PercentileBar from "../components/PercentileBar";
 import SessionHUD from "../components/ReadingSession/SessionHUD";
 import SessionSummary from "../components/ReadingSession/SessionSummary";
 import ReportScreen from "../components/ReportScreen/ReportScreen";
+import SliceJumpInput from "../components/SliceJumpInput";
 import {
     API_BASE,
     APP_CONSTANTS,
@@ -84,6 +85,7 @@ import {
     redoMaskEdit,
     renderVisualization,
     resetMprOrientation,
+	releasePrimaryMouseTools,
     ROI_TOOL,
     rotatePane90Clockwise,
     setActiveMaskEditTool,
@@ -110,6 +112,11 @@ import {
     type PrimaryMouseToolName,
     type SliceInfo
 } from "../helpers/CornerstoneNifti2";
+import { useSmartFill } from "../helpers/viewer/useSmartFill";
+import { useMorphPicker } from "../helpers/viewer/useMorphPicker";
+import { useLassoTool } from "../helpers/viewer/useLassoTool";
+import { useFocusedPane } from "../helpers/viewer/useFocusedPane";
+import { useKeyboardShortcuts } from "../helpers/viewer/useKeyboardShortcuts";
 import { getLocalDicomFiles, loadLocalDicomSeries } from "../helpers/dicomLocal";
 import { downloadUrlAsFile } from "../helpers/downloadFile";
 import { loadLocalNiftiAsRawBlobUrl } from "../helpers/localNifti";
@@ -130,10 +137,12 @@ import {
     type SessionResult,
 } from "../helpers/readingSession";
 import { toolDisplayName, type ReportMeasurement } from "../helpers/sessionReport";
-import { filenameToName, getPanTSId } from "../helpers/utils";
+import {getPanTSId } from "../helpers/utils";
+import { filenameToName } from "../helpers/utils.name";
 import { decodeViewerState, encodeViewerState } from "../helpers/viewerShareState";
 import { type CheckBoxData } from "../types";
 import "./VisualizationPage.css";
+import LiveWireOverlay from "../components/LiveWireOverlay";
 
 type ViewMode = "mpr" | "axial" | "sagittal" | "coronal" | "3d";
 
@@ -410,6 +419,8 @@ function VisualizationPage() {
 		sagittal: null,
 		coronal: null,
 	});
+	const sliceInfoRef = useRef(sliceInfo);
+	useEffect(() => { sliceInfoRef.current = sliceInfo; }, [sliceInfo]);
 	// Matches the "Soft Tissue" CT_PRESETS entry (W 400 / L 40) — activePreset below
 	// defaults to that same preset, so the readout and the pre-highlighted button
 	// should agree on first load instead of showing a level the preset never set.
@@ -474,11 +485,6 @@ function VisualizationPage() {
 	// re-applies after any volume reload (a fresh tool group always starts with every tool
 	// disabled).
 	const [referenceLinesOn, setReferenceLinesOn] = useState(false);
-	// The pane the user most recently scrolled or clicked into — "whichever axis is in
-	// focus" for every single-pane tool (reference lines' source, cine, flip, rotate). A
-	// ref, not state: a wheel tick shouldn't force a re-render, and reading .current at
-	// call time is always fresh regardless of when the enclosing closure was created.
-	const activePaneRef = useRef<CinePane>("axial");
 	// Which measurement tool (or the magnify loupe) owns the primary mouse button
 	// (null = navigation/crosshair).
 	const [activeMeasureTool, setActiveMeasureTool] = useState<PrimaryMouseToolName | null>(null);
@@ -491,6 +497,22 @@ function VisualizationPage() {
 	// Mask editing: right-side panel + which brush (paint/erase) owns the mouse.
 	const [showEditPanel, setShowEditPanel] = useState(false);
 	const [editMode, setEditMode] = useState<MaskEditMode>(null);
+
+	const smartFill = useSmartFill({
+		enabled: editMode === "smartfill",
+		sliceInfoRef,
+		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
+	});
+	
+	const morphPicker = useMorphPicker({
+		panelOpen: showEditPanel,
+		onLog: (detail) => sessionRef.current?.log("edit", detail, 1500),
+	});
+	const lasso = useLassoTool({
+		enabled: editMode === "lasso",
+		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
+	});
+	
 	// Progressive resolution: after the fast low-res load, the full-res CT streams in
 	// the background and hot-swaps in place (no reload). idle → streaming → done/failed.
 	const [enhance, setEnhance] = useState<{ state: "idle" | "streaming" | "done" | "failed"; pct: number | null }>({ state: "idle", pct: null });
@@ -536,6 +558,8 @@ function VisualizationPage() {
 	const [shareCopied, setShareCopied] = useState(false);
 	const shareStateAppliedRef = useRef(false);
 	const [viewMode, setViewMode] = useState<ViewMode>("mpr");
+	const focusedPane = useFocusedPane({ viewMode, referenceLinesOn });
+
 	// Which pane gets the lion's share of the grid while in "mpr" view — no-op in the
 	// single-view / 3d-fullscreen modes, which already give one pane 100% of the stage.
 	const [layoutPreset, setLayoutPreset] = useState<LayoutPreset>("grid");
@@ -560,11 +584,15 @@ function VisualizationPage() {
 	// Load and render visualization on first render
 
 	// Single owner for the primary mouse button, by priority:
-	// mask editing > measurement tool > navigation (crosshair/pan).
 	useEffect(() => {
-		if (editMode) {
+		if (editMode === "brush" || editMode === "eraser") {
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(editMode === "brush" ? EDIT_BRUSH : EDIT_ERASER);
+		} else if (editMode === "smartfill") {
+			// Smart fill owns the mouse itself (scribbling) — no Cornerstone tool needed.
+			setActiveMeasurementTool(null);
+			setActiveMaskEditTool(null);
+			releasePrimaryMouseTools();
 		} else if (activeMeasureTool) {
 			setActiveMaskEditTool(null);
 			setActiveMeasurementTool(activeMeasureTool);
@@ -574,6 +602,10 @@ function VisualizationPage() {
 			toggleCrosshairTool(crosshairToolActive);
 		}
 	}, [editMode, activeMeasureTool, crosshairToolActive]);
+
+	useEffect(() => {
+		if (editMode !== "lasso") lasso.reset();
+	}, [editMode]);
 
 	useEffect(() => {
 		const unsubscribe = subscribeToCrosshairChanges((mm) => {
@@ -675,27 +707,16 @@ function VisualizationPage() {
 		return unsubscribe;
 	}, [takeSnapshot]);
 
-	// ---- Cine playback / flip / rotate — all act on the "focused" pane -------------
 
-	// The fullscreen 2D pane when in a single view (unambiguous — only one is on
-	// screen), else whichever of the three MPR panes was most recently scrolled/clicked
-	// (activePaneRef), defaulting to axial until the user interacts with a pane at all.
-	// Recomputed fresh on every call — cheap, and guarantees flip/rotate (single-click
-	// actions with no intervening re-render) never act on a stale pane.
-	const getFocusedPane = (): CinePane =>
-		viewMode === "axial" || viewMode === "sagittal" || viewMode === "coronal"
-			? viewMode
-			: activePaneRef.current;
-	const cinePane: CinePane = getFocusedPane();
 
 	const handleFlipHorizontal = () => {
-		const pane = getFocusedPane();
+		const pane = focusedPane.getFocusedPane()
 		flipPaneHorizontal(pane);
 		sessionRef.current?.log("view", `Flipped ${pane} horizontally`);
 	};
 
 	const handleRotate90Clockwise = () => {
-		const pane = getFocusedPane();
+		const pane = focusedPane.getFocusedPane()
 		rotatePane90Clockwise(pane);
 		sessionRef.current?.log("view", `Rotated ${pane} 90° clockwise`);
 	};
@@ -705,20 +726,37 @@ function VisualizationPage() {
 	// call startCine/stopCine twice per click (this app runs in StrictMode; see the similar
 	// double-run workarounds in dicomLocal.ts).
 	const toggleCine = useCallback(() => {
+		const pane = focusedPane.getFocusedPane();
 		if (cinePlaying) {
 			stopCine();
 			setCinePlaying(false);
 			sessionRef.current?.log("view", "Stopped cine playback");
 			return;
 		}
-		const ok = startCine(cinePane, cineFps);
+		const ok = startCine(pane, cineFps);
 		setCinePlaying(ok);
 		if (ok) {
-			sessionRef.current?.log("view", `Started cine playback (${cinePane}, ${cineFps} fps)`);
+			sessionRef.current?.log("view", `Started cine playback (${pane}, ${cineFps} fps)`);
 		} else {
-			console.warn(`Cine playback failed to start for pane "${cinePane}"`);
+			console.warn(`Cine playback failed to start for pane "${pane}"`);
 		}
-	}, [cinePlaying, cinePane, cineFps]);
+	}, [cinePlaying, focusedPane.getFocusedPane, cineFps]);
+
+	useKeyboardShortcuts({
+		takeSnapshot,
+		toggleCine,
+		setEditMode,
+		setActiveMeasureTool,
+		setCrosshairToolActive,
+		setShowStats,
+		setShowMetadata,
+		setShowEditPanel,
+		setShowMeasurePanel,
+		getFocusedPane: focusedPane.getFocusedPane,
+		sliceInfoRef,
+		editMode,
+		setZoomLevel,
+	});
 
 	// Live-adjust the frame rate: if a clip is already running, restart it immediately at
 	// the new speed rather than waiting for the next stop/start.
@@ -726,7 +764,7 @@ function VisualizationPage() {
 		setCineFps(fps);
 		if (cinePlaying) {
 			stopCine();
-			startCine(cinePane, fps);
+			startCine(focusedPane.getFocusedPane(), fps);
 		}
 	};
 
@@ -741,61 +779,6 @@ function VisualizationPage() {
 		if (windowReadoutTimerRef.current) clearTimeout(windowReadoutTimerRef.current);
 	}, []);
 
-	// Keyboard shortcuts (skipped while typing): L/B/A/P/R/E/T measurement tools,
-	// G magnify, C crosshair, S snapshot, M measurements panel, V cine,
-	// Cmd/Ctrl+Z undo · Shift+Cmd/Ctrl+Z redo (strokes AND measurements).
-	useEffect(() => {
-		const onKey = (e: KeyboardEvent) => {
-			const target = e.target as HTMLElement | null;
-			if (
-				target &&
-				(target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
-			)
-				return;
-			const key = e.key.toLowerCase();
-			if ((e.metaKey || e.ctrlKey) && !e.altKey && key === "z") {
-				if (e.shiftKey) redoMaskEdit();
-				else undoMaskEdit();
-				e.preventDefault();
-				return;
-			}
-			if (e.metaKey || e.ctrlKey || e.altKey) return;
-			const toolByKey: Record<string, PrimaryMouseToolName> = {
-				l: LENGTH_TOOL,
-				b: BIDIRECTIONAL_TOOL,
-				a: ANGLE_TOOL,
-				p: PROBE_TOOL,
-				r: ROI_TOOL,
-				e: ELLIPSE_TOOL,
-				f: FREEHAND_ROI_TOOL,
-				t: ARROW_TOOL,
-				g: MAGNIFY_TOOL,
-			};
-			if (toolByKey[key]) {
-				setEditMode(null); // measurement keys take the mouse back from the brush
-				setActiveMeasureTool((prev) => (prev === toolByKey[key] ? null : toolByKey[key]));
-			} else if (key === "c") {
-				setEditMode(null);
-				setActiveMeasureTool(null);
-				setCrosshairToolActive(true);
-			} else if (key === "s") {
-				void takeSnapshot();
-			} else if (key === "v") {
-				toggleCine();
-			} else if (key === "m") {
-				setShowStats(false);
-				setShowMetadata(false);
-				setShowEditPanel(false);
-				setEditMode(null);
-				setShowMeasurePanel((v) => !v);
-			} else {
-				return;
-			}
-			e.preventDefault();
-		};
-		window.addEventListener("keydown", onKey);
-		return () => window.removeEventListener("keydown", onKey);
-	}, [takeSnapshot, toggleCine]);
 
 	// View-mode changes belong in the reading timeline (skip the initial mount).
 	const loggedViewMode = useRef<ViewMode | null>(null);
@@ -1186,25 +1169,11 @@ function VisualizationPage() {
 	// with every tool disabled).
 	useEffect(() => {
 		if (renderingEngine && viewportIds.length && volumeId) {
-			setReferenceLinesEnabled(referenceLinesOn, activePaneRef.current);
+			setReferenceLinesEnabled(referenceLinesOn, focusedPane.activePaneRef.current);
 		}
 	}, [referenceLinesOn, renderingEngine, viewportIds, volumeId]);
 
-	// Wheel-scrolling or clicking a pane makes it "focused" — the reference-lines source,
-	// and the target for cine/flip/rotate. No-ops the reference-lines re-apply while that
-	// tool is off; the ref update itself is cheap enough to run unconditionally.
-	// Guarded on the pane actually changing: a wheel gesture fires this once per slice
-	// (dozens of times while scrolling through the SAME pane), and re-running
-	// setReferenceLinesEnabled on every tick — a full disable/enable + re-render of all
-	// three viewports — for a source that hasn't changed was visible as the dotted lines
-	// flickering off and back on during a normal scroll.
-	const handlePaneFocus = (pane: CinePane) => {
-		const paneChanged = activePaneRef.current !== pane;
-		activePaneRef.current = pane;
-		if (referenceLinesOn && paneChanged) setReferenceLinesEnabled(true, pane);
-	};
-	const handlePaneWheel = (pane: CinePane) => () => handlePaneFocus(pane);
-	const handlePaneMouseDown = (pane: CinePane) => () => handlePaneFocus(pane);
+
 
 	// Apply a shared deep-link's view state once the volume is ready (orientation, window,
 	// opacity, hidden organs, crosshair). Runs a single time — after that the URL is just a
@@ -1466,7 +1435,7 @@ function VisualizationPage() {
 							onChange={(e) => setPaneSliceIndex(pane, Number(e.target.value))}
 							aria-label={`${pane} slice`}
 						/>
-						<div className="vp-slice-caption">{info.current + 1}/{info.total}</div>
+						<SliceJumpInput pane={pane} info={info} />
 					</>
 				)}
 				<div className={`vp-window-readout${windowReadoutVisible ? " vp-window-readout--visible" : ""}`}>
@@ -1769,8 +1738,8 @@ const aiAvailableOrgans = useMemo(() => {
 				flexDirection: "column",
 				height: "100vh",
 				width: "100vw",
-			}}
-		>
+			}}>
+		
 			{/* ---- Top toolbar (PYCAD-style). Lives in normal flow, so it sits ABOVE the
 			     viewports and never overlays them. Shown/hidden by the gear button. ---- */}
 			{showToolbar && (
@@ -2565,45 +2534,168 @@ const aiAvailableOrgans = useMemo(() => {
 								: {}),
 					}}
 				>
-					<div className="vp-pane-wrap" style={{ ...panelStyle("axial"), ...paneGridStyle("axial") }}>
+					<div
+						className="vp-pane-wrap"
+						style={{ ...panelStyle("axial"), ...paneGridStyle("axial") }}
+						onMouseUp={smartFill.handleMouseUp}>
 						<div
-							className={`axial ${loading ? "" : "vp-pane vp-pane--axial"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}`}
+							className={`axial ${loading ? "" : "vp-pane vp-pane--axial"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" ? " vp-pane--edit-cursor" : ""}`}
 							data-label="Axial"
 							ref={axial_ref}
 							onClick={(e) => { handleMouseClick(e); }}
-							onMouseDown={handlePaneMouseDown("axial")}
-							onMouseMove={handlePaneHover("axial")}
+							onMouseDown={(e) => {
+								focusedPane.handleMouseDown("axial")();
+								smartFill.handleMouseDown("axial")(e);
+								morphPicker.handlePaneClick("axial")(e);
+								lasso.handleClick("axial")(e);
+							}}
+							onMouseMove={(e) => {
+								handlePaneHover("axial")(e);
+								smartFill.handleMouseMove("axial")(e);
+								lasso.handleMouseMove("axial")(e);
+							}}
 							onMouseLeave={handlePaneHoverLeave}
-							onWheel={handlePaneWheel("axial")}
+							onWheel={focusedPane.handleWheel("axial")}
 						></div>
 						{!loading && renderPaneOverlays("axial")}
+						{editMode === "smartfill" && (
+							<svg
+								className="vp-smartfill-overlay"
+								style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 30 }}
+							>
+								{smartFill.preview.axial.fg
+									.filter((p) => p.slice === (sliceInfo.axial?.current ?? -1))
+									.map((p, i) => (
+										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#22d3ee" stroke="#08090b" strokeWidth={1.5} />
+									))}
+								{smartFill.preview.axial.bg
+									.filter((p) => p.slice === (sliceInfo.axial?.current ?? -1))
+									.map((p, i) => (
+										<circle key={`bg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#f43f5e" stroke="#08090b" strokeWidth={1.5} />
+									))}
+							</svg>
+						)}
+						{editMode === "lasso" && lasso.pane === "axial" && (
+							<LiveWireOverlay
+								pane="axial"
+								anchorPointsCanvas={lasso.anchorsCanvas}
+								cornerPointsCanvas={lasso.anchorsCanvas}
+								livePreviewPath={
+									lasso.livePreview && lasso.anchorsCanvas.length
+										? [lasso.anchorsCanvas[lasso.anchorsCanvas.length - 1], lasso.livePreview]
+										: null
+								}
+							/>
+						)}
 					</div>
-					<div className="vp-pane-wrap" style={{ ...panelStyle("sagittal"), ...paneGridStyle("sagittal") }}>
-						<div
-							className={`sagittal ${loading ? "" : "vp-pane vp-pane--sagittal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}`}
-							data-label="Sagittal"
-							ref={sagittal_ref}
-							onClick={(e) => { handleMouseClick(e); }}
-							onMouseDown={handlePaneMouseDown("sagittal")}
-							onMouseMove={handlePaneHover("sagittal")}
-							onMouseLeave={handlePaneHoverLeave}
-							onWheel={handlePaneWheel("sagittal")}
-						></div>
+					<div
+						className="vp-pane-wrap"
+						style={{ ...panelStyle("sagittal"), ...paneGridStyle("sagittal") }}
+						onMouseUp={smartFill.handleMouseUp}>
+					<div
+						className={`sagittal ${loading ? "" : "vp-pane vp-pane--sagittal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" ? " vp-pane--edit-cursor" : ""}`}
+						data-label="Sagittal"
+						ref={sagittal_ref}
+						onClick={(e) => { handleMouseClick(e); }}
+						onMouseDown={(e) => {
+							focusedPane.handleMouseDown("sagittal")();
+							smartFill.handleMouseDown("sagittal")(e);
+							morphPicker.handlePaneClick("sagittal")(e);
+							lasso.handleClick("sagittal")(e);
+						}}
+						onMouseMove={(e) => {
+							handlePaneHover("sagittal")(e);
+							smartFill.handleMouseMove("sagittal")(e);
+							lasso.handleMouseMove("sagittal")(e);
+						}}
+						onMouseLeave={handlePaneHoverLeave}
+						onWheel={focusedPane.handleWheel("sagittal")}
+					></div>
 						{!loading && renderPaneOverlays("sagittal")}
+						{editMode === "smartfill" && (
+							<svg
+								className="vp-smartfill-overlay"
+								style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 30 }}
+							>
+								{smartFill.preview.sagittal.fg
+									.filter((p) => p.slice === (sliceInfo.sagittal?.current ?? -1))
+									.map((p, i) => (
+										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#22d3ee" stroke="#08090b" strokeWidth={1.5} />
+									))}
+								{smartFill.preview.sagittal.bg
+									.filter((p) => p.slice === (sliceInfo.sagittal?.current ?? -1))
+									.map((p, i) => (
+										<circle key={`bg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#f43f5e" stroke="#08090b" strokeWidth={1.5} />
+									))}
+							</svg>
+						)}
+						{editMode === "lasso" && lasso.pane === "sagittal" && (
+							<LiveWireOverlay
+								pane="sagittal"
+								anchorPointsCanvas={lasso.anchorsCanvas}
+								cornerPointsCanvas={lasso.anchorsCanvas}
+								livePreviewPath={
+									lasso.livePreview && lasso.anchorsCanvas.length
+										? [lasso.anchorsCanvas[lasso.anchorsCanvas.length - 1], lasso.livePreview]
+										: null
+								}
+							/>
+						)}
 					</div>
 
-					<div className="vp-pane-wrap" style={{ ...panelStyle("coronal"), ...paneGridStyle("coronal") }}>
-						<div
-							className={`coronal ${loading ? "" : "vp-pane vp-pane--coronal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}`}
-							data-label="Coronal"
-							ref={coronal_ref}
-							onClick={(e) => { handleMouseClick(e); }}
-							onMouseDown={handlePaneMouseDown("coronal")}
-							onMouseMove={handlePaneHover("coronal")}
-							onMouseLeave={handlePaneHoverLeave}
-							onWheel={handlePaneWheel("coronal")}
-						></div>
-						{!loading && renderPaneOverlays("coronal")}
+					<div
+						className="vp-pane-wrap"
+						style={{ ...panelStyle("coronal"), ...paneGridStyle("coronal") }}
+						onMouseUp={smartFill.handleMouseUp}>
+					<div
+						className={`coronal ${loading ? "" : "vp-pane vp-pane--coronal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" ? " vp-pane--edit-cursor" : ""}`}
+						data-label="Coronal"
+						ref={coronal_ref}
+						onClick={(e) => { handleMouseClick(e);  }}
+						onMouseDown={(e) => {
+							focusedPane.handleMouseDown("coronal")();
+							smartFill.handleMouseDown("coronal")(e);
+							morphPicker.handlePaneClick("coronal")(e);
+							lasso.handleClick("coronal")(e);
+						}}
+						onMouseMove={(e) => {
+							handlePaneHover("coronal")(e);
+							smartFill.handleMouseMove("coronal")(e);
+							lasso.handleMouseMove("coronal")(e);
+						}}
+						onMouseLeave={handlePaneHoverLeave}
+						onWheel={focusedPane.handleWheel("coronal")}
+					></div>
+					{!loading && renderPaneOverlays("coronal")}
+						{editMode === "smartfill" && (
+							<svg
+								className="vp-smartfill-overlay"
+								style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 30 }}
+							>
+								{smartFill.preview.coronal.fg
+									.filter((p) => p.slice === (sliceInfo.coronal?.current ?? -1))
+									.map((p, i) => (
+										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#22d3ee" stroke="#08090b" strokeWidth={1.5} />
+									))}
+								{smartFill.preview.coronal.bg
+									.filter((p) => p.slice === (sliceInfo.coronal?.current ?? -1))
+									.map((p, i) => (
+										<circle key={`bg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#f43f5e" stroke="#08090b" strokeWidth={1.5} />
+									))}
+							</svg>
+						)}
+						{editMode === "lasso" && lasso.pane === "coronal" && (
+							<LiveWireOverlay
+								pane="coronal"
+								anchorPointsCanvas={lasso.anchorsCanvas}
+								cornerPointsCanvas={lasso.anchorsCanvas}
+								livePreviewPath={
+									lasso.livePreview && lasso.anchorsCanvas.length
+										? [lasso.anchorsCanvas[lasso.anchorsCanvas.length - 1], lasso.livePreview]
+										: null
+								}
+							/>
+						)}
 					</div>
 
 					<div className={`render ${loading ? "" : "vp-pane vp-pane--render"}`} data-label="3D" style={{ ...panelStyle("3d"), ...paneGridStyle("3d") }}>
@@ -2892,7 +2984,25 @@ const aiAvailableOrgans = useMemo(() => {
 					}}
 					onEdit={(detail) => sessionRef.current?.log("edit", detail, 2000)}
 					onCreateClass={handleCreateClass}
+					smartFillMarkMode={smartFill.markMode}
+					onSmartFillMarkModeChange={smartFill.setMarkMode}
+					smartFillScope={smartFill.scope}
+					onSmartFillScopeChange={smartFill.setScope}
+					onApplySmartFill={smartFill.apply}
+					onClearSmartFillScribbles={smartFill.clearScribbles}
+					lassoAnchorCount={lasso.anchorsCanvas.length}
+					onLassoUndo={lasso.undo}
+					onLassoClose={lasso.close}
+					onLassoCancel={lasso.cancel}
+					morphScope={morphPicker.scope}
+					onMorphScopeChange={morphPicker.setScope}
+					pickingMorphTarget={morphPicker.picking}
+					onPickIsland={morphPicker.startPicking}
+					morphSeedVoxel={morphPicker.seedVoxel}
+					focusedPane={focusedPane.getFocusedPane()}
+					totalSlices={sliceInfo[focusedPane.getFocusedPane()]?.total ?? 0}
 				/>
+
 			)}
 
 			{/* Kept mounted (display toggles) so the chat history survives open/close. */}
