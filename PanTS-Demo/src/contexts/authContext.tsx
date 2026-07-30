@@ -1,14 +1,17 @@
-// Real authentication against the Flask backend (B1: email/password).
+// Real authentication against the Flask backend (B1 email/password + B2 OAuth).
 //
 // The session lives in an httponly cookie the JS can't read, so on mount we ask
 // GET /api/auth/me to restore it; sign in/up/out hit the auth endpoints. Every
 // request uses credentials:"include" so the cookie is sent (also cross-origin in
 // dev). This is the single seam the whole account UI reads through.
 //
-// Not wired yet (backend phases still to come):
-//   - signInWithProvider (Google/GitHub) -> B2 OAuth. Rejects for now; the modal
-//     shows the buttons disabled.
-//   - emailNotifications -> B3. Kept as a client-only preference in localStorage.
+// OAuth is a full-page redirect, not a fetch: the browser goes to
+// /api/auth/oauth/<provider>, the backend bounces it to the provider and back,
+// sets the same session cookie, and returns us to the app — where the mount-time
+// /me call picks the session up. `oauthProviders` reports which buttons to
+// enable (a provider without server-side credentials stays disabled).
+//
+// Not wired yet: emailNotifications -> B3, still a client-only localStorage pref.
 import {
 	createContext,
 	useCallback,
@@ -36,13 +39,19 @@ type AuthContextValue = {
 	loading: boolean;
 	signIn: (email: string, password: string) => Promise<AuthUser>;
 	signUp: (email: string, password: string) => Promise<AuthUser>;
-	signInWithProvider: (provider: AuthProvider2) => Promise<AuthUser>;
+	/** Full-page redirect into the provider's consent screen. Never returns. */
+	signInWithProvider: (provider: AuthProvider2) => void;
+	/** Which providers the server has credentials for (null until loaded). */
+	oauthProviders: Record<AuthProvider2, boolean> | null;
 	signOut: () => Promise<void>;
 	updatePreferences: (patch: Partial<Pick<AuthUser, "emailNotifications">>) => void;
 	// Global auth popup, opened from the header or any gated action.
 	authPrompt: { open: boolean; mode: "signin" | "signup" };
 	promptAuth: (mode?: "signin" | "signup") => void;
 	closeAuthPrompt: () => void;
+	/** Error surfaced by the OAuth callback redirect (?auth_error=...), if any. */
+	oauthError: string | null;
+	clearOauthError: () => void;
 };
 
 // Cross-tab sync: writing this key on any auth change nudges other tabs to
@@ -102,6 +111,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		open: false,
 		mode: "signin",
 	});
+	const [oauthProviders, setOauthProviders] = useState<Record<AuthProvider2, boolean> | null>(null);
+	// The OAuth callback redirects back with ?auth_error=... on failure (e.g. an
+	// unverified provider email colliding with an existing account). Read it once
+	// on mount, then strip it from the URL so a refresh doesn't resurface it.
+	const [oauthError, setOauthError] = useState<string | null>(() => {
+		try {
+			const params = new URLSearchParams(window.location.search);
+			const err = params.get("auth_error");
+			if (err) {
+				params.delete("auth_error");
+				const qs = params.toString();
+				window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+			}
+			return err;
+		} catch {
+			return null;
+		}
+	});
 
 	const refreshMe = useCallback(async () => {
 		try {
@@ -123,6 +150,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	useEffect(() => {
 		refreshMe();
 	}, [refreshMe]);
+
+	// Which OAuth buttons to enable. Failure -> treat both as unavailable.
+	useEffect(() => {
+		let cancelled = false;
+		authFetch("/api/auth/oauth/providers")
+			.then((r) => (r.ok ? r.json() : { google: false, github: false }))
+			.then((p) => !cancelled && setOauthProviders({ google: !!p.google, github: !!p.github }))
+			.catch(() => !cancelled && setOauthProviders({ google: false, github: false }));
+		return () => {
+			cancelled = true;
+		};
+	}, []);
+
+	// If we came back from a failed OAuth attempt, show the popup with the error.
+	useEffect(() => {
+		if (oauthError) setAuthPrompt({ open: true, mode: "signin" });
+	}, [oauthError]);
 
 	// Cross-tab: another tab signed in/out -> re-check.
 	useEffect(() => {
@@ -160,9 +204,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		[authAction]
 	);
 
-	// B2 (OAuth) not implemented server-side yet.
-	const signInWithProvider = useCallback(async (_provider: AuthProvider2): Promise<AuthUser> => {
-		throw new Error("Social sign-in isn't available yet.");
+	// OAuth can't be a fetch: the provider's consent screen has to be a top-level
+	// navigation (and the backend needs to set the cookie on the way back), so we
+	// hand the whole browser over. On return, the mount-time /me call restores
+	// the session.
+	const signInWithProvider = useCallback((provider: AuthProvider2) => {
+		window.location.href = `${API_BASE}/api/auth/oauth/${provider}`;
 	}, []);
 
 	const signOut = useCallback(async () => {
@@ -200,6 +247,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		[]
 	);
 
+	const clearOauthError = useCallback(() => setOauthError(null), []);
+
 	const value = useMemo<AuthContextValue>(
 		() => ({
 			user,
@@ -208,13 +257,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			signIn,
 			signUp,
 			signInWithProvider,
+			oauthProviders,
 			signOut,
 			updatePreferences,
 			authPrompt,
 			promptAuth,
 			closeAuthPrompt,
+			oauthError,
+			clearOauthError,
 		}),
-		[user, loading, signIn, signUp, signInWithProvider, signOut, updatePreferences, authPrompt, promptAuth, closeAuthPrompt]
+		[user, loading, signIn, signUp, signInWithProvider, oauthProviders, signOut,
+		 updatePreferences, authPrompt, promptAuth, closeAuthPrompt, oauthError, clearOauthError]
 	);
 
 	return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
