@@ -105,6 +105,14 @@
 .navSpacer {
   width: 200px;
 }
+/* Right-hand nav slot holding the account control; min-width keeps the center
+   tab bar visually centered against the logo, matching the old navSpacer. */
+.navRight {
+  min-width: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
 
 .statGroup {
   display: flex;

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "pants-demo",
+      "runtimeExecutable": "PanTS-Demo/node_modules/.bin/vite",
+      "runtimeArgs": ["--port", "5173", "--strictPort", "PanTS-Demo"],
+      "port": 5173
+    }
+  ]
+}

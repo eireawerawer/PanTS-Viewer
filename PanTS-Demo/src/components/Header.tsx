@@ -1,6 +1,7 @@
 import { IconBrandGithub } from "@tabler/icons-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import styles from "../pages/LandingPage.module.css";
+import AuthButton from "./AuthButton";
 
 const TABS = [
 	{ id: "overview", label: "Overview", path: "/" },
@@ -13,7 +14,9 @@ export default function Header() {
 	const navigate = useNavigate();
 	const location = useLocation();
 
-	const activeTab = TABS.find((t) => t.path === location.pathname)?.id ?? "overview";
+	// No fallback to "overview": on routes that aren't a tab (e.g. /login,
+	// /account) nothing should be highlighted.
+	const activeTab = TABS.find((t) => t.path === location.pathname)?.id ?? null;
 
 	const tabClass = (name: string) =>
 		`${styles.tabPill} ${activeTab === name ? styles.tabPillActive : ""}`;
@@ -48,8 +51,8 @@ export default function Header() {
 				))}
 			</div>
 
-			{/* Right Side (Github Link) */}
-			<div style={{ width: "235px", display: "flex", justifyContent: "flex-end" }}>
+			{/* Right Side (GitHub link + account control) */}
+			<div style={{ width: "235px", display: "flex", justifyContent: "flex-end", alignItems: "center", gap: "8px" }}>
 				<a
 					href="https://github.com/BodyMaps/BodyMaps-website"
 					target="_blank"
@@ -66,8 +69,8 @@ export default function Header() {
 					}}
 				>
 					<IconBrandGithub size={18} />
-					GitHub
 				</a>
+				<AuthButton />
 			</div>
 		</nav>
 	);
