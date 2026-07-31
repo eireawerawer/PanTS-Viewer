@@ -91,6 +91,7 @@
 
 .vp-pane-wrap {
   position: relative;
+  overflow: hidden;
 }
 .vp-pane-wrap > div:first-child {
   width: 100%;
@@ -769,6 +770,8 @@
 /* ---- Viewports: subtle accent ring + corner orientation label ---- */
 .vp-pane {
   position: relative;
+  isolation: isolate;
+  z-index: 0;
   box-shadow: inset 0 0 0 1px var(--pane-accent, transparent);
   transition: box-shadow 0.15s;
 }
@@ -874,6 +877,32 @@
   border-radius: 6px;
   padding: 3px 7px;
   pointer-events: none;
+}
+.vp-slice-jump-input {
+  box-sizing: border-box;
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 6;
+  width: 56px;
+  font-family: var(--vp-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(14, 15, 18, 0.85);
+  border: 1px solid var(--vp-accent, #6ea8fe);
+  border-radius: 6px;
+  padding: 3px 6px;
+  text-align: center;
+  outline: none;
+  /* hide the number input's up/down spinner arrows so it doesn't get wider */
+  -moz-appearance: textfield;
+}
+
+.vp-slice-jump-input::-webkit-outer-spin-button,
+.vp-slice-jump-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 /* ---- W/L readout (bottom left) — briefly shown while the brightness/contrast
@@ -1316,6 +1345,12 @@
   font-size: 11px;
   color: var(--vp-text-dim);
 }
+/* Dotted-underline affordance for a stat label with a hover explanation (e.g. Kurtosis) —
+   makes the tooltip discoverable instead of relying on users guessing to hover plain text. */
+.vp-stats__tooltip-label {
+  cursor: help;
+  border-bottom: 1px dotted var(--vp-text-faint);
+}
 
 /* ---- Case metadata panel — shares the .vp-stats dock shell (right of the stage) ---- */
 .vp-meta__list {
@@ -1411,4 +1446,55 @@
   border-radius: 14px;
   overflow: hidden;
   box-shadow: 0 12px 50px rgba(0,0,0,0.55);
+}
+
+.vp-pane--edit-cursor {
+  cursor: crosshair;
+}
+
+.vp-edit__method-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin: 4px 0 10px;
+}
+
+.vp-edit__method-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+  padding: 9px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--vp-border);
+  background: var(--vp-panel-strong);
+  color: var(--vp-text);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.vp-edit__method-card strong {
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.vp-edit__method-card span {
+  font-size: 11px;
+  color: var(--vp-text-dim);
+  line-height: 1.3;
+}
+
+.vp-edit__method-card:hover {
+  background: var(--vp-hover);
+  border-color: var(--vp-border-strong);
+}
+
+.vp-edit__method-card.is-active {
+  background: #ffffff;
+  border-color: #ffffff;
+}
+
+.vp-edit__method-card.is-active strong,
+.vp-edit__method-card.is-active span {
+  color: #08090b;
 }

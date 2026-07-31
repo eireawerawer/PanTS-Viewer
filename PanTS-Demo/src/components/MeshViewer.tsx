@@ -9,6 +9,7 @@ import { SceneCrosshair3D } from "./SceneCrosshair3D";
 import type { Color } from "@cornerstonejs/core/types";
 import { LiveSegmentMesh } from "./LiveSegmentMesh";
 import type { CheckBoxData } from "../types";
+import { getEditedSegments, subscribeToSegmentationEdits } from "../helpers/CornerstoneNifti2";
 
 type SegmentationMeshViewerProps = {
   caseId: string;
@@ -20,14 +21,9 @@ type SegmentationMeshViewerProps = {
   labelColorMap?: { [key: number]: Color };
 };
 
-
-async function fetchMeshManifest(caseId: string): Promise<MeshManifest> {
+export async function fetchMeshManifest(caseId: string): Promise<MeshManifest> {
   const res = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/cases/${caseId}/mesh-manifest`);
-
-  if (!res.ok) {
-    throw new Error(`Failed to fetch mesh manifest: ${res.status}`);
-  }
-
+  if (!res.ok) throw new Error(`Failed to fetch mesh manifest: ${res.status}`);
   const manifest: unknown = await res.json();
   if (
     !manifest
@@ -45,14 +41,22 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
   const [manifest, setManifest] = useState<MeshManifest | null>(null);
   const [loaded, setLoaded] = useState<Record<number, boolean>>({});
   const [unavailable, setUnavailable] = useState(false);
+  // Bumped on every mask edit so editedSegments below is recomputed — the 3D pane
+  // needs to know the instant a static organ's mask changes, not just at mount.
+  const [, setEditVersion] = useState(0);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToSegmentationEdits(() => setEditVersion((v) => v + 1));
+    return unsubscribe;
+  }, []);
+
+  // Segment indices touched since the case loaded — includes edits to the STATIC
+  // 32-organ catalog, not just brand-new custom classes.
+  const editedSegments = getEditedSegments();
 
   const crosshairPosition = useMemo(() => {
     if (!manifest || !crosshairMm) return null;
-
-    return cornerstoneLpsMmToThree(
-      crosshairMm,
-      manifest.center
-    );
+    return cornerstoneLpsMmToThree(crosshairMm, manifest.center);
   }, [manifest, crosshairMm]);
 
   useEffect(() => {
@@ -60,28 +64,18 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
     setManifest(null);
     setLoaded({});
     setUnavailable(false);
-
     fetchMeshManifest(caseId)
       .then((data) => {
         if (!alive) return;
-
         setManifest(data);
-
         const initialLoaded: Record<number, boolean> = {};
-
-        for (const organ of data.organs) {
-          initialLoaded[organ.id] = true;
-        }
-
+        for (const organ of data.organs) initialLoaded[organ.id] = true;
         setLoaded(initialLoaded);
       })
       .catch(() => {
         if (alive) setUnavailable(true);
       });
-
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [caseId]);
 
   const organs = useMemo(() => manifest?.organs ?? [], [manifest]);
@@ -95,25 +89,30 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
   return (
     <div style={{ display: "flex", width: "100%", height: "100%" }}>
       <main style={{ flex: 1, minWidth: 0 }}>
-        <Canvas
-          camera={{
-            position: [0, 250, 650],
-            fov: 45,
-            near: 0.1,
-            far: 5000,
-          }}
-        >
+        <Canvas camera={{ position: [0, 250, 650], fov: 45, near: 0.1, far: 5000 }}>
           <color attach="background" args={["#050505"]} />
-
           <ambientLight intensity={0.7} />
           <directionalLight position={[300, 500, 300]} intensity={1.2} />
-
           <Suspense fallback={null}>
             <Bounds fit clip observe margin={1.2}>
               <group>
                 {organs.map((organ) => {
                   if (!loaded[organ.id]) return null;
-
+                  // Edited static organ: the server-baked GLB is stale — extract a
+                  // fresh live mesh from the in-memory labelmap instead, same path
+                  // custom classes already use.
+                  if (editedSegments.has(organ.id)) {
+                    return (
+                      <LiveSegmentMesh
+                        key={`live-${organ.id}`}
+                        segmentIndex={organ.id}
+                        color={labelColorMap[organ.id] ?? [255, 255, 255, 255]}
+                        visible={!!checkState[organ.id]}
+                        opacity={opacity / 100}
+                        manifestCenter={manifest.center as [number, number, number]}
+                      />
+                    );
+                  }
                   return (
                     <OrganMesh
                       key={organ.id}
@@ -135,14 +134,10 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
                 ))}
               </group>
             </Bounds>
-              {crosshairPosition && manifest.bounds &&(
-                <SceneCrosshair3D
-                  position={crosshairPosition}
-                  bounds={manifest.bounds}
-                />
-              )}
+            {crosshairPosition && manifest.bounds && (
+              <SceneCrosshair3D position={crosshairPosition} bounds={manifest.bounds} />
+            )}
           </Suspense>
-
           <OrbitControls makeDefault />
         </Canvas>
       </main>

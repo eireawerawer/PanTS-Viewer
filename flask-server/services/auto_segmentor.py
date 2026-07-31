@@ -181,6 +181,14 @@ def run_auto_segmentation(input_path, session_dir, model, session_id=None, on_st
             )
         elif model == 'ShapeKit':
             return _run_shapekit_inference(input_dir=input_path, session_dir=session_dir)
+        elif model == 'LesionSegmenter':
+            conda_path = _resolve_conda_activate_path()
+            return _run_lesionsegmenter_inference(
+                input_path=input_path,
+                session_dir=session_dir,
+                conda_path=conda_path,
+                lesionseg_env_name=os.getenv("CONDA_ENV_LESIONSEG", "epai"),
+            )
         else:
             raise ValueError(f"Unknown model: {model}")
 
@@ -280,6 +288,38 @@ _SUPREM_TO_VIEWER = {
     23: _VIEWER_LABELS["femur_left"],
     24: _VIEWER_LABELS["femur_right"],
     25: _VIEWER_LABELS["celiac_artery"],
+}
+
+# LesionSegmenter model label -> viewer label (43-class PanTS label space).
+# Only classes with a confident 1:1 match in the viewer's scheme are mapped.
+# NOT mapped (no viewer category exists yet, left as background rather than
+# guessing at a slot and risking a mislabeled structure): esophagus, rectum,
+# vertebrae_* (10 classes), trachea, heart, hip_left, hip_right, sacrum,
+# uterus, liver_lesion, kidney_lesion, colon_lesion. pancreatic_lesion is the
+# one this model exists to add and maps onto the same viewer slot ePAI and
+# Atlas-Net already use for their own PDAC/cyst/PNET subtypes.
+_LESIONSEG_TO_VIEWER = {
+    1: _VIEWER_LABELS["aorta"],
+    2: _VIEWER_LABELS["gall_bladder"],
+    3: _VIEWER_LABELS["kidney_left"],
+    4: _VIEWER_LABELS["kidney_right"],
+    5: _VIEWER_LABELS["liver"],
+    6: _VIEWER_LABELS["pancreas_body"],
+    7: _VIEWER_LABELS["pancreas_head"],
+    8: _VIEWER_LABELS["pancreas_tail"],
+    9: _VIEWER_LABELS["postcava"],
+    10: _VIEWER_LABELS["spleen"],
+    11: _VIEWER_LABELS["stomach"],
+    12: _VIEWER_LABELS["adrenal_gland_left"],
+    13: _VIEWER_LABELS["adrenal_gland_right"],
+    14: _VIEWER_LABELS["bladder"],
+    15: _VIEWER_LABELS["celiac_artery"],  # celiac_trunk -> celiac_artery
+    16: _VIEWER_LABELS["colon"],
+    17: _VIEWER_LABELS["duodenum"],
+    19: _VIEWER_LABELS["prostate"],
+    21: _VIEWER_LABELS["lung_left"],
+    22: _VIEWER_LABELS["lung_right"],
+    40: _VIEWER_LABELS["pancreatic_lesion"],
 }
 
 
@@ -826,6 +866,100 @@ def _run_atlasnet_inference(input_path: str, session_dir: str, conda_path: str, 
     combined_label_path = os.path.join(output_ct_dir, "combined_labels.nii.gz")
     shutil.copy2(case_pred, combined_label_path)
     _remap_combined_labels(combined_label_path, _ATLASNET_TO_VIEWER)
+
+    return output_ct_dir
+
+
+def _run_lesionsegmenter_inference(input_path: str, session_dir: str, conda_path: str, lesionseg_env_name: str) -> str:
+    """LesionSegmenter: nnU-Net ResidualEncoderUNet-L, 43-class PanTS label space
+    including pancreatic/liver/kidney/colon lesion.
+
+    -step_size 0.7 and --disable_tta are not defaults elsewhere in this file --
+    they're here because they were validated end-to-end against real ground
+    truth on 229 held-out lesion-positive cases: 1x (no mirror-TTA) at step 0.7
+    is statistically indistinguishable from the slow 8x-TTA/step-0.5 default
+    (paired Dice delta not significant, 95% CI crosses zero) while running
+    roughly 5x faster. Dropping either flag trades speed for nothing -- do not
+    remove them to "be safe", the safety case is what's cited above.
+
+    Runs scripts/lesionseg_predict.py instead of the bare nnUNetv2_predict_from_modelfolder
+    CLI every other model here uses -- that CLI has no flag for GPU-accelerated export
+    resampling, and this wrapper applies it (~26-42s -> ~1-6s on the export stage, no
+    accuracy cost, see the script's own docstring). Directly measured on identical
+    case/flags/environment: 2m18s (bare CLI) -> 1m5s (this wrapper) end to end. Still a
+    fresh subprocess per request -- NOT the warm-predictor optimization, that's separate.
+    """
+    case_id = _normalize_case_id(input_path)
+
+    lesionseg_workspace = os.path.join(session_dir, "lesionsegmenter")
+    input_dir = os.path.join(lesionseg_workspace, "eval")
+    save_dir = os.path.join(lesionseg_workspace, "out")
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
+
+    nnunet_input = os.path.join(input_dir, f"{case_id}_0000.nii.gz")
+    if os.path.lexists(nnunet_input):
+        os.remove(nnunet_input)
+    os.symlink(input_path, nnunet_input)
+
+    ckpt_path = os.getenv(
+        "LESIONSEG_CKPT_PATH",
+        "/home/visitor/lesionsegmenter/model/nnUNet_results/Dataset_LesionSegmenter/nnUNetTrainer__nnUNetPlans__3d_fullres",
+    )
+    nnunet_raw = os.getenv("LESIONSEG_NNUNET_RAW", "/home/visitor/lesionsegmenter/nnUNet/raw")
+    nnunet_preprocessed = os.getenv("LESIONSEG_NNUNET_PREPROCESSED", "/home/visitor/lesionsegmenter/nnUNet/preprocessed")
+    nnunet_results = os.getenv("LESIONSEG_NNUNET_RESULTS", "/home/visitor/lesionsegmenter/nnUNet/results")
+
+    selected_gpu = get_least_used_gpu()
+    predict_script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "lesionseg_predict.py")
+
+    # `conda run -n <env> python ...` re-resolves and activates the environment on every
+    # single request -- measured at ~1.75s of pure overhead versus calling that env's
+    # python binary directly (0.013s). Paid once per request just like the cold model
+    # load, so it's worth skipping. Falls back to `conda run` if the env's binary isn't
+    # where conda envs conventionally live (e.g. a differently-configured deployment),
+    # so this degrades to the previous behavior rather than breaking outright.
+    direct_python = os.path.expanduser(f"~/.conda/envs/{lesionseg_env_name}/bin/python")
+    if os.path.exists(direct_python):
+        run_prefix = shlex.quote(direct_python)
+    else:
+        conda_exe = shutil.which("conda")
+        if not conda_exe:
+            raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
+        run_prefix = f"{shlex.quote(conda_exe)} run -n {shlex.quote(lesionseg_env_name)} python"
+
+    full_cmd = (
+        f"nnUNet_raw={shlex.quote(nnunet_raw)} "
+        f"nnUNet_preprocessed={shlex.quote(nnunet_preprocessed)} "
+        f"nnUNet_results={shlex.quote(nnunet_results)} "
+        f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
+        f"{run_prefix} {shlex.quote(predict_script)} "
+        f"-i {shlex.quote(input_dir)} "
+        f"-o {shlex.quote(save_dir)} "
+        f"-m {shlex.quote(ckpt_path)} "
+        f"-step_size 0.7 "
+        f"--disable_tta "
+        f"-chk checkpoint_final.pth"
+    )
+
+    print(f"[INFO] Running LesionSegmenter command for case {case_id}")
+    print(full_cmd)
+    try:
+        _tracked_run(full_cmd, shell=True, executable="/bin/bash", check=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"LesionSegmenter inference command failed\nCommand: {full_cmd}\nExit code: {e.returncode}"
+        ) from e
+
+    case_pred = os.path.join(save_dir, f"{case_id}.nii.gz")
+    if not os.path.exists(case_pred):
+        raise RuntimeError(f"Expected LesionSegmenter output not found: {case_pred}")
+
+    output_ct_dir = os.path.join(session_dir, "outputs", "ct")
+    os.makedirs(output_ct_dir, exist_ok=True)
+    combined_label_path = os.path.join(output_ct_dir, "combined_labels.nii.gz")
+    shutil.copy2(case_pred, combined_label_path)
+    _remap_combined_labels(combined_label_path, _LESIONSEG_TO_VIEWER)
 
     return output_ct_dir
 
