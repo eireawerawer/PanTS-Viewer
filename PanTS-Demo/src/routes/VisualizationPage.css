@@ -1344,6 +1344,12 @@
   font-size: 11px;
   color: var(--vp-text-dim);
 }
+/* Dotted-underline affordance for a stat label with a hover explanation (e.g. Kurtosis) —
+   makes the tooltip discoverable instead of relying on users guessing to hover plain text. */
+.vp-stats__tooltip-label {
+  cursor: help;
+  border-bottom: 1px dotted var(--vp-text-faint);
+}
 
 /* ---- Case metadata panel — shares the .vp-stats dock shell (right of the stage) ---- */
 .vp-meta__list {
