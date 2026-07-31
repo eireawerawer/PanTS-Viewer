@@ -43,6 +43,7 @@ import { buildViewerActions } from "../components/AIAssistant/assistantActions";
 import MaskEditPanel, { type MaskEditMode } from "../components/MaskEditPanel/MaskEditPanel";
 import MeasurementPanel from "../components/MeasurementPanel/MeasurementPanel";
 import { SegmentationMeshViewer } from "../components/MeshViewer";
+import { cache as reportDataCache } from '../components/ReportScreen/ReportScreen';
 import OrganCheckbox from "../components/OrganCheckbox";
 import PercentileBar from "../components/PercentileBar";
 import SessionHUD from "../components/ReadingSession/SessionHUD";
@@ -306,6 +307,8 @@ function useToolbarFlyout() {
 		};
 	}, [open]);
 
+	
+
 	return { open, pos, groupRef, btnRef, menuRef, toggle, close };
 }
 
@@ -340,6 +343,15 @@ function VisualizationPage() {
 	const isHd =
 		typeof window !== "undefined" &&
 		new URLSearchParams(window.location.search).get("hd") === "1";
+	
+	useEffect(() => {
+		if (!isDicom && caseId && !reportDataCache[caseId]) {
+			fetch(`${API_BASE}/api/get-report-data/${caseId}`)
+				.then(r => r.json())
+				.then(j => { if (!j.error) reportDataCache[caseId] = j; })
+				.catch(() => {});
+		}
+	}, [caseId, isDicom]);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -1393,7 +1405,16 @@ function VisualizationPage() {
 		// flow doesn't reflow the other three — their viewports stay valid, so switching back
 		// to MPR is instant (no resize/re-fit of the 2D views, no animation, correct sizes).
 		if (viewMode === "3d") {
-			return panel === "3d" ? { position: "absolute", inset: 0, zIndex: 20 } : {};
+			if (panel === "3d") return { position: "absolute", inset: 0, zIndex: 20 };
+			// Keep the pane mounted at its normal grid size (no display:none — that's
+			// what preserves the "instant, no resize" swap back to MPR described above),
+			// but strip it from paint and hit-testing entirely. Previously this branch
+			// left these panes fully visible/interactive and relied on the 3D pane's
+			// z-index to visually cover them — but the slice scrollbar/counter overlays
+			// (rendered by renderPaneOverlays, see below) carry their own z-index for
+			// sitting above the Cornerstone canvas, which could equal or exceed the 3D
+			// pane's z-index:20 and bleed through on top of it.
+			return { visibility: "hidden", pointerEvents: "none" };
 		}
 		// 2D single view: collapse the grid to one cell and hide the rest.
 		return viewMode === panel ? {} : { display: "none" };
@@ -1420,6 +1441,9 @@ function VisualizationPage() {
 	// and mixing React-rendered children into the same node risks the two fighting over
 	// the same DOM nodes.
 	const renderPaneOverlays = (pane: CinePane) => {
+		// Never show 2D slice-counter/W-L overlays while the 3D pane is fullscreen —
+		// these are the elements that were bleeding through on top of the 3D render.
+		if (viewMode === "3d") return null;
 		const info = sliceInfo[pane];
 		return (
 			<>
@@ -2392,7 +2416,10 @@ const aiAvailableOrgans = useMemo(() => {
 											{!isLocal && (
 												<button
 													className="vp-tool"
-													onClick={() => setShowReportScreen(true)}
+													onClick={() => {
+														setViewMode("3d");
+														setShowReportScreen(true);
+													}}
 													aria-label="Open report"
 												>
 													<IconReport size={20} color="white" />

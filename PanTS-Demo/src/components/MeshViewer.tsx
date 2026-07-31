@@ -19,6 +19,7 @@ type SegmentationMeshViewerProps = {
   crosshairMm: Vec3 | null
   customOrgans?: CheckBoxData[];
   labelColorMap?: { [key: number]: Color };
+  autoRotate?: boolean;
 };
 
 export async function fetchMeshManifest(caseId: string): Promise<MeshManifest> {
@@ -27,8 +28,7 @@ export async function fetchMeshManifest(caseId: string): Promise<MeshManifest> {
   return res.json();
 }
 
-export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}}: SegmentationMeshViewerProps) {
-  const [manifest, setManifest] = useState<MeshManifest | null>(null);
+export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}, autoRotate = false}: SegmentationMeshViewerProps) {  const [manifest, setManifest] = useState<MeshManifest | null>(null);
   const [loaded, setLoaded] = useState<Record<number, boolean>>({});
   // Bumped on every mask edit so editedSegments below is recomputed — the 3D pane
   // needs to know the instant a static organ's mask changes, not just at mount.
@@ -75,10 +75,10 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
           <ambientLight intensity={0.7} />
           <directionalLight position={[300, 500, 300]} intensity={1.2} />
           <Suspense fallback={null}>
-            <Bounds fit clip observe margin={1.2}>
+            <Bounds key={checkState.join(",")} fit clip observe margin={1.2}>
               <group>
                 {organs.map((organ) => {
-                  if (!loaded[organ.id]) return null;
+                  if (!loaded[organ.id] || !checkState[organ.id]) return null;
                   // Edited static organ: the server-baked GLB is stale — extract a
                   // fresh live mesh from the in-memory labelmap instead, same path
                   // custom classes already use.
@@ -98,7 +98,7 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
                     <OrganMesh
                       key={organ.id}
                       organ={organ}
-                      visible={!!checkState[organ.id]}
+                      visible={true}
                       opacity={opacity/100}
                     />
                   );
@@ -119,7 +119,7 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
               <SceneCrosshair3D position={crosshairPosition} bounds={manifest.bounds} />
             )}
           </Suspense>
-          <OrbitControls makeDefault />
+          <OrbitControls makeDefault autoRotate={autoRotate} autoRotateSpeed={2.2} />
         </Canvas>
       </main>
     </div>

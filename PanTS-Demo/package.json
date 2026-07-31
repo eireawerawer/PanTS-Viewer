@@ -25,6 +25,7 @@
     "@tabler/icons-react": "^3.34.1",
     "@tailwindcss/vite": "^4.1.12",
     "esbuild": "^0.25.9",
+    "framer-motion": "^12.42.2",
     "jszip": "^3.10.1",
     "pako": "^3.0.1",
     "react": "^19.1.1",
