@@ -2439,9 +2439,19 @@ def get_session_ct(session_id):
     ct_path = job.get("ct_path")
     if not ct_path or not os.path.exists(ct_path):
         return jsonify({"error": "CT file not found for session"}), 404
-    response = make_response(send_file(ct_path, mimetype='application/gzip'))
+    # ct_path is the user's ORIGINAL upload, which may be plain .nii or gzip .nii.gz
+    # (the sibling session-segmentation/session-reconstruction endpoints don't have
+    # this problem -- they always serve a fixed, always-gzip pipeline output file).
+    # Claiming Content-Encoding: gzip on an uncompressed .nii breaks decoding client
+    # side: the browser tries to gunzip already-raw bytes and the fetch fails with
+    # net::ERR_CONTENT_DECODING_FAILED, which stalls the viewer on "Preparing case…"
+    # forever with no user-visible error.
+    is_gzipped = ct_path.endswith('.gz')
+    mimetype = 'application/gzip' if is_gzipped else 'application/octet-stream'
+    response = make_response(send_file(ct_path, mimetype=mimetype))
     response.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
-    response.headers['Content-Encoding'] = 'gzip'
+    if is_gzipped:
+        response.headers['Content-Encoding'] = 'gzip'
     return response
 
 

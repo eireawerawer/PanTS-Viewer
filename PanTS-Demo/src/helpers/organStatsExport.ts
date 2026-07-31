@@ -9,6 +9,11 @@ import { filenameToName } from "./utils";
 // volume edge). Mirrors NiftiProcessor.number_max.
 export const INVALID_METRIC = 999999;
 
+// Shared so every place that shows a "Kurtosis" label (viewer panel, compare table) explains
+// it the same way — it's the one stat here most viewers won't already know how to read.
+export const KURTOSIS_TOOLTIP =
+	"Kurtosis: higher values mean more extreme outlier voxels.";
+
 // Full shape of one entry in the backend's `organ_metrics` list (NiftiProcessor.calculate_metrics).
 // Only organ_name/volume_cm3/mean_hu are guaranteed; everything else is optional/nullable so
 // callers (and tests) that only have the basics keep working unchanged.

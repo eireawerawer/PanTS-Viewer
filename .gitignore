@@ -8,3 +8,4 @@ tmp/*
 downloaded.nii.gz
 PanTS/data/pdf/
 .DS_Store
+/CancerVerse/
