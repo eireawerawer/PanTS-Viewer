@@ -50,6 +50,8 @@ import PercentileBar from "../components/PercentileBar";
 import SessionHUD from "../components/ReadingSession/SessionHUD";
 import SessionSummary from "../components/ReadingSession/SessionSummary";
 import ReportScreen from "../components/ReportScreen/ReportScreen";
+import { SoloChallengeDock, SoloChallengeHeader } from "../education/SoloChallengeChrome";
+import type { SoloChallengeController } from "../education/types";
 import {
     API_BASE,
     APP_CONSTANTS,
@@ -119,6 +121,7 @@ import {
     VOLUME_3D_PRESETS_MR,
     zoomToFit,
     type CinePane,
+    type MeasurementSummary,
     type PrimaryMouseToolName,
     type SharedMeasurement,
     type SharedMprView,
@@ -320,22 +323,24 @@ function useToolbarFlyout() {
 
 type VisualizationPageProps = {
 	liveRoom?: LiveRoomController;
+	soloChallenge?: SoloChallengeController;
 };
 
-function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
+function VisualizationPage({ liveRoom, soloChallenge }: VisualizationPageProps = {}) {
 	// References and state
 	const params = useParams();
-	const pantsCase = params.caseId;
+	const isSoloChallenge = Boolean(soloChallenge);
+	const pantsCase = liveRoom?.metadata.case_id ?? soloChallenge?.challenge.case_id ?? params.caseId;
 	const isCvCase = String(pantsCase ?? "").toUpperCase().startsWith("CV");
-	const sessionId = params.sessionId;
+	const sessionId = liveRoom || soloChallenge ? undefined : params.sessionId;
 	// Local DICOM mode (/dicom): a folder of .dcm files picked on the Upload page,
 	// viewed entirely in-browser. No backend case, so no segmentation layer.
 	const routerLocation = useLocation();
-	const isDicom = routerLocation.pathname === "/dicom";
+	const isDicom = !liveRoom && !soloChallenge && routerLocation.pathname === "/dicom";
 	// Local NIfTI (/local-nifti): a single .nii/.nii.gz picked on the Upload page, viewed
 	// in-browser with no backend case. `isLocal` = either in-browser mode; both are
 	// seg-less, so they share the same "hide segmentation UI, default to 3D volume" behavior.
-	const isLocalNifti = routerLocation.pathname === "/local-nifti";
+	const isLocalNifti = !liveRoom && !soloChallenge && routerLocation.pathname === "/local-nifti";
 	const isLocal = isDicom || isLocalNifti;
 	const [dicomError, setDicomError] = useState<string | null>(null);
 
@@ -555,10 +560,20 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 	const [sessionMeasurements, setSessionMeasurements] = useState<ReportMeasurement[]>([]);
 	const [showMeasurePanel, setShowMeasurePanel] = useState(false);
 	const [showLiveRoomCreate, setShowLiveRoomCreate] = useState(false);
+	const [challengeMeasurements, setChallengeMeasurements] = useState<MeasurementSummary[]>([]);
 	const [liveRoomDockOpen, setLiveRoomDockOpen] = useState(Boolean(liveRoom));
 	const [openPinnedNote, setOpenPinnedNote] = useState<{ noteId: string; pane: CinePane } | null>(null);
 	const segmentationShadowRef = useRef<Uint8Array | null>(null);
 	const initialLiveMeasurementsAppliedRef = useRef(false);
+	const challengeTimedOutRef = useRef(false);
+	const challengeLengthMeasurement = useMemo(
+		() => [...challengeMeasurements].reverse().find((measurement) => measurement.tool === LENGTH_TOOL) ?? null,
+		[challengeMeasurements],
+	);
+	const serializedChallengeMeasurement = useMemo(
+		() => challengeLengthMeasurement ? serializeMeasurement(challengeLengthMeasurement.uid) : null,
+		[challengeLengthMeasurement],
+	);
 	// Shareable-link state: brief "copied" confirmation, and a guard so a deep-link's view
 	// state is applied exactly once after the volume finishes loading.
 	const [shareCopied, setShareCopied] = useState(false);
@@ -688,14 +703,17 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 
 	// Completed measurements land in the session timeline and auto-capture a key image
 	// (on the next frame, after the annotation has painted onto the SVG overlay).
+	const liveRoomConnected = liveRoom?.connectionState === "connected";
+	const sendLiveRoomDurable = liveRoom?.sendDurable;
 	useEffect(() => {
 		const unsubscribe = subscribeToMeasurementChanges((kind, m) => {
-			if (liveRoom && liveRoom.connectionState === "connected") {
+			if (isSoloChallenge) setChallengeMeasurements(getMeasurementSummaries());
+			if (liveRoomConnected && sendLiveRoomDurable) {
 				if (kind === "removed") {
-					liveRoom.sendDurable("measurement.delete", { id: m.uid });
+					sendLiveRoomDurable("measurement.delete", { id: m.uid });
 				} else {
 					const measurement = serializeMeasurement(m.uid);
-					if (measurement) liveRoom.sendDurable("measurement.upsert", { measurement });
+					if (measurement) sendLiveRoomDurable("measurement.upsert", { measurement });
 				}
 			}
 			if (kind === "completed" && sessionRef.current) {
@@ -708,7 +726,26 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 			}
 		});
 		return unsubscribe;
-	}, [takeSnapshot, liveRoom?.connectionState, liveRoom?.sendDurable]);
+	}, [takeSnapshot, liveRoomConnected, sendLiveRoomDurable, isSoloChallenge]);
+
+	useEffect(() => {
+		if (!soloChallenge || soloChallenge.result || soloChallenge.remainingSeconds > 0) return;
+		if (challengeTimedOutRef.current) return;
+		challengeTimedOutRef.current = true;
+		void soloChallenge.submit(serializedChallengeMeasurement, true);
+	}, [soloChallenge, soloChallenge?.remainingSeconds, soloChallenge?.result, serializedChallengeMeasurement]);
+
+	useEffect(() => {
+		if (!isSoloChallenge || loading || checkBoxData.length === 0) return;
+		const visible = [true, ...checkBoxData.map(() => false)];
+		if (soloChallenge?.result) visible[22] = true;
+		setCheckState(visible);
+		setVisibilities(visible);
+		if (soloChallenge?.result) {
+			setOpacityValue(76);
+			setFillOpacity(0.76);
+		}
+	}, [isSoloChallenge, soloChallenge?.result, loading, checkBoxData]);
 
 	// Live Room durable state is loaded before Cornerstone.  Hydrate shared measurements
 	// once the viewports exist, then apply later committed events incrementally.
@@ -999,14 +1036,14 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 	// Only when the local files exist (server disk — fast); the HuggingFace fallback
 	// is already full-res, and ?hd=1 loads full-res up front.
 	useEffect(() => {
-		if (loading || !localAvailable || isHd || isLocal || !pantsCase) return;
+		if (isSoloChallenge || loading || !localAvailable || isHd || isLocal || !pantsCase) return;
 		if (enhanceStartedRef.current) return;
 		// Ref is flipped inside the timer (not here) so StrictMode's double-run —
 		// which clears the first timer — still ends up scheduling exactly one stream.
 		const timer = window.setTimeout(() => { void runEnhance(); }, 1500);
 		return () => window.clearTimeout(timer);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [loading, localAvailable, isHd, isLocal, pantsCase]);
+	}, [isSoloChallenge, loading, localAvailable, isHd, isLocal, pantsCase]);
 
 	// ---- Shaded 3D volume rendering (Volume mode in the 3D pane) -------------------
 
@@ -1079,7 +1116,7 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 			setCheckBoxData(checkBoxData);
 			const initialState = [true]; // background 永远可见
 			checkBoxData.forEach((item) => {
-				initialState[item.id] = true;
+				initialState[item.id] = !isSoloChallenge;
 			});
 			setCheckState(initialState);
 			const max = Math.max(
@@ -1242,6 +1279,7 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 		segUrl,
 		isDicom,
 		isLocalNifti,
+		isSoloChallenge,
 		axial_ref,
 		sagittal_ref,
 		coronal_ref,
@@ -1641,8 +1679,18 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 				}];
 			})
 			: [];
+		const challengeMarkerPosition = soloChallenge?.marker
+			? worldToVisiblePaneCanvas(pane, soloChallenge.marker)
+			: null;
 		return (
 			<>
+				{challengeMarkerPosition && challengeMarkerPosition[0] >= 0 && challengeMarkerPosition[1] >= 0 && (
+					<span
+						className="edu-finding-marker"
+						style={{ left: challengeMarkerPosition[0], top: challengeMarkerPosition[1] }}
+						aria-label="Locked finding marker"
+					/>
+				)}
 				{pinnedNotes.map(({ note, position, opensLeft, opensAbove }) => {
 					const popoverId = `lr-note-popover-${pane}-${note.id}`;
 					const isOpen = openPinnedNote?.noteId === note.id && openPinnedNote.pane === pane;
@@ -2020,7 +2068,11 @@ const aiAvailableOrgans = useMemo(() => {
 	};
 
 	const navBack = () => {
-		window.location.href = liveRoom ? `/case/${liveRoom.metadata.case_id}` : "/dashboard";
+		window.location.href = liveRoom
+			? `/case/${liveRoom.metadata.case_id}`
+			: soloChallenge
+				? `/case/${soloChallenge.challenge.case_id}`
+				: "/dashboard";
 	};
 	// const PREVIEW_IDS = [1, 17, 30, 35, 121];
 
@@ -2031,7 +2083,7 @@ const aiAvailableOrgans = useMemo(() => {
 
 	return (
 		<div
-			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${liveRoom ? " is-live-room" : ""}`}
+			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${liveRoom ? " is-live-room" : ""}${soloChallenge ? " is-solo-challenge" : ""}`}
 			onPointerDownCapture={(event) => {
 				if (!liveRoom?.followingId) return;
 				const target = event.target as HTMLElement;
@@ -2052,6 +2104,7 @@ const aiAvailableOrgans = useMemo(() => {
 					onToggleDock={() => setLiveRoomDockOpen((value) => !value)}
 				/>
 			)}
+			{soloChallenge && <SoloChallengeHeader controller={soloChallenge} />}
 			{/* ---- Top toolbar (PYCAD-style). Lives in normal flow, so it sits ABOVE the
 			     viewports and never overlays them. Shown/hidden by the gear button. ---- */}
 			{showToolbar && (
@@ -2521,7 +2574,7 @@ const aiAvailableOrgans = useMemo(() => {
 												<IconArrowForwardUp size={20} color="white" />
 												<span className="vp-tool__tip">Redo (⇧⌘Z)</span>
 											</button>
-											{!isLocal && (
+											{!isLocal && !soloChallenge && (
 												<button
 												className={`vp-tool ${showEditPanel || editMode ? "vp-tool--active" : ""}`}
 												disabled={collaborationDisabled}
@@ -2543,7 +2596,7 @@ const aiAvailableOrgans = useMemo(() => {
 											)}
 
 											{/* Capture ▾ — snapshot, voice-narrated reading session, share link. */}
-											<div className="vp-toolgroup" ref={captureFlyout.groupRef}>
+											{!soloChallenge && <div className="vp-toolgroup" ref={captureFlyout.groupRef}>
 												<button
 													ref={captureFlyout.btnRef}
 													className={`vp-tool ${readingSession ? "vp-tool--rec" : ""} ${captureFlyout.open ? "vp-tool--active" : ""}`}
@@ -2613,11 +2666,11 @@ const aiAvailableOrgans = useMemo(() => {
 														</div>,
 														document.body
 													)}
-											</div>
+											</div>}
 
 											{/* Panels ▾ — every side-panel opener in one place (organs list, organ
 											    stats, case metadata, measurements). */}
-											<div className="vp-toolgroup" ref={panelsFlyout.groupRef}>
+											{!soloChallenge && <div className="vp-toolgroup" ref={panelsFlyout.groupRef}>
 												<button
 													ref={panelsFlyout.btnRef}
 													className={`vp-tool ${panelsGroupActive || panelsFlyout.open ? "vp-tool--active" : ""}`}
@@ -2703,11 +2756,11 @@ const aiAvailableOrgans = useMemo(() => {
 														</div>,
 														document.body
 													)}
-											</div>
+											</div>}
 
 											{/* Report and Download stay standalone and separate (not grouped with
 											    each other) — distinct export actions users reach for independently. */}
-											{!isLocal && (
+											{!isLocal && !soloChallenge && (
 												<button
 													className="vp-tool"
 													onClick={handleDownloadClick}
@@ -2717,7 +2770,7 @@ const aiAvailableOrgans = useMemo(() => {
 													<span className="vp-tool__tip">Download</span>
 												</button>
 											)}
-											{!isLocal && (
+											{!isLocal && !soloChallenge && (
 												<button
 													className="vp-tool"
 													onClick={() => setShowReportScreen(true)}
@@ -2730,7 +2783,7 @@ const aiAvailableOrgans = useMemo(() => {
 
 											{/* HD and AI stay inline: HD is a live status indicator (streaming %),
 											    and AI is a headline feature — neither belongs buried in a menu. */}
-											{!liveRoom && !sessionId && localAvailable && (
+											{!liveRoom && !soloChallenge && !sessionId && localAvailable && (
 												<button
 													className={`vp-tool ${isHd || enhance.state === "done" ? "vp-tool--active" : ""} ${enhance.state === "streaming" ? "vp-tool--busy" : ""}`}
 													onClick={() => {
@@ -2758,7 +2811,7 @@ const aiAvailableOrgans = useMemo(() => {
 													</span>
 												</button>
 											)}
-											{!isLocal && (
+											{!isLocal && !soloChallenge && (
 												<button
 													type="button"
 													className={`vp-tool ${showAISidebar ? "vp-tool--active" : ""}`}
@@ -2806,7 +2859,7 @@ const aiAvailableOrgans = useMemo(() => {
 			     above pushing it down). The stage's ResizeObserver refits the canvases
 			     whenever a dock opens or closes. */}
 			<div className="vp-body">
-				{!isLocal && (
+				{!isLocal && !soloChallenge && (
 					<OrganCheckbox
 						setCheckState={setCheckState}
 						checkState={checkState}
@@ -3197,7 +3250,7 @@ const aiAvailableOrgans = useMemo(() => {
 			)}
 
 			{/* Kept mounted (display toggles) so the chat history survives open/close. */}
-			<AISidebar
+			{!soloChallenge && <AISidebar
 				open={showAISidebar}
 				onClose={() => setShowAISidebar(false)}
 				caseId={String(caseId)}
@@ -3213,13 +3266,30 @@ const aiAvailableOrgans = useMemo(() => {
 				organMetrics={organStats ?? []}
 				demographics={demographics}
 				actions={aiActions}
-			/>
+			/>}
 			{liveRoom && liveRoomDockOpen && (
 				<LiveRoomDock
 					room={liveRoom}
 					crosshair={crosshairMm}
 					activePlane={getFocusedPane()}
 					onClose={() => setLiveRoomDockOpen(false)}
+				/>
+			)}
+			{soloChallenge && soloChallenge.taskDockOpen && (
+				<SoloChallengeDock
+					controller={soloChallenge}
+					crosshair={crosshairMm}
+					measurement={challengeLengthMeasurement}
+					serializedMeasurement={serializedChallengeMeasurement}
+					onSetMarker={() => {
+						if (crosshairMm) soloChallenge.setMarker([...crosshairMm]);
+					}}
+					onActivateMeasure={() => {
+						setShowToolbar(true);
+						setCrosshairToolActive(false);
+						setActiveMeasureTool(LENGTH_TOOL);
+					}}
+					onSubmit={() => void soloChallenge.submit(serializedChallengeMeasurement)}
 				/>
 			)}
 			</div>

@@ -1,5 +1,6 @@
-import { IconUsersGroup, IconX } from "@tabler/icons-react";
+import { IconArrowLeft, IconBolt, IconClipboardCheck, IconClockPlay, IconUsersGroup, IconX } from "@tabler/icons-react";
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { API_BASE } from "../helpers/constants";
 import { liveRoomCreatorAutoJoinKey } from "./protocol";
 import "./liveRooms.css";
@@ -11,13 +12,16 @@ type Props = {
 };
 
 export default function LiveRoomCreateDialog({ caseId, open, onClose }: Props) {
+	const navigate = useNavigate();
 	const [name, setName] = useState(() => sessionStorage.getItem("bodymaps.live-room.name") || "");
 	const [resolution, setResolution] = useState<"low" | "full">("low");
+	const [mode, setMode] = useState<"choose" | "review">("choose");
 	const [submitting, setSubmitting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
 	useEffect(() => {
 		if (!open) return;
+		setMode("choose");
 		const onKey = (event: KeyboardEvent) => {
 			if (event.key === "Escape" && !submitting) onClose();
 		};
@@ -26,6 +30,37 @@ export default function LiveRoomCreateDialog({ caseId, open, onClose }: Props) {
 	}, [onClose, open, submitting]);
 
 	if (!open) return null;
+
+	if (mode === "choose") {
+		const soloAvailable = String(caseId) === "35";
+		return (
+			<div className="lr-modal-backdrop" role="presentation" onMouseDown={(event) => {
+				if (event.target === event.currentTarget) onClose();
+			}}>
+				<section className="lr-modal lr-mode-menu" role="dialog" aria-modal="true" aria-labelledby="lr-mode-title">
+					<div className="lr-modal__head">
+						<div><span className="lr-eyebrow">Case {caseId}</span><h2 id="lr-mode-title">Live Rooms</h2></div>
+						<button type="button" className="lr-icon-button" onClick={onClose} aria-label="Close"><IconX size={20} /></button>
+					</div>
+					<p className="lr-modal__intro">Choose how you want to review this scan.</p>
+					<div className="lr-mode-grid">
+						<button type="button" className="lr-mode-card" onClick={() => setMode("review")}>
+							<span><IconUsersGroup size={21} /></span><strong>Collaborative Review</strong><small>Share one editable scan with up to eight people.</small>
+						</button>
+						<button type="button" className="lr-mode-card lr-mode-card--challenge" disabled={!soloAvailable} onClick={() => navigate("/live/challenge/pancreas-case-35")}>
+							<span><IconClockPlay size={21} /></span><strong>Solo Challenge</strong><small>{soloAvailable ? "Five-minute case: locate, measure, and interpret." : "The first curated challenge uses case 35."}</small>
+						</button>
+						<button type="button" className="lr-mode-card" disabled>
+							<span><IconBolt size={21} /></span><strong>Individual Race</strong><small>Next stage · synchronized competitive rounds.</small>
+						</button>
+						<button type="button" className="lr-mode-card" disabled>
+							<span><IconClipboardCheck size={21} /></span><strong>Assignment</strong><small>Planned · curated low-stakes coursework.</small>
+						</button>
+					</div>
+				</section>
+			</div>
+		);
+	}
 
 	const create = async (event: React.FormEvent) => {
 		event.preventDefault();
@@ -60,9 +95,12 @@ export default function LiveRoomCreateDialog({ caseId, open, onClose }: Props) {
 		}}>
 			<form className="lr-modal" role="dialog" aria-modal="true" aria-labelledby="lr-create-title" onSubmit={create}>
 				<div className="lr-modal__head">
-					<div>
+					<div className="lr-modal__title-row">
+						<button type="button" className="lr-back-button" onClick={() => setMode("choose")} aria-label="Back to room modes"><IconArrowLeft size={18} /></button>
+						<div>
 						<span className="lr-eyebrow">Case {caseId}</span>
 						<h2 id="lr-create-title">Start a Live Room</h2>
+						</div>
 					</div>
 					<button type="button" className="lr-icon-button" onClick={onClose} aria-label="Close" disabled={submitting}>
 						<IconX size={20} />

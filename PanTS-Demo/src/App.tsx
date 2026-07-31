@@ -15,6 +15,7 @@ const VisualizationPage = lazy(() => import("./routes/VisualizationPage"));
 const CompareViewerPage = lazy(() => import("./routes/CompareViewerPage"));
 const UploadPage = lazy(() => import("./routes/UploadPage"));
 const LiveRoomPage = lazy(() => import("./liveRooms/LiveRoomPage"));
+const SoloChallengePage = lazy(() => import("./education/SoloChallengePage"));
 const RotatingHeartLoader = lazy(() => import("./components/Loading"));
 
 const BASENAME = import.meta.env.VITE_BASENAME;
@@ -62,6 +63,7 @@ function App() {
 								{/* <Route path="/:type/:page" element={<Homepage />} /> */}
 								<Route path="/case/:caseId" element={<VisualizationPage />} />
 								<Route path="/live/:roomId" element={<LiveRoomPage />} />
+								<Route path="/live/challenge/:challengeId" element={<SoloChallengePage />} />
 								<Route path="/session/:sessionId" element={<VisualizationPage />} />
 								{/* Local DICOM series picked on the Upload page (files held in memory). */}
 								<Route path="/dicom" element={<VisualizationPage />} />
