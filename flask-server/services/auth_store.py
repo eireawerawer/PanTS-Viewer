@@ -18,6 +18,7 @@ from sqlalchemy import select
 from models.auth_session import AuthSession
 from models.engine import session_scope
 from models.job import utcnow
+from models.oauth_identity import OAuthIdentity
 from models.user import SYSTEM_USER_EMAIL, SYSTEM_USER_ID, User
 
 _ph = PasswordHasher()
@@ -27,6 +28,16 @@ SESSION_TTL_DAYS = 14
 
 class EmailTakenError(Exception):
     """Raised when registering an email that already has an account."""
+
+
+class OAuthLinkRefusedError(Exception):
+    """Raised when an OAuth login can't be safely linked to an existing account.
+
+    Happens when the provider reports an email that already belongs to a local
+    account but hasn't proven the user owns it (email_verified false). Linking
+    anyway would let anyone who can set that address at the provider take over
+    the existing account, so we refuse and tell them to sign in with a password.
+    """
 
 
 def _normalize_email(email: str) -> str:
@@ -101,6 +112,83 @@ def authenticate(email: str, password: str) -> dict | None:
 # A precomputed hash of a random string, used so authenticate() spends the same
 # time on unknown emails as on real ones (mitigates user-enumeration timing).
 _DUMMY_HASH = _ph.hash("bodymaps-dummy-password-for-timing")
+
+
+# ---- OAuth identities -----------------------------------------------------
+
+def upsert_oauth_user(provider: str, provider_user_id: str, email: str,
+                      email_verified: bool) -> dict:
+    """Resolve an OAuth login to a user, creating or linking as needed.
+
+    Lookup order matters for security:
+      1. By (provider, provider_user_id) — the provider's stable subject id. If
+         we've seen this identity before, that's the account, full stop. Email
+         is never used to identify a returning user (it can change upstream).
+      2. Else by email, to link a first-time OAuth login to an existing local
+         account — but ONLY when the provider says the email is verified.
+         Unverified + existing account => refuse (OAuthLinkRefusedError), since
+         an attacker could otherwise claim an account by setting its address as
+         an unverified email at the provider.
+      3. Else create a brand-new account (no password; OAuth-only).
+    """
+    email = _normalize_email(email)
+    provider_user_id = str(provider_user_id or "").strip()
+    if not provider or not provider_user_id:
+        raise ValueError("provider and provider_user_id are required")
+
+    with session_scope() as s:
+        # 1. Known identity -> that user.
+        identity = s.execute(
+            select(OAuthIdentity).where(
+                OAuthIdentity.provider == provider,
+                OAuthIdentity.provider_user_id == provider_user_id,
+            )
+        ).scalar_one_or_none()
+        if identity is not None:
+            user = s.get(User, identity.user_id)
+            if user is not None and not user.is_system:
+                return user.to_public_dict()
+
+        # 2. Existing local account with this email -> link only if verified.
+        existing = None
+        if email:
+            existing = s.execute(select(User).where(User.email == email)).scalar_one_or_none()
+        if existing is not None:
+            if existing.is_system:
+                raise OAuthLinkRefusedError("That email can't be used for sign-in.")
+            if not email_verified:
+                raise OAuthLinkRefusedError(
+                    "An account with that email already exists. Sign in with your "
+                    "password first, then link this provider."
+                )
+            s.add(OAuthIdentity(
+                id=str(uuid.uuid4()), user_id=existing.id, provider=provider,
+                provider_user_id=provider_user_id, email=email or existing.email,
+            ))
+            # The provider vouched for the address, so mark it verified locally.
+            if existing.email_verified_at is None:
+                existing.email_verified_at = utcnow()
+            s.flush()
+            return existing.to_public_dict()
+
+        # 3. New OAuth-only account (no password hash).
+        if not email:
+            raise OAuthLinkRefusedError(
+                "Your provider didn't share an email address, which we need to "
+                "create an account."
+            )
+        user = User(
+            id=str(uuid.uuid4()), email=email, password_hash=None,
+            email_verified_at=utcnow() if email_verified else None,
+        )
+        s.add(user)
+        s.flush()
+        s.add(OAuthIdentity(
+            id=str(uuid.uuid4()), user_id=user.id, provider=provider,
+            provider_user_id=provider_user_id, email=email,
+        ))
+        s.flush()
+        return user.to_public_dict()
 
 
 # ---- sessions -------------------------------------------------------------

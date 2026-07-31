@@ -36,6 +36,7 @@ def _set_sqlite_pragmas(dbapi_conn, _record):
 from models import job as _job  # noqa: F401,E402
 from models import user as _user  # noqa: F401,E402
 from models import auth_session as _auth_session  # noqa: F401,E402
+from models import oauth_identity as _oauth_identity  # noqa: F401,E402
 
 _engine = None
 _SessionLocal = None

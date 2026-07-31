@@ -14,6 +14,7 @@ from constants import Constants
 
 from api.api_blueprint import api_blueprint
 from api.auth_blueprint import auth_blueprint
+from api.oauth_blueprint import init_oauth, oauth_blueprint
 from models.base import db
 from models.combined_labels import CombinedLabels
 from models.engine import get_engine
@@ -29,8 +30,24 @@ def create_app():
     app = Flask(__name__)
     app.register_blueprint(api_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(auth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
+    app.register_blueprint(oauth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
 
     app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB, for overcoming size limits in file uploads
+
+    # Signs the Flask session cookie, which Authlib uses to carry the OAuth
+    # `state` (CSRF) between the redirect and the callback. In production this
+    # MUST be a fixed secret from the environment — a random per-boot value
+    # would invalidate every in-flight OAuth login on restart.
+    secret = os.environ.get("SECRET_KEY")
+    if not secret:
+        secret = os.urandom(32).hex()
+        print("[boot] SECRET_KEY not set — using an ephemeral key (OAuth logins "
+              "in flight will break on restart). Set SECRET_KEY in production.")
+    app.config['SECRET_KEY'] = secret
+
+    # Registers only the OAuth providers whose credentials are configured, so
+    # the app boots fine without them (buttons stay disabled in the UI).
+    init_oauth(app)
 
     # Point Flask-SQLAlchemy at the same URL as the job store. FSA builds its own
     # engine, but both get identical SQLite PRAGMAs from the process-wide listener
