@@ -128,6 +128,7 @@ import {
 import {
     computeStatRows,
     downloadStats,
+    KURTOSIS_TOOLTIP,
     summarizeOutOfRange,
     type OrganMetric,
 } from "../helpers/organStatsExport";
@@ -2903,7 +2904,9 @@ const aiAvailableOrgans = useMemo(() => {
 														<span>{fmtStat(r.skewness, 2)}</span>
 													</div>
 													<div className="vp-stats__detail-item">
-														<span>Kurtosis</span>
+														<span className="vp-stats__tooltip-label" title={KURTOSIS_TOOLTIP}>
+														Kurtosis
+													</span>
 														<span>{fmtStat(r.kurtosis, 2)}</span>
 													</div>
 													<div className="vp-stats__detail-item">
