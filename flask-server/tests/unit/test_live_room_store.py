@@ -266,6 +266,7 @@ def test_export_contains_required_artifacts(room_store):
 
 
 def test_restart_replays_event_after_stale_snapshot_files(room_store):
+    _, clock = room_store
     store, metadata, key = create(room_store)
     commit_chat(store, metadata["room_id"], key, 7)
     room_dir = store.root / metadata["room_id"]
@@ -277,7 +278,7 @@ def test_restart_replays_event_after_stale_snapshot_files(room_store):
     }))
     with (room_dir / "events.jsonl").open("a") as stream:
         stream.write('{"seq":2')
-    restarted = LiveRoomStore(store.root.parent, store.pants_path)
+    restarted = LiveRoomStore(store.root.parent, store.pants_path, now=clock)
     snapshot = restarted.get_snapshot(metadata["room_id"], key)
     assert snapshot["latest_seq"] == 1
     assert snapshot["state"]["chat"][0]["text"] == "message 7"

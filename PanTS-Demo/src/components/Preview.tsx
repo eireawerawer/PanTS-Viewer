@@ -1,11 +1,13 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { API_BASE } from "../helpers/constants";
 import { prefetchViewer } from "../helpers/prefetchViewer";
+import { prefetchVolume } from "../helpers/prefetchVolume";
+import type { CaseId } from "../helpers/search";
 import type { PreviewType } from "../types";
 
 type Props = {
-	id: number;
+	id: CaseId;
 	previewMetadata: PreviewType;
 	saved?: boolean;
 	onToggleSave?: () => void;
@@ -25,6 +27,9 @@ export default function Preview({
 	const [imgLoaded, setImgLoaded] = useState(false);
 	const [imgError, setImgError] = useState(false);
 	const [hovered, setHovered] = useState(false);
+	// Warm the low-res CT only after a short hover dwell, so skimming across the grid
+	// doesn't fire a fetch per card. Cleared on mouse-leave.
+	const prefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	// Prefer the lab's local data via the existing backend endpoint; fall back to
 	// the HuggingFace dataset if the local profile image isn't available on the
 	// server (so thumbnails never break regardless of deployment). Loaded natively
@@ -35,7 +40,11 @@ export default function Preview({
 
 	if (!previewMetadata) return null;
 
-	const caseIdStr = `PanTS_${id.toString().padStart(8, "0")}`;
+	// CancerVerse ids arrive as full strings ("CV_00000001"); PanTS as bare numbers.
+	const caseIdStr =
+		typeof id === "string" && id.toUpperCase().startsWith("CV")
+			? id
+			: `PanTS_${id.toString().padStart(8, "0")}`;
 	// HuggingFace fallback, routed through the backend's same-origin proxy. A *direct*
 	// cross-origin image is blocked by the viewer's COEP: require-corp header (which is
 	// why thumbnails went missing); the proxy keeps it same-origin, matching home.html.
@@ -65,8 +74,17 @@ export default function Preview({
 			onMouseEnter={() => {
 				setHovered(true);
 				prefetchViewer(); // warm the viewer JS chunk so clicking feels instant
+				// warm the low-res CT too, after a brief dwell (see prefetchVolume)
+				if (prefetchTimer.current) clearTimeout(prefetchTimer.current);
+				prefetchTimer.current = setTimeout(() => prefetchVolume(id), 150);
 			}}
-			onMouseLeave={() => setHovered(false)}
+			onMouseLeave={() => {
+				setHovered(false);
+				if (prefetchTimer.current) {
+					clearTimeout(prefetchTimer.current);
+					prefetchTimer.current = null;
+				}
+			}}
 			onClick={() => navigate(`/case/${id}`)}
 		>
 			{/* Gradient accent line — slides in on hover */}
@@ -93,8 +111,9 @@ export default function Preview({
 						decoding="async"
 						onLoad={() => setImgLoaded(true)}
 						onError={handleImgError}
-						className="w-full h-full object-cover"
+						className="w-full h-full object-contain object-center"
 						style={{
+							objectPosition: "center",
 							opacity: imgLoaded ? (hovered ? 1 : 0.97) : 0,
 							transform: hovered ? "scale(1.05)" : "scale(1)",
 							transition: "opacity 0.4s, transform 0.5s",

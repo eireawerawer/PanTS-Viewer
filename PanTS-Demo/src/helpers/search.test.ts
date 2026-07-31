@@ -23,6 +23,11 @@ describe("itemToId", () => {
 		expect(itemToId({})).toBe(0);
 		expect(itemToId({ case_id: "no-digits-here" })).toBe(0);
 	});
+
+	it("keeps CancerVerse ids as the full prefixed string (not a stripped number)", () => {
+		expect(itemToId({ case_id: "CV_00000001" })).toBe("CV_00000001");
+		expect(itemToId({ "PanTS ID": "CV_00012345" })).toBe("CV_00012345");
+	});
 });
 
 describe("buildSearchParams", () => {
@@ -64,12 +69,22 @@ describe("buildSearchParams", () => {
 		expect(params.get("sort_by")).toBe("quality");
 		expect(params.get("per_page")).toBe("12");
 	});
+
+	it("maps the dataset selection to ?dataset= (empty/both = all)", () => {
+		expect(buildSearchParams(base).get("dataset")).toBe("all"); // none selected
+		expect(buildSearchParams({ ...base, dataset: ["PanTS"] }).get("dataset")).toBe("pants");
+		expect(buildSearchParams({ ...base, dataset: ["CancerVerse"] }).get("dataset")).toBe("cancerverse");
+		expect(
+			buildSearchParams({ ...base, dataset: ["PanTS", "CancerVerse"] }).get("dataset")
+		).toBe("all");
+	});
 });
 
 describe("parseFiltersFromParams", () => {
 	it("round-trips filters through the URL query string", () => {
 		const filters: SearchFilters = {
 			tumor: "tumor",
+			dataset: ["CancerVerse"],
 			sex: ["F"],
 			age: ["50-59"],
 			manufacturer: ["GE"],

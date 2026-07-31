@@ -3,6 +3,8 @@ from flask import Blueprint, send_file, make_response, request, jsonify
 from services.nifti_processor import NiftiProcessor
 from services.session_manager import SessionManager, generate_uuid
 from services.auto_segmentor import run_auto_segmentation
+from services.manufacturer_normalization import canonicalize_manufacturer
+from services.site_normalization import split_site_codes
 from models.application_session import ApplicationSession
 from models.combined_labels import CombinedLabels
 from models.base import db
@@ -53,8 +55,53 @@ def get_panTS_id(index):
     iter = max(0, 8 - len(index_str))
     for _ in range(iter):
         cur_case_id = "0" + cur_case_id
-    cur_case_id = "PanTS_" + cur_case_id    
+    cur_case_id = "PanTS_" + cur_case_id
     return cur_case_id
+
+def get_cancerverse_id(index):
+    """CV_%08d id from a numeric index (accepts an optional 'CV_' prefix)."""
+    index_str = re.sub(r"^CV_?", "", str(index).strip(), flags=re.IGNORECASE)
+    if not re.fullmatch(r"\d+", index_str):
+        raise ValueError("Invalid case id: numeric value expected")
+    return "CV_" + index_str.zfill(8)
+
+def get_dataset_from_case_id(case_str):
+    """Dispatch on the id prefix: 'CancerVerse' for CV ids, else 'PanTS'."""
+    return "CancerVerse" if str(case_str).strip().upper().startswith("CV") else "PanTS"
+
+def get_folder_id(case_id):
+    """Canonical on-disk folder id for either dataset from an incoming request id."""
+    if get_dataset_from_case_id(case_id) == "CancerVerse":
+        return get_cancerverse_id(case_id)
+    return get_panTS_id(case_id)
+
+def get_case_nifti_paths(case_id):
+    """Resolve the CT / mask / low-res paths for a case, dispatching on dataset.
+
+    CancerVerse is CT-only (no masks yet), so ``mask`` is None and
+    ``masks_available`` is False for CV cases.
+    """
+    dataset = get_dataset_from_case_id(case_id)
+    if dataset == "CancerVerse":
+        folder = get_cancerverse_id(case_id)
+        return {
+            "dataset": dataset,
+            "folder_id": folder,
+            "image": f"{Constants.CANCERVERSE_PATH}/{folder}/{Constants.MAIN_NIFTI_FILENAME}",
+            "lowres_image": f"{Constants.CANCERVERSE_LOWRES_PATH}/image_only/{folder}/ct_lowres.nii.gz",
+            "mask": None,
+            "masks_available": False,
+        }
+    folder = get_panTS_id(case_id)
+    pants_lowres = os.environ.get("PANTS_LOWRES_PATH", "/home/visitor/pants_lowres")
+    return {
+        "dataset": dataset,
+        "folder_id": folder,
+        "image": f"{Constants.PANTS_PATH}/image_only/{folder}/{Constants.MAIN_NIFTI_FILENAME}",
+        "lowres_image": f"{pants_lowres}/image_only/{folder}/ct_lowres.nii.gz",
+        "mask": f"{Constants.PANTS_PATH}/mask_only/{folder}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}",
+        "masks_available": True,
+    }
 
 def clean_nan(obj):
     """Recursively replace NaN with None for JSON serialization."""
@@ -972,7 +1019,7 @@ def _norm_cols(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.copy()
 
     # ---- Case ID ----
-    case_cols = ["PanTS ID", "PanTS_ID", "case_id", "id", "case", "CaseID"]
+    case_cols = ["PanTS ID", "PanTS_ID", "CancerVerse ID", "case_id", "id", "case", "CaseID"]
     def _first_nonempty(row, cols):
         for c in cols:
             if c in row.index and pd.notna(row[c]) and str(row[c]).strip():
@@ -1039,7 +1086,7 @@ def _norm_cols(df_raw: pd.DataFrame) -> pd.DataFrame:
         keyword_sets=[["manufactur"],["vendor"],["brand"],["maker"]],
     )
     if mfr_col:
-        df["__mfr"] = df[mfr_col].astype(str).str.strip()
+        df["__mfr"] = df[mfr_col].map(canonicalize_manufacturer)
         df["__mfr_lc"] = df["__mfr"].str.lower()
         df["_orig_cols"] = [{**(df["_orig_cols"].iat[i] or {}), "manufacturer": mfr_col} for i in range(len(df))]
     else:
@@ -1117,6 +1164,7 @@ def _norm_cols(df_raw: pd.DataFrame) -> pd.DataFrame:
     )
     if sn_col:
         df["site_nationality"] = df[sn_col].astype(str)
+        df["__sn_tokens"] = df["site_nationality"].map(split_site_codes)
         df["__sn_lc"] = df["site_nationality"].astype(str).str.strip().str.lower()
         df["_orig_cols"] = [
             {**(df["_orig_cols"].iat[i] or {}), "site_nationality": sn_col}
@@ -1124,6 +1172,7 @@ def _norm_cols(df_raw: pd.DataFrame) -> pd.DataFrame:
         ]
     else:
         df["site_nationality"] = ""
+        df["__sn_tokens"] = [()] * len(df)
         df["__sn_lc"] = ""
 
     return df
@@ -1189,6 +1238,17 @@ def _shape_sum(row) -> Optional[float]:
     if any(v is None for v in vals): return None
     return float(vals[0] + vals[1] + vals[2])
 
+def _tuple_product(row, name_candidates: List[str]) -> Optional[float]:
+    vals = _parse_3tuple_from_row(row, name_candidates)
+    if any(v is None or v <= 0 for v in vals): return None
+    return float(vals[0] * vals[1] * vals[2])
+
+def _voxel_count(row) -> Optional[float]:
+    return _tuple_product(row, ["shape","dim","size","image_shape","resolution"])
+
+def _spacing_volume(row) -> Optional[float]:
+    return _tuple_product(row, ["spacing","voxel_spacing","voxel_size","pixel_spacing"])
+
 def ensure_sort_cols(df: pd.DataFrame) -> pd.DataFrame:
     if "__case_sortkey" not in df.columns:
         df["__case_sortkey"] = df.apply(_case_key, axis=1)
@@ -1196,8 +1256,12 @@ def ensure_sort_cols(df: pd.DataFrame) -> pd.DataFrame:
         df["__spacing_sum"] = df.apply(_spacing_sum, axis=1)
     if "__shape_sum" not in df.columns:
         df["__shape_sum"] = df.apply(_shape_sum, axis=1)
+    if "__voxel_count" not in df.columns:
+        df["__voxel_count"] = df.apply(_voxel_count, axis=1)
+    if "__spacing_volume" not in df.columns:
+        df["__spacing_volume"] = df.apply(_spacing_volume, axis=1)
 
-    # 完整度：Browse 與 top 排序會用到
+    # Completeness remains useful to keep shuffle candidates fully described.
     need_cols = ["__spacing_sum", "__shape_sum", "__sex", "__age"]
     complete = pd.Series(True, index=df.index)
     for c in need_cols:
@@ -1215,6 +1279,37 @@ if not os.path.exists(META_FILE):
     raise FileNotFoundError(f"metadata not found: {META_FILE}")
 DF_RAW = pd.read_excel(META_FILE)
 DF = _norm_cols(DF_RAW)
+
+# CancerVerse metadata (CT-only second dataset). Loaded through the SAME _norm_cols
+# so search/sort/row_to_item work unchanged. Optional: if the path/CSV is absent
+# (e.g. local dev) DF_CV stays None and CV search returns empty — never raises.
+# The CSV sits NEXT TO the CancerVerse image folder, not inside it:
+#   <parent>/CancerVerse_dataset_metadata.csv   +   <parent>/CancerVerse/CV_########/
+CANCERVERSE_META_FILE = (
+    os.path.join(os.path.dirname(os.path.normpath(Constants.CANCERVERSE_PATH)),
+                 "CancerVerse_dataset_metadata.csv")
+    if Constants.CANCERVERSE_PATH else None
+)
+DF_CV = None
+if CANCERVERSE_META_FILE and os.path.exists(CANCERVERSE_META_FILE):
+    try:
+        DF_CV = _norm_cols(pd.read_csv(CANCERVERSE_META_FILE))
+    except Exception as _cv_err:
+        print(f"[WARN] Could not load CancerVerse metadata: {_cv_err}")
+        DF_CV = None
+
+def select_dataset_df() -> pd.DataFrame:
+    """Pick the base DataFrame for search by the ?dataset= query param.
+
+    'pants' (default) → PanTS only (unchanged behaviour); 'cancerverse'/'cv' → CV;
+    'all'/'both' → union of both. Falls back to PanTS when CV isn't loaded.
+    """
+    ds = (request.args.get("dataset") or "").strip().lower()
+    if ds in ("cancerverse", "cv"):
+        return DF_CV if DF_CV is not None else DF.iloc[0:0]
+    if ds in ("all", "both"):
+        return pd.concat([DF, DF_CV], ignore_index=True) if DF_CV is not None else DF
+    return DF
 
 def apply_filters(base: pd.DataFrame, exclude: Optional[Set[str]] = None) -> pd.DataFrame:
     exclude = exclude or set()
@@ -1322,7 +1417,8 @@ def apply_filters(base: pd.DataFrame, exclude: Optional[Set[str]] = None) -> pd.
     if m_raw and not m_list:
         m_list = [p.strip() for p in m_raw.split(",") if p.strip()]
     if m_list and "__mfr_lc" in df.columns:
-        m_lc = [s.lower() for s in m_list]
+        m_lc = [canonicalize_manufacturer(value) for value in m_list]
+        m_lc = [value.lower() for value in m_lc if value]
         df = df[df["__mfr_lc"].isin(m_lc)]
 
     # --- Model（canonical；可 fuzzy）---
@@ -1355,10 +1451,18 @@ def apply_filters(base: pd.DataFrame, exclude: Optional[Set[str]] = None) -> pd.
     nat_raw = (_arg("site_nationality", "") or _arg("site_nat", "") or "").strip()
     if nat_raw and not nat_list:
         nat_list = [p.strip() for p in re.split(r"[;,/|]+", nat_raw) if p.strip()]
-    if nat_list and "__sn_lc" in df.columns and "site_nationality" not in exclude:
-        parts = [p.lower() for p in nat_list]
-        patt = "|".join(re.escape(p) for p in parts)
-        df = df[df["__sn_lc"].str.contains(patt, na=False)]
+    if nat_list and "__sn_tokens" in df.columns and "site_nationality" not in exclude:
+        wanted_codes = {
+            code
+            for value in nat_list
+            for code in split_site_codes(value)
+        }
+        if wanted_codes:
+            df = df[
+                df["__sn_tokens"].map(
+                    lambda codes: bool(wanted_codes.intersection(codes))
+                )
+            ]
 
     # --- Year（新增）---
     # 支援 year / year[]（多選精確）、year_from / year_to（範圍）與 year_is_null（Unknown）

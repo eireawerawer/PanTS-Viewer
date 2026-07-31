@@ -139,20 +139,7 @@
   background-color: #333;
 }
 
-:root {
-  --vp-bg: #08090b;
-  --vp-panel: rgba(255, 255, 255, 0.045);
-  --vp-panel-strong: rgba(255, 255, 255, 0.07);
-  --vp-border: rgba(255, 255, 255, 0.09);
-  --vp-border-strong: rgba(255, 255, 255, 0.16);
-  --vp-text: rgba(255, 255, 255, 0.92);
-  --vp-text-dim: rgba(255, 255, 255, 0.5);
-  --vp-text-faint: rgba(255, 255, 255, 0.36);
-  --vp-hover: rgba(255, 255, 255, 0.1);
-  --vp-accent: #6ea8fe;
-  --vp-font: "Space Grotesk", system-ui, sans-serif;
-  --vp-mono: "JetBrains Mono", ui-monospace, monospace;
-}
+/* --vp-* tokens are defined in src/index.css (:root) */
 
 /* ---- Floating control surface (the toggleable sidebar) ---- */
 .vp-sidebar {

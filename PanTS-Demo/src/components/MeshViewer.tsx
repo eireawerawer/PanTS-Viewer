@@ -6,6 +6,9 @@ import { cornerstoneLpsMmToThree, type Vec3 } from "../helpers/utils";
 import type { MeshManifest } from "../types";
 import { OrganMesh } from "./OrganMesh";
 import { SceneCrosshair3D } from "./SceneCrosshair3D";
+import type { Color } from "@cornerstonejs/core/types";
+import { LiveSegmentMesh } from "./LiveSegmentMesh";
+import type { CheckBoxData } from "../types";
 
 type SegmentationMeshViewerProps = {
   caseId: string;
@@ -13,6 +16,8 @@ type SegmentationMeshViewerProps = {
   checkState: boolean[];
   opacity: number;
   crosshairMm: Vec3 | null
+  customOrgans?: CheckBoxData[];
+  labelColorMap?: { [key: number]: Color };
 };
 
 
@@ -36,7 +41,7 @@ async function fetchMeshManifest(caseId: string): Promise<MeshManifest> {
   return manifest as MeshManifest;
 }
 
-export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm }: SegmentationMeshViewerProps) {
+export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}}: SegmentationMeshViewerProps) {
   const [manifest, setManifest] = useState<MeshManifest | null>(null);
   const [loaded, setLoaded] = useState<Record<number, boolean>>({});
   const [unavailable, setUnavailable] = useState(false);
@@ -118,9 +123,19 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
                     />
                   );
                 })}
+                {customOrgans.map((organ) => (
+                  <LiveSegmentMesh
+                    key={organ.id}
+                    segmentIndex={organ.id}
+                    color={labelColorMap[organ.id] ?? [255, 255, 255, 255]}
+                    visible={!!checkState[organ.id]}
+                    opacity={opacity / 100}
+                    manifestCenter={manifest.center as [number, number, number]}
+                  />
+                ))}
               </group>
             </Bounds>
-              {crosshairPosition && (
+              {crosshairPosition && manifest.bounds &&(
                 <SceneCrosshair3D
                   position={crosshairPosition}
                   bounds={manifest.bounds}

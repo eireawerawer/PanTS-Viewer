@@ -1,9 +1,13 @@
 import { cache, init as coreInit, utilities as csCoreUtils, Enums, eventTarget, getRenderingEngine, imageLoader, metaData, RenderingEngine, setVolumesForViewports, volumeLoader } from "@cornerstonejs/core";
-import type { ColorLUT, Point2, Point3 } from "@cornerstonejs/core/types";
+import type { ColorLUT, Point2, Point3, Color } from "@cornerstonejs/core/types";
 import { cornerstoneNiftiImageLoader, createNiftiImageIdsAndCacheMetadata, init as niftiImageLoaderInit } from "@cornerstonejs/nifti-volume-loader";
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import { init as cornerstoneToolsInit } from '@cornerstonejs/tools';
 import { SegmentationRepresentations } from "@cornerstonejs/tools/enums";
+import { NEW_CLASS_PALETTE } from "./constants";
+import vtkImageData from "@kitware/vtk.js/Common/DataModel/ImageData";
+import vtkDataArray from "@kitware/vtk.js/Common/Core/DataArray";
+import vtkImageMarchingCubes from "@kitware/vtk.js/Filters/General/ImageMarchingCubes";
 
 type viewportIdTypes = 'CT_NIFTI_AXIAL' | 'CT_NIFTI_SAGITTAL' | 'CT_NIFTI_CORONAL';
 
@@ -128,6 +132,8 @@ let currentRenderingEngine: RenderingEngine | null = null;
 // the segmentation representation can be rebuilt after a volume swap.
 let _currentCtVolumeId: string | null = null;
 let _lastColorLUT: ColorLUT | null = null;
+// User-created segment labels, reset on each case load.
+let _customSegmentLabels: Record<number, string> = {};
 
 let _crosshairChangeCallbacks = new Set<(mm: number[]) => void>();
 let _isSyncing = false;
@@ -300,6 +306,7 @@ export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivEle
         _cornerstoneInited = true;
     }
     _organCentroids = null; // recomputed lazily for the new case's segmentation
+    _customSegmentLabels = {};
 
     const mainNiftiURL = ctUrl;
     const segmentationURL = segUrl;
@@ -694,6 +701,110 @@ export function setActiveEditSegment(segmentIndex: number) {
     /* segmentation not loaded yet */
   }
 }
+// Picks a color for a brand-new segment index by cycling through the NEW_CLASS_PALETTE.
+export function colorForNewClass(segmentIndex: number): Color {
+  return NEW_CLASS_PALETTE[(segmentIndex - 1) % NEW_CLASS_PALETTE.length];
+}
+
+export function getCustomSegmentLabels(): Readonly<Record<number, string>> {
+  return _customSegmentLabels;
+}
+
+export type CustomLabelEntry = { name: string; color: Color };
+
+// Snapshot of every custom class's name + color, keyed by segment index.
+export function getCustomSegmentLabelsForExport(): Record<number, CustomLabelEntry> {
+  const out: Record<number, CustomLabelEntry> = {};
+  for (const [idxStr, name] of Object.entries(_customSegmentLabels)) {
+    const idx = Number(idxStr);
+    const color = _lastColorLUT?.[idx];
+    if (color) out[idx] = { name, color: [...color] as Color };
+  }
+  return out;
+}
+
+
+function _ensureColorLutSlot(segmentIndex: number, color: Color) {
+  if (!_lastColorLUT) return;
+  while (_lastColorLUT.length <= segmentIndex) {
+    _lastColorLUT.push([0, 0, 0, 0]);
+  }
+  _lastColorLUT[segmentIndex] = [...color] as Color;
+}
+
+// Register a colour for a segment index on every MPR viewport and keep the cached LUT
+// in sync so exports / rebuilds pick it up.
+export function registerNewSegmentColor(segmentIndex: number, color: Color) {
+  _ensureColorLutSlot(segmentIndex, color);
+  for (const viewportId of MPR_VIEWPORT_IDS) {
+    try {
+      segmentation.config.color.setSegmentIndexColor(
+        viewportId,
+        segmentationId,
+        segmentIndex,
+        color
+      );
+    } catch {
+      // viewport not yet initialised 
+    }
+  }
+  if (currentRenderingEngine) {
+    currentRenderingEngine.renderViewports([...MPR_VIEWPORT_IDS]);
+    currentRenderingEngine.render();
+  }
+}
+
+function _getNextAvailableSegmentIndex(): number {
+  let max = 0;
+  for (const idx of Object.keys(_customSegmentLabels)) {
+    max = Math.max(max, Number(idx));
+  }
+  if (_lastColorLUT) {
+    max = Math.max(max, _lastColorLUT.length - 1);
+  }
+  const volume = cache.getVolume(segmentationId);
+  const data = volume?.voxelManager?.getCompleteScalarDataArray?.();
+  if (data) {
+    for (let i = 0; i < data.length; i++) {
+      const v = data[i];
+      if (typeof v === "number") max = Math.max(max, v);
+    }
+  }
+  return max + 1;
+}
+
+// Create a new labelmap class the brush can paint. Returns null if no segmentation is loaded.
+export function createNewAnnotationClass(
+  name: string,
+  color?: Color
+): { segmentIndex: number; color: Color } | null {
+  if (!hasSegmentation()) return null;
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+
+  const segmentIndex = _getNextAvailableSegmentIndex();
+  const assignedColor = color ?? colorForNewClass(segmentIndex);
+
+  registerNewSegmentColor(segmentIndex, assignedColor);
+  _customSegmentLabels[segmentIndex] = trimmed;
+
+  for (const viewportId of MPR_VIEWPORT_IDS) {
+    try {
+      segmentation.config.visibility.setSegmentIndexVisibility(
+        viewportId,
+        { segmentationId, type: csToolsEnums.SegmentationRepresentations.Labelmap },
+        segmentIndex,
+        true
+      );
+    } catch {
+      //viewport not yet initialised
+    }
+  }
+
+  setActiveEditSegment(segmentIndex);
+  return { segmentIndex, color: assignedColor };
+}
+
 
 // Brush radius in world mm (applies to both the brush and eraser instances).
 export function setMaskBrushSize(mm: number) {
@@ -1879,7 +1990,7 @@ export function getOrganLabelAtPoint(pane: CinePane, clientX: number, clientY: n
         return undefined;
     }
 
-    const [i, j, k] = volume.imageData.worldToIndex(world).map((v) => Math.round(v));
+    const [i, j, k] = volume.imageData.worldToIndex(world).map((v: number) => Math.round(v));
     const [dimX, dimY, dimZ] = volume.voxelManager.dimensions;
     if (i < 0 || j < 0 || k < 0 || i >= dimX || j >= dimY || k >= dimZ) return undefined;
     const res = volume.voxelManager.getAtIJK(i, j, k);
@@ -1938,4 +2049,148 @@ export function getOrganCentroids(): Record<number, [number, number, number]> | 
     }
     _organCentroids = out;
     return out;
+}
+
+
+// Live client side mesh extraction for custom classes created during annotation
+// Marching cube runs directly on the in-memory label map (no server involvement)
+
+export type LiveMeshResult = {
+  positions: Float32Array; 
+  indices: Uint32Array;
+};
+
+function _buildBinaryMask(segmentIndex: number): { mask: Uint8Array; dims: [number, number, number] } | null {
+  const volume = cache.getVolume(segmentationId);
+  const vm = volume?.voxelManager;
+  if (!volume || !vm) return null;
+  let data: ArrayLike<number> | undefined;
+  try {
+    data = vm.getCompleteScalarDataArray?.();
+  } catch {
+    return null;
+  }
+  if (!data || !data.length) return null;
+  const mask = new Uint8Array(data.length);
+  for (let i = 0; i < data.length; i++) mask[i] = data[i] === segmentIndex ? 1 : 0;
+  return { mask, dims: vm.dimensions as [number, number, number] };
+}
+
+function _padVolume(mask: Uint8Array, dims: [number, number, number]) {
+  const [nx, ny, nz] = dims;
+  const pnx = nx + 2, pny = ny + 2, pnz = nz + 2;
+  const padded = new Uint8Array(pnx * pny * pnz);
+  for (let k = 0; k < nz; k++) {
+    for (let j = 0; j < ny; j++) {
+      for (let i = 0; i < nx; i++) {
+        const src = i + j * nx + k * nx * ny;
+        if (!mask[src]) continue;
+        const dst = (i + 1) + (j + 1) * pnx + (k + 1) * pnx * pny;
+        padded[dst] = 1;
+      }
+    }
+  }
+  return { padded, pdims: [pnx, pny, pnz] as [number, number, number] };
+}
+
+function _runMarchingCubes(padded: Uint8Array, pdims: [number, number, number]) {
+  const imageData = vtkImageData.newInstance();
+  imageData.setDimensions(pdims as unknown as [number, number, number]);
+  imageData.setSpacing([1, 1, 1]);
+  imageData.setOrigin([0, 0, 0]);
+  const scalars = vtkDataArray.newInstance({
+    name: "scalars",
+    values: padded,
+    numberOfComponents: 1,
+  });
+  imageData.getPointData().setScalars(scalars);
+
+  const mc = vtkImageMarchingCubes.newInstance({ contourValue: 0.5, computeNormals: false, mergePoints: false });
+  mc.setInputData(imageData);
+  const output = mc.getOutputData();
+  const points = output.getPoints().getData() as Float32Array;
+  const polys = output.getPolys().getData() as Uint32Array;
+  return { points, polys };
+}
+
+function _vtkPolysToIndices(polys: Uint32Array): Uint32Array {
+  const indices: number[] = [];
+  let p = 0;
+  while (p < polys.length) {
+    const n = polys[p++];
+    for (let c = 0; c < n; c++) indices.push(polys[p++]);
+  }
+  return new Uint32Array(indices);
+}
+
+
+function _transformVertices(
+  points: Float32Array,
+  origin: number[],
+  spacing: number[],
+  direction: number[],
+  manifestCenter: [number, number, number]
+): Float32Array {
+  const out = new Float32Array(points.length);
+  const flip = [-1, -1, 1];
+
+  for (let v = 0; v < points.length; v += 3) {
+    const i = points[v] - 1;
+    const j = points[v + 1] - 1;
+    const k = points[v + 2] - 1;
+
+    const lpsX = direction[0] * i * spacing[0] + direction[3] * j * spacing[1] + direction[6] * k * spacing[2] + origin[0];
+    const lpsY = direction[1] * i * spacing[0] + direction[4] * j * spacing[1] + direction[7] * k * spacing[2] + origin[1];
+    const lpsZ = direction[2] * i * spacing[0] + direction[5] * j * spacing[1] + direction[8] * k * spacing[2] + origin[2];
+
+    const rasX = lpsX * flip[0];
+    const rasY = lpsY * flip[1];
+    const rasZ = lpsZ * flip[2];
+
+    const threeX = rasX;
+    const threeY = rasZ;
+    const threeZ = -rasY;
+
+    out[v] = threeX - manifestCenter[0];
+    out[v + 1] = threeY - manifestCenter[1];
+    out[v + 2] = threeZ - manifestCenter[2];
+  }
+  return out;
+}
+
+/**
+ * Extract a live isosurface for one segment index, directly from the currently
+ * loaded labelmap. Returns null if the segment is empty/missing or the
+ * segmentation isn't loaded yet.
+ */
+export function extractSegmentSurface(
+  segmentIndex: number,
+  manifestCenter: [number, number, number]
+): LiveMeshResult | null {
+  const volume = cache.getVolume(segmentationId);
+  if (!volume) return null;
+
+  const built = _buildBinaryMask(segmentIndex);
+  if (!built) return null;
+  const { mask, dims } = built;
+
+  // Nothing painted yet for this class.
+  let any = false;
+  for (let i = 0; i < mask.length; i++) if (mask[i]) { any = true; break; }
+  if (!any) return null;
+
+  const { padded, pdims } = _padVolume(mask, dims);
+  const { points, polys } = _runMarchingCubes(padded, pdims);
+  if (!points.length) return null;
+
+  const positions = _transformVertices(
+    points,
+    volume.origin as number[],
+    volume.spacing as number[],
+    volume.direction as number[],
+    manifestCenter
+  );
+  const indices = _vtkPolysToIndices(polys);
+
+  return { positions, indices };
 }

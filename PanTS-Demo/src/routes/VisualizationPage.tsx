@@ -67,7 +67,8 @@ import {
     captureViewportImages,
     centerOnCursor,
     clearMeasurements,
-    createSegmentationShadow,
+    createNewAnnotationClass,
+	createSegmentationShadow,
     disableVolume3D,
     diffSegmentationFromShadow,
     EDIT_BRUSH,
@@ -78,6 +79,7 @@ import {
     FREEHAND_ROI_TOOL,
     getCrosshairMm,
     getCurrentVolumeModality,
+    getCustomSegmentLabels,
     getMeasurementSummaries,
     getSharedMprView,
     getOrganCentroids,
@@ -125,6 +127,7 @@ import {
 } from "../helpers/CornerstoneNifti2";
 import { getLocalDicomFiles, loadLocalDicomSeries } from "../helpers/dicomLocal";
 import { downloadUrlAsFile } from "../helpers/downloadFile";
+import { loadLocalNiftiAsRawBlobUrl } from "../helpers/localNifti";
 import {
     describeBasis,
     loadOrganNorms,
@@ -233,6 +236,16 @@ const fmtStat = (v: number | null, digits = 0): string => (v === null ? "—" : 
 const colorToCss = (c: Color | undefined): string =>
 	c ? `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${(c[3] ?? 255) / 255})` : "rgba(255, 255, 255, 0.4)";
 
+// Resolves a segment index to a display name for BOTH the static 32 organ
+// catalog and any runtime-created custom classes (segment indices beyond
+// segmentation_categories.length, eg., from "New class" in annotations tool).
+
+const resolveOrganLabel = (idx: number): string | undefined => {
+    const staticName = segmentation_categories[idx - 1];
+    if (staticName) return filenameToName(staticName);
+    return getCustomSegmentLabels()[idx];
+};
+
 const CT_PRESETS = [
 	{ name: "Soft Tissue", width: 400, center: 40 },
 	{ name: "Bone", width: 1800, center: 400 },
@@ -312,12 +325,18 @@ type VisualizationPageProps = {
 function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 	// References and state
 	const params = useParams();
-	const pantsCase = liveRoom?.metadata.case_id ?? params.caseId;
-	const sessionId = liveRoom ? undefined : params.sessionId;
+	const pantsCase = params.caseId;
+	const isCvCase = String(pantsCase ?? "").toUpperCase().startsWith("CV");
+	const sessionId = params.sessionId;
 	// Local DICOM mode (/dicom): a folder of .dcm files picked on the Upload page,
 	// viewed entirely in-browser. No backend case, so no segmentation layer.
 	const routerLocation = useLocation();
-	const isDicom = !liveRoom && routerLocation.pathname === "/dicom";
+	const isDicom = routerLocation.pathname === "/dicom";
+	// Local NIfTI (/local-nifti): a single .nii/.nii.gz picked on the Upload page, viewed
+	// in-browser with no backend case. `isLocal` = either in-browser mode; both are
+	// seg-less, so they share the same "hide segmentation UI, default to 3D volume" behavior.
+	const isLocalNifti = routerLocation.pathname === "/local-nifti";
+	const isLocal = isDicom || isLocalNifti;
 	const [dicomError, setDicomError] = useState<string | null>(null);
 
 	// Where to load the volumes from. Per the maintainer's rule, dataset cases load
@@ -325,7 +344,7 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 	// for big full-body scans than streaming the .nii.gz from HuggingFace). We probe
 	// the local file and only fall back to the public HuggingFace mirror when it isn't
 	// present (e.g. a dev checkout without the image data), so the viewer never breaks.
-	const caseId = isDicom ? "Local DICOM" : pantsCase ?? sessionId ?? "1";
+	const caseId = isLocalNifti ? "Local NIfTI" : isDicom ? "Local DICOM" : pantsCase ?? sessionId ?? "1";
 	const [ctUrl, setCtUrl] = useState<string | null>(null);
 	const [segUrl, setSegUrl] = useState<string | null>(null);
 	// Whether the local volumes exist (enables the HD toggle). Dataset cases default to
@@ -338,21 +357,17 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 	useEffect(() => {
 		let cancelled = false;
 		const resolveSources = async () => {
-			if (isDicom) return; // local files, not URLs — the setup effect handles them
-			if (liveRoom) {
-				const resParam = liveRoom.metadata.resolution === "low" ? "?res=low" : "";
-				setLocalAvailable(true);
-				setCtUrl(`${API_BASE}/api/get-main-nifti/${liveRoom.metadata.case_id}.nii.gz${resParam}`);
-				setSegUrl(liveRoom.maskUrl);
-				return;
-			}
+			if (isLocal) return; // local files, not URLs — the setup effect handles them
 			if (sessionId) {
 				setCtUrl(`${API_BASE}/api/session-ct/${sessionId}`);
 				setSegUrl(`${API_BASE}/api/session-segmentation/${sessionId}`);
 				return;
 			}
 			const id = pantsCase ?? "1";
-			const p = getPanTSId(id);
+			const isCvCase = String(id).toUpperCase().startsWith("CV");
+			// getPanTSId produces a garbage value for CV ids, but it's only used in the HF
+			// fallback URLs which are never reached for CV (CT is always on the JHU server).
+			const p = isCvCase ? "" : getPanTSId(id);
 			const localCt = `${API_BASE}/api/get-main-nifti/${id}.nii.gz`;
 			const localSeg = `${API_BASE}/api/get-segmentations/${id}.nii.gz`;
 			const hfCt = `https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/image_only/${p}/ct.nii.gz?download=true`;
@@ -366,19 +381,18 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 			// creates avoidable stair-stepping and loses small structures.
 			const resParam = isHd ? "" : "?res=low";
 			setCtUrl(localOk ? `${localCt}${resParam}` : hfCt);
-			setSegUrl(localOk ? localSeg : hfSeg);
+			// CancerVerse cases have no masks yet — /api/get-segmentations returns
+			// {"masks_available": false} (JSON, HTTP 200) which hangs the nifti loader.
+			// Skip the seg URL entirely so the viewer opens CT-only without hanging.
+			if (isCvCase) {
+				setSegUrl(null);
+			} else {
+				setSegUrl(localOk ? `${localSeg}${resParam}` : hfSeg);
+			}
 		};
 		resolveSources();
 		return () => { cancelled = true; };
-	}, [
-		pantsCase,
-		sessionId,
-		isHd,
-		isDicom,
-		liveRoom?.metadata.case_id,
-		liveRoom?.metadata.resolution,
-		liveRoom?.maskUrl,
-	]);
+	}, [pantsCase, sessionId, isHd, isLocal]);
 
 	// Flip between low-res and full-res by reloading the route — a fresh mount cleanly
 	// re-inits the Cornerstone/NiiVue contexts (re-running them in place is fragile).
@@ -470,7 +484,7 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 	const [showOrganDetails, setShowOrganDetails] = useState(false);
 	const [loading, setLoading] = useState(true);
 	const [crosshairMm, setCrosshairMm] = useState<[number, number, number] | null>(null);
-	const [labelColorMap, _setLabelColorMap] = useState<{ [key: number]: Color }>(
+	const [labelColorMap, setLabelColorMap] = useState<{ [key: number]: Color }>(
 		segmentation_category_colors
 	);
 	const [zoomLevel, setZoomLevel] = useState(1);
@@ -514,7 +528,7 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 	useEffect(() => { checkBoxDataRef.current = checkBoxData; }, [checkBoxData]);
 	// 3D pane rendering mode: organ meshes (dataset cases) or shaded GPU volume
 	// rendering of the CT itself (the only 3D option for local DICOM).
-	const [threeDMode, setThreeDMode] = useState<"mesh" | "volume">(isDicom ? "volume" : "mesh");
+	const [threeDMode, setThreeDMode] = useState<"mesh" | "volume">(isLocal ? "volume" : "mesh");
 	const [volumePreset, setVolumePreset] = useState<string>(VOLUME_3D_PRESETS[0].name);
 	// CT presets by default; swapped for the MR set when a local DICOM turns out to be MR.
 	const [volume3DPresets, setVolume3DPresets] = useState<readonly { name: string; label: string }[]>(VOLUME_3D_PRESETS);
@@ -985,14 +999,14 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 	// Only when the local files exist (server disk — fast); the HuggingFace fallback
 	// is already full-res, and ?hd=1 loads full-res up front.
 	useEffect(() => {
-		if (liveRoom || loading || !localAvailable || isHd || isDicom || !pantsCase) return;
+		if (loading || !localAvailable || isHd || isLocal || !pantsCase) return;
 		if (enhanceStartedRef.current) return;
 		// Ref is flipped inside the timer (not here) so StrictMode's double-run —
 		// which clears the first timer — still ends up scheduling exactly one stream.
 		const timer = window.setTimeout(() => { void runEnhance(); }, 1500);
 		return () => window.clearTimeout(timer);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [liveRoom, loading, localAvailable, isHd, isDicom, pantsCase]);
+	}, [loading, localAvailable, isHd, isLocal, pantsCase]);
 
 	// ---- Shaded 3D volume rendering (Volume mode in the 3D pane) -------------------
 
@@ -1127,9 +1141,48 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 				return;
 			}
 
+			// Local NIfTI: load the picked .nii/.nii.gz (decompressed to a blob URL) through
+			// the normal Cornerstone volume path with no segmentation layer. This gives the
+			// full viewer — 3D volume pane and annotation tools — same as a local DICOM.
+			if (isLocalNifti) {
+				if (!axial_ref.current || !sagittal_ref.current || !coronal_ref.current) return;
+				const rawUrl = await loadLocalNiftiAsRawBlobUrl();
+				// StrictMode double-invokes this effect in dev: if this run was already
+				// cleaned up, bail BEFORE renderVisualization — otherwise this (stale) run
+				// would destroy the live run's rendering engine mid-load ("this.destroy()
+				// has been called"). renderVisualization shares one global engine.
+				if (cancelled) return;
+				if (!rawUrl) {
+					// Deep link or reload without a file in memory — go pick one.
+					window.location.href = "/upload";
+					return;
+				}
+				try {
+					const result = await renderVisualization(
+						axial_ref.current,
+						sagittal_ref.current,
+						coronal_ref.current,
+						cmap,
+						rawUrl,
+						undefined,
+						setLoading
+					);
+					if (cancelled) return;
+					setLoading(false);
+					setRenderingEngine(result.renderingEngine);
+					setViewportIds(result.viewportIds);
+					setVolumeId(result.volumeId);
+				} catch (e) {
+					console.error(e);
+					setDicomError(e instanceof Error ? e.message : "Failed to load the NIfTI file.");
+					setLoading(false);
+				}
+				return;
+			}
+
 			if (
 				!ctUrl ||
-				!segUrl ||
+				(!segUrl && !isCvCase) ||   // CV is CT-only; only require seg for non-CV cases
 				!axial_ref.current ||
 				!sagittal_ref.current ||
 				!coronal_ref.current ||
@@ -1145,7 +1198,7 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 				coronal_ref.current,
 				cmap,
 				ctUrl,
-				segUrl,
+				segUrl ?? undefined,
 				setLoading
 			);
 
@@ -1161,6 +1214,7 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 			setRenderingEngine(renderingEngine);
 			setViewportIds(viewportIds);
 			setVolumeId(volumeId);
+
 			// const { nv, cmapCopy } = await create3DVolume(
 			// 	render_ref,
 			// 	segUrl,
@@ -1187,10 +1241,12 @@ function VisualizationPage({ liveRoom }: VisualizationPageProps = {}) {
 		ctUrl,
 		segUrl,
 		isDicom,
+		isLocalNifti,
 		axial_ref,
 		sagittal_ref,
 		coronal_ref,
-		labelColorMap,
+		// labelColorMap intentionally excluded — creating a new class updates
+		// this map and would otherwise retrigger the CT/volume setup effect.
 	]);
 	// Toggle checkbox state
 	//   useEffect(() => {
@@ -1847,6 +1903,14 @@ demographics?.age ?? null
 );
 const flaggedOrgans = useMemo(() => summarizeOutOfRange(statRows), [statRows]);
 
+// Classes created at runtime via "New class" — anything in checkBoxData whose id
+// falls outside the static 32-organ catalog. Fed to OrganCheckbox as a separate
+// section, since the fixed OrganSystems map has no slot for them.
+const customOrgans = useMemo(
+    () => checkBoxData.filter((o) => o.id > segmentation_categories.length),
+    [checkBoxData]
+);
+
 const aiAvailableOrgans = useMemo(() => {
 	const measuredOrgans = (organStats ?? [])
 		.filter((metric) =>
@@ -1874,6 +1938,29 @@ const aiAvailableOrgans = useMemo(() => {
 		}
 	};
 
+	// hex "#rrggbb" convert to Cornerstone's [r,g,b,a] Color (0 to 255)
+	const hexToColor = (hex: string): Color => {
+		const n = parseInt(hex.slice(1), 16);
+		return [(n >> 16) & 255, (n >> 8) & 255, n & 255, 255]; // Isolate red, blue, green, all values
+	};
+
+	const handleCreateClass = (name: string, colorHex: string): CheckBoxData | null => {
+		const result = createNewAnnotationClass(name, hexToColor(colorHex));
+		if (!result) return null;
+	
+		const newOrgan: CheckBoxData = { id: result.segmentIndex, label: name };
+		setCheckBoxData((prev) => [...prev, newOrgan]);
+		setCheckState((prev) => {
+			const next = [...prev];
+			next[result.segmentIndex] = true;
+			return next;
+		});
+		setLabelColorMap((prev) => ({ ...prev, [result.segmentIndex]: result.color }));
+	
+		sessionRef.current?.log("edit", `Created new class "${name}"`, 2000);
+		return newOrgan;
+	};
+
 	const handleMouseClick = async (e: MouseEvent) => {
 		const idx = getOrganLabelOnClick();
 		if (idx === undefined || typeof idx !== "number") {
@@ -1885,7 +1972,7 @@ const aiAvailableOrgans = useMemo(() => {
 			})
 			return;
 		};
-		const label = segmentation_categories[idx - 1];
+		const label = resolveOrganLabel(idx) ?? "Unknown";
 		setToolTip({
 			visible: true,
 			x: e.clientX + 10,
@@ -1915,12 +2002,12 @@ const aiAvailableOrgans = useMemo(() => {
 			setHoverOrganTip((t) => (t.visible ? { ...t, visible: false } : t));
 			return;
 		}
-		const rawLabel = segmentation_categories[idx - 1];
+		const rawLabel = resolveOrganLabel(idx);
 		setHoverOrganTip({
 			visible: true,
 			x: e.clientX + 14,
 			y: e.clientY + 14,
-			text: rawLabel ? filenameToName(rawLabel) : "Unknown",
+			text: rawLabel?? "Unknown",
 			// Same LUT the mask overlay is rendered with, so the swatch/border always
 			// matches the color the organ is actually painted in the pane.
 			color: colorToCss(labelColorMap[idx]),
@@ -2126,7 +2213,7 @@ const aiAvailableOrgans = useMemo(() => {
 									ref={adjustFlyout.menuRef}
 									style={{ position: "fixed", top: adjustFlyout.pos.top, left: adjustFlyout.pos.left }}
 								>
-									{!isDicom && (
+									{!isLocal && (
 										<>
 											<label className="vp-tb-slider" title="Mask fill opacity">
 												<span className="vp-tb-slider__label">Fill</span>
@@ -2434,7 +2521,7 @@ const aiAvailableOrgans = useMemo(() => {
 												<IconArrowForwardUp size={20} color="white" />
 												<span className="vp-tool__tip">Redo (⇧⌘Z)</span>
 											</button>
-											{!isDicom && (
+											{!isLocal && (
 												<button
 												className={`vp-tool ${showEditPanel || editMode ? "vp-tool--active" : ""}`}
 												disabled={collaborationDisabled}
@@ -2510,7 +2597,7 @@ const aiAvailableOrgans = useMemo(() => {
 																			: "Record reading session"}
 																</span>
 															</button>
-															{!isDicom && (
+															{!isLocal && (
 																<button
 																	className="vp-flyout__item"
 																	role="menuitem"
@@ -2551,7 +2638,7 @@ const aiAvailableOrgans = useMemo(() => {
 															ref={panelsFlyout.menuRef}
 															style={{ position: "fixed", top: panelsFlyout.pos.top, left: panelsFlyout.pos.left }}
 														>
-															{!isDicom && (
+															{!isLocal && (
 																<button
 																	className={`vp-flyout__item ${showOrganDetails ? "is-active" : ""}`}
 																	role="menuitem"
@@ -2571,7 +2658,7 @@ const aiAvailableOrgans = useMemo(() => {
 																	<span>Organs</span>
 																</button>
 															)}
-															{!isDicom && (
+															{!isLocal && (
 																<button
 																	className={`vp-flyout__item ${showStats ? "is-active" : ""}`}
 																	role="menuitem"
@@ -2584,7 +2671,7 @@ const aiAvailableOrgans = useMemo(() => {
 																	<span>Organ stats</span>
 																</button>
 															)}
-															{!isDicom && (
+															{!isLocal && (
 																<button
 																	className={`vp-flyout__item ${showMetadata ? "is-active" : ""}`}
 																	role="menuitem"
@@ -2620,7 +2707,7 @@ const aiAvailableOrgans = useMemo(() => {
 
 											{/* Report and Download stay standalone and separate (not grouped with
 											    each other) — distinct export actions users reach for independently. */}
-											{!isDicom && (
+											{!isLocal && (
 												<button
 													className="vp-tool"
 													onClick={handleDownloadClick}
@@ -2630,7 +2717,7 @@ const aiAvailableOrgans = useMemo(() => {
 													<span className="vp-tool__tip">Download</span>
 												</button>
 											)}
-											{!isDicom && (
+											{!isLocal && (
 												<button
 													className="vp-tool"
 													onClick={() => setShowReportScreen(true)}
@@ -2671,7 +2758,7 @@ const aiAvailableOrgans = useMemo(() => {
 													</span>
 												</button>
 											)}
-											{!isDicom && (
+											{!isLocal && (
 												<button
 													type="button"
 													className={`vp-tool ${showAISidebar ? "vp-tool--active" : ""}`}
@@ -2719,7 +2806,7 @@ const aiAvailableOrgans = useMemo(() => {
 			     above pushing it down). The stage's ResizeObserver refits the canvases
 			     whenever a dock opens or closes. */}
 			<div className="vp-body">
-				{!isDicom && (
+				{!isLocal && (
 					<OrganCheckbox
 						setCheckState={setCheckState}
 						checkState={checkState}
@@ -2728,6 +2815,7 @@ const aiAvailableOrgans = useMemo(() => {
 						showOrganDetails={showOrganDetails}
 						labelColorMap={labelColorMap}
 						onJumpToOrgan={handleJumpToOrgan}
+						customOrgans={customOrgans}
 					/>
 				)}
 
@@ -2827,7 +2915,7 @@ const aiAvailableOrgans = useMemo(() => {
 									// Shaded ray-cast rendering of the CT itself (Cornerstone VOLUME_3D).
 									<div className="vp-vol3d" ref={volume3DRef} />
 								)
-							) : isDicom ? (
+							) : isLocal ? (
 								// Meshes come from the case's segmentation on the server — a local
 								// DICOM scan has none.
 								<div className="vp-3d-empty">
@@ -2835,12 +2923,12 @@ const aiAvailableOrgans = useMemo(() => {
 									<span>(switch to Volume rendering above)</span>
 								</div>
 							) : (
-								<SegmentationMeshViewer caseId={caseId} crosshairMm={crosshairMm} checkState={checkState} loading={loading} opacity={opacityValue} />
+								<SegmentationMeshViewer caseId={caseId} crosshairMm={crosshairMm} checkState={checkState} loading={loading} opacity={opacityValue} customOrgans={customOrgans} labelColorMap={labelColorMap} />
 							)}
 						</div>
 						{!loading && (
 							<div className="vp-3dbar">
-								{!isDicom && (
+								{!isLocal && (
 									<button
 										className={`vp-3dbar__btn ${threeDMode === "mesh" ? "is-active" : ""}`}
 										onClick={() => setThreeDMode("mesh")}
@@ -2975,7 +3063,7 @@ const aiAvailableOrgans = useMemo(() => {
 														</span>
 													)}
 												</span>
-												<span>{r.volume_cm3 === null ? "NA" : `${Math.round(r.volume_cm3)} cm³`}</span>
+												<span>{r.volume_cm3 === null || r.truncated ? "NA" : `${Math.round(r.volume_cm3)} cm³`}</span>
 												<span>{r.mean_hu === null ? "NA" : Math.round(r.mean_hu)}</span>
 												{organNorms && (
 													<span
@@ -3025,7 +3113,7 @@ const aiAvailableOrgans = useMemo(() => {
 													</div>
 													<div className="vp-stats__detail-item">
 														<span>Voxel Count</span>
-														<span>{r.voxel_count === null ? "—" : r.voxel_count.toLocaleString()}</span>
+														<span>{r.voxel_count === null || r.truncated ? "—" : r.voxel_count.toLocaleString()}</span>
 													</div>
 													<div className="vp-stats__detail-item">
 														<span>Truncated</span>
@@ -3100,6 +3188,7 @@ const aiAvailableOrgans = useMemo(() => {
 						setEditMode(null);
 					}}
 					onEdit={(detail) => sessionRef.current?.log("edit", detail, 2000)}
+					onCreateClass={handleCreateClass}
 					collaboration={liveRoom ? {
 						connected: liveRoom.connectionState === "connected",
 						onUndo: liveRoom.requestUndo,

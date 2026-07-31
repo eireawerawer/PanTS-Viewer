@@ -5,6 +5,7 @@ export type TumorFilter = "any" | "tumor" | "no_tumor";
 
 export type SearchFilters = {
 	tumor: TumorFilter;
+	dataset: string[]; // "PanTS" / "CancerVerse"; empty = both (Any)
 	sex: string[]; // M / F / UNKNOWN
 	age: string[]; // "0-9" … "90-99" / "UNKNOWN"
 	manufacturer: string[]; // scanner manufacturer (from facets)
@@ -15,6 +16,7 @@ export type SearchFilters = {
 
 export const EMPTY_FILTERS: SearchFilters = {
 	tumor: "any",
+	dataset: [],
 	sex: [],
 	age: [],
 	manufacturer: [],
@@ -24,9 +26,15 @@ export const EMPTY_FILTERS: SearchFilters = {
 };
 
 // The multi-select array keys (everything except `tumor`).
-export type MultiFilterKey = "sex" | "age" | "manufacturer" | "ctPhase" | "siteNat" | "year";
+export type MultiFilterKey = "dataset" | "sex" | "age" | "manufacturer" | "ctPhase" | "siteNat" | "year";
 
-// Minimal shape of an item returned by /api/search and /api/random.
+// A case id as used across the UI: a bare number for PanTS (e.g. 8854) or the full
+// prefixed string for CancerVerse (e.g. "CV_00000001"). CancerVerse ids MUST keep
+// their prefix so they route to the CV endpoints instead of being mistaken for PanTS.
+export type CaseId = number | string;
+
+// Minimal shape of an item returned by /api/search and /api/random. The id fields can
+// be a PanTS id ("PanTS_00008854") or a CancerVerse id ("CV_00000001").
 export type SearchItem = {
 	case_id?: string | number;
 	"PanTS ID"?: string | number;
@@ -36,10 +44,13 @@ export type SearchItem = {
 	age?: number | string | null;
 };
 
-// Parse the numeric case id out of any of the id-ish fields, e.g.
-// "PanTS_00008854" -> 8854. Returns 0 when nothing usable is present.
-export const itemToId = (it: SearchItem): number => {
-	const raw = String(it.case_id ?? it["PanTS ID"] ?? it.id ?? "");
+// Resolve a card id from any of the id-ish fields. PanTS → the bare number
+// ("PanTS_00008854" → 8854); CancerVerse → the full string kept as-is
+// ("CV_00000001") so it hits the CV endpoints. Returns 0 when nothing usable.
+export const itemToId = (it: SearchItem): CaseId => {
+	const raw = String(it.case_id ?? it["PanTS ID"] ?? it.id ?? "").trim();
+	if (!raw) return 0;
+	if (raw.toUpperCase().startsWith("CV")) return raw; // keep "CV_00000001" as-is
 	const m = raw.match(/\d+/);
 	return m ? Number(m[0]) : 0;
 };
@@ -53,6 +64,14 @@ export const buildSearchParams = (
 	opts: { sortBy?: string; perPage?: number } = {}
 ): URLSearchParams => {
 	const params = new URLSearchParams();
+	// Dataset dispatch → backend ?dataset=. Empty or both = all (show PanTS + CancerVerse);
+	// exactly one selected restricts to that dataset.
+	const ds = filters.dataset ?? [];
+	const hasPanTS = ds.includes("PanTS");
+	const hasCV = ds.includes("CancerVerse");
+	if (hasCV && !hasPanTS) params.set("dataset", "cancerverse");
+	else if (hasPanTS && !hasCV) params.set("dataset", "pants");
+	else params.set("dataset", "all"); // both or neither → everything
 	filters.sex.forEach((v) => params.append("sex[]", v));
 	if (filters.tumor === "tumor") params.set("tumor", "1");
 	else if (filters.tumor === "no_tumor") params.set("tumor", "0");
@@ -71,8 +90,14 @@ export const buildSearchParams = (
 export const parseFiltersFromParams = (params: URLSearchParams): SearchFilters => {
 	const tumorRaw = params.get("tumor");
 	const tumor: TumorFilter = tumorRaw === "1" ? "tumor" : tumorRaw === "0" ? "no_tumor" : "any";
+	const datasetRaw = (params.get("dataset") || "").toLowerCase();
+	const dataset =
+		datasetRaw === "pants" ? ["PanTS"] :
+		datasetRaw === "cancerverse" || datasetRaw === "cv" ? ["CancerVerse"] :
+		[]; // "all"/absent → both (Any)
 	return {
 		tumor,
+		dataset,
 		sex: params.getAll("sex[]"),
 		age: params.getAll("age_bin[]"),
 		manufacturer: params.getAll("manufacturer[]"),
@@ -84,6 +109,9 @@ export const parseFiltersFromParams = (params: URLSearchParams): SearchFilters =
 
 export const countActiveFilters = (f: SearchFilters): number =>
 	(f.tumor !== "any" ? 1 : 0) +
+	// dataset only counts as an active filter when it restricts to a single dataset
+	// (empty or both = "Any", i.e. no restriction).
+	((f.dataset?.length ?? 0) === 1 ? 1 : 0) +
 	f.sex.length +
 	f.age.length +
 	f.manufacturer.length +

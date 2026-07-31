@@ -30,8 +30,9 @@ reportlab==4.4.1
 scipy>=1.13.0
 scikit-image
 setuptools==75.6.0
+SimpleITK>=2.4.0
 SQLAlchemy==2.0.37
-typing_extensions==4.12.2
+typing_extensions==4.13.0
 tzlocal==5.2
 trimesh
 urllib3==2.2.3

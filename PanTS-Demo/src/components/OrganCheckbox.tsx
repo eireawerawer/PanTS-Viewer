@@ -12,6 +12,7 @@ import {
 	type OrganSystemsAllType,
 	type SubSystems,
 	type Systems,
+	type CheckBoxData
 } from "../types";
 
 type ChipBoxProps = {
@@ -32,6 +33,7 @@ type Props = {
 	setShowOrganDetails: React.Dispatch<React.SetStateAction<boolean>>;
 	showOrganDetails: boolean;
 	onJumpToOrgan?: (label: number) => void;
+	customOrgans?: CheckBoxData[];
 };
 
 const getOrganIdx = (organ: string) => {
@@ -236,6 +238,7 @@ function OrganCheckbox({
 	setShowOrganDetails,
 	showOrganDetails,
 	onJumpToOrgan,
+	customOrgans = [],
 }: Props) {
 	const toggleAll = () => {
 		setCheckState((prev) => {
@@ -269,8 +272,7 @@ function OrganCheckbox({
 			</div>
 			<button className="vp-btn" onClick={() => toggleAll()}>
 				Toggle all
-			</button>
-			</div>
+			</button></div>
 			<div className="vp-organs__list flex flex-col gap-1 overflow-y-auto">
 				{OrganSystemsArray.map((system: Systems, idx) => {
 					return (
@@ -287,6 +289,53 @@ function OrganCheckbox({
 					);
 				})}
 			</div>
+			{customOrgans.length > 0 && (
+				<div className="flex gap-2 flex-col">
+					<div className="text-white text-lg">Custom Classes</div>
+					<div className="flex flex-col gap-2">
+						{customOrgans.map((organ) => {
+							const color = labelColorMap[organ.id];
+							const rgb = color
+								? `rgb(${color[0]}, ${color[1]}, ${color[2]})`
+								: "gray";
+							return (
+								<div className="flex items-center gap-2 pl-8" key={organ.id}>
+									<div className="vp-organs__chevron" />
+									<div
+										className={`text-white text-md rounded-md p-1 cursor-pointer hover:border-2 ${
+											!checkState[organ.id] ? "border-0" : "border-2"
+										}`}
+										style={{ borderColor: rgb }}
+										onClick={() => {
+											setCheckState((prev) => {
+												const newCheckState = [...prev];
+												newCheckState[organ.id] = !newCheckState[organ.id];
+												return newCheckState;
+											});
+										}}
+									>
+										{organ.label}
+									</div>
+									{onJumpToOrgan && (
+										<button
+											type="button"
+											className="vp-organs__jump"
+											title={`Jump to ${organ.label}`}
+											aria-label={`Jump to ${organ.label}`}
+											onClick={(e) => {
+												e.stopPropagation();
+												onJumpToOrgan(organ.id);
+											}}
+										>
+											<IconCurrentLocation size={15} />
+										</button>
+									)}
+								</div>
+							);
+						})}
+					</div>
+				</div>
+			)}
 			<div className="w-full"></div>
 		</div>
 	);
