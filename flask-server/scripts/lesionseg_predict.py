@@ -58,9 +58,27 @@ def _warm_predict(input_dir, output_dir, step_size, disable_tta, url, timeout):
               f"disable_tta={disable_tta}); using cold path", flush=True)
         return False
 
+    # The service only accepts locations as relative paths under the root it was
+    # started with, and builds the absolute path itself. If our directories are not
+    # under that root it cannot serve them -- fall back rather than trying to coax it.
+    root = health.get("allowed_root")
+    if not root:
+        print("[warm] server did not report allowed_root; using cold path", flush=True)
+        return False
+    try:
+        rel_in = os.path.relpath(os.path.realpath(input_dir), root)
+        rel_out = os.path.relpath(os.path.realpath(output_dir), root)
+    except ValueError as e:      # e.g. different drives on Windows
+        print(f"[warm] cannot relativise paths against {root} ({e}); using cold path", flush=True)
+        return False
+    if any(r == os.pardir or r.startswith(os.pardir + os.sep) or os.path.isabs(r)
+           for r in (rel_in, rel_out)):
+        print(f"[warm] paths are outside the server root {root}; using cold path", flush=True)
+        return False
+
     body = json.dumps({
-        "input_dir": os.path.abspath(input_dir),
-        "output_dir": os.path.abspath(output_dir),
+        "input_rel": rel_in.replace(os.sep, "/"),
+        "output_rel": rel_out.replace(os.sep, "/"),
         "step_size": float(step_size),
         "disable_tta": bool(disable_tta),
     }).encode()

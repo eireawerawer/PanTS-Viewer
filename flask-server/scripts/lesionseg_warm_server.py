@@ -33,6 +33,7 @@ Usage:
 """
 import json
 import os
+import re
 import threading
 import time
 import traceback
@@ -77,25 +78,28 @@ def _default_root():
 ALLOWED_ROOT = _default_root()
 
 
-def confine_to_root(path):
-    """Rebuild `path` underneath ALLOWED_ROOT, or raise ValueError if it escapes.
+# A request may only name a location as a RELATIVE path under ALLOWED_ROOT, and only
+# using this restricted alphabet. No absolute paths, no "..", no empty components, so
+# there is no way to express a location outside the root -- the absolute path is always
+# constructed here, server-side, and never taken from the request.
+#
+# Accepting an absolute path and then checking it is weaker and harder to verify:
+# binding to 127.0.0.1 limits who can reach this endpoint but does not make its input
+# trustworthy, since any local process or a compromised web worker could call it.
+_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-    `input_dir` and `output_dir` arrive in the request body, so they are
-    attacker-controlled as far as this process is concerned. Binding to 127.0.0.1
-    limits who can reach the endpoint but does not make the values trustworthy --
-    any local process, or a compromised web worker, could pass "/etc" or
-    "../../.." and have this service enumerate or write outside the app. Every
-    request path is therefore resolved (following symlinks) and required to sit
-    inside the configured root before it reaches a filesystem call.
-    """
-    real = os.path.realpath(path)
-    rel = os.path.relpath(real, ALLOWED_ROOT)
-    if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
-        raise ValueError(f"path is outside the permitted root ({ALLOWED_ROOT})")
-    safe = os.path.normpath(os.path.join(ALLOWED_ROOT, rel))
-    if safe != ALLOWED_ROOT and not safe.startswith(ALLOWED_ROOT + os.sep):
-        raise ValueError(f"path is outside the permitted root ({ALLOWED_ROOT})")
-    return safe
+
+def resolve_under_root(rel_path):
+    """Build an absolute path under ALLOWED_ROOT from a validated relative path."""
+    if not isinstance(rel_path, str) or not rel_path or rel_path.startswith("/"):
+        raise ValueError("expected a non-empty relative path")
+    parts = [p for p in rel_path.split("/") if p != ""]
+    if not parts:
+        raise ValueError("expected a non-empty relative path")
+    for p in parts:
+        if p == ".." or not _SAFE_COMPONENT.match(p):
+            raise ValueError(f"illegal path component: {p!r}")
+    return os.path.join(ALLOWED_ROOT, *parts)
 
 
 def _patch_gpu_export_resample():
@@ -216,11 +220,8 @@ def _revert_crop(seg, props):
 
 
 def run_inference(input_dir, output_dir):
-    # Both are already confined to ALLOWED_ROOT by the request handler; re-confining
-    # here keeps the guarantee local to this function rather than relying on every
-    # future caller remembering to do it.
-    input_dir = confine_to_root(input_dir)
-    output_dir = confine_to_root(output_dir)
+    # input_dir/output_dir are built by resolve_under_root() from a validated
+    # relative path -- they are never taken from the request directly.
     os.makedirs(output_dir, exist_ok=True)
     case_files = sorted(
         os.path.basename(f) for f in os.listdir(input_dir)
@@ -306,16 +307,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(length))
-            raw_input_dir = req["input_dir"]
-            raw_output_dir = req["output_dir"]
+            rel_input = req["input_rel"]
+            rel_output = req["output_rel"]
         except Exception as e:
             self._json(400, {"error": f"bad request: {e}"})
             return
 
-        # Confine request-supplied paths before any filesystem access.
+        # Paths are constructed here from validated relative components; the
+        # request never supplies an absolute path.
         try:
-            input_dir = confine_to_root(raw_input_dir)
-            output_dir = confine_to_root(raw_output_dir)
+            input_dir = resolve_under_root(rel_input)
+            output_dir = resolve_under_root(rel_output)
         except ValueError as e:
             self._json(400, {"error": str(e)})
             return
