@@ -58,6 +58,46 @@ DISABLE_TTA = os.environ.get("DISABLE_TTA", "1").strip().lower() in {"1", "true"
 LOCK_TIMEOUT = int(os.environ.get("LOCK_TIMEOUT", "1800"))
 
 
+def _default_root():
+    """Directory tree the service is willing to read from and write to.
+
+    Defaults to the Flask app's sessions directory (Constants.SESSIONS_DIR_NAME,
+    i.e. $SESSIONS_DIR_PATH or <flask-server>/sessions), which is where
+    auto_segmentor.py builds the per-session input/output dirs this service is
+    asked to process.
+    """
+    env = os.environ.get("LESIONSEG_ROOT") or os.environ.get("SESSIONS_DIR_PATH")
+    if env:
+        return os.path.realpath(env)
+    return os.path.realpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "sessions")
+    )
+
+
+ALLOWED_ROOT = _default_root()
+
+
+def confine_to_root(path):
+    """Rebuild `path` underneath ALLOWED_ROOT, or raise ValueError if it escapes.
+
+    `input_dir` and `output_dir` arrive in the request body, so they are
+    attacker-controlled as far as this process is concerned. Binding to 127.0.0.1
+    limits who can reach the endpoint but does not make the values trustworthy --
+    any local process, or a compromised web worker, could pass "/etc" or
+    "../../.." and have this service enumerate or write outside the app. Every
+    request path is therefore resolved (following symlinks) and required to sit
+    inside the configured root before it reaches a filesystem call.
+    """
+    real = os.path.realpath(path)
+    rel = os.path.relpath(real, ALLOWED_ROOT)
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        raise ValueError(f"path is outside the permitted root ({ALLOWED_ROOT})")
+    safe = os.path.normpath(os.path.join(ALLOWED_ROOT, rel))
+    if safe != ALLOWED_ROOT and not safe.startswith(ALLOWED_ROOT + os.sep):
+        raise ValueError(f"path is outside the permitted root ({ALLOWED_ROOT})")
+    return safe
+
+
 def _patch_gpu_export_resample():
     """Swap nnU-Net's CPU (scipy) probability resampling for the torch/GPU path.
 
@@ -176,9 +216,14 @@ def _revert_crop(seg, props):
 
 
 def run_inference(input_dir, output_dir):
+    # Both are already confined to ALLOWED_ROOT by the request handler; re-confining
+    # here keeps the guarantee local to this function rather than relying on every
+    # future caller remembering to do it.
+    input_dir = confine_to_root(input_dir)
+    output_dir = confine_to_root(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     case_files = sorted(
-        f for f in os.listdir(input_dir)
+        os.path.basename(f) for f in os.listdir(input_dir)
         if f.endswith("_0000.nii.gz") or f.endswith("_0000.nii")
     )
     if not case_files:
@@ -245,6 +290,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {
             "status": "ok",
             "model": MODEL,
+            "allowed_root": ALLOWED_ROOT,
             "checkpoint": CHECKPOINT,
             "step_size": STEP_SIZE,
             "disable_tta": DISABLE_TTA,
@@ -260,10 +306,18 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(length))
-            input_dir = req["input_dir"]
-            output_dir = req["output_dir"]
+            raw_input_dir = req["input_dir"]
+            raw_output_dir = req["output_dir"]
         except Exception as e:
             self._json(400, {"error": f"bad request: {e}"})
+            return
+
+        # Confine request-supplied paths before any filesystem access.
+        try:
+            input_dir = confine_to_root(raw_input_dir)
+            output_dir = confine_to_root(raw_output_dir)
+        except ValueError as e:
+            self._json(400, {"error": str(e)})
             return
 
         # Refuse a configuration we were not started with (see module docstring).

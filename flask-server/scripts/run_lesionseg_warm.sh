@@ -23,6 +23,12 @@ STEP_SIZE="${STEP_SIZE:-0.7}"
 DISABLE_TTA="${DISABLE_TTA:-1}"
 BBOX_EXPORT="${BBOX_EXPORT:-0}"
 
+# Directory tree the service may read from and write to. Paths in a /predict
+# request are confined to this root, so it must contain the app's per-session
+# inference dirs. Defaults to the same place Constants.SESSIONS_DIR_NAME resolves to.
+FLASK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+LESIONSEG_ROOT="${LESIONSEG_ROOT:-${SESSIONS_DIR_PATH:-$FLASK_DIR/sessions}}"
+
 if [ ! -x "$PYBIN" ]; then
   echo "ERROR: python not found at $PYBIN (set PYBIN or CONDA_ENV_LESIONSEG)" >&2
   exit 1
@@ -42,9 +48,12 @@ if pgrep -f "lesionseg_warm_server.py" >/dev/null; then
 fi
 
 echo "[run_warm] starting: model=$MODEL port=$PORT step=$STEP_SIZE disable_tta=$DISABLE_TTA bbox=$BBOX_EXPORT"
+echo "[run_warm] permitted path root: $LESIONSEG_ROOT"
+mkdir -p "$LESIONSEG_ROOT"
 setsid env \
   MODEL="$MODEL" PORT="$PORT" STEP_SIZE="$STEP_SIZE" \
   DISABLE_TTA="$DISABLE_TTA" BBOX_EXPORT="$BBOX_EXPORT" \
+  LESIONSEG_ROOT="$LESIONSEG_ROOT" \
   "$PYBIN" -u "$SCRIPT" > "$LOG" 2>&1 < /dev/null &
 
 # Wait for readiness rather than a guessed sleep; the model load dominates startup.
