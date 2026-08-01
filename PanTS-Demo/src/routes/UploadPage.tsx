@@ -7,12 +7,6 @@ import React, {
   useState,
 } from "react";
 
-// Mirrors the backend's REQUIRE_AUTH_FOR_INFERENCE. Off by default so anonymous
-// visitors can still run inference on the deployed site, which has no working
-// sign-in yet. Set VITE_REQUIRE_AUTH_FOR_INFERENCE=true to restore the gate.
-const REQUIRE_AUTH_FOR_INFERENCE =
-  String(import.meta.env.VITE_REQUIRE_AUTH_FOR_INFERENCE || "").toLowerCase() === "true";
-
 const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "None",
@@ -105,11 +99,11 @@ type SelectedItem =
 
 const UploadPage: React.FC = () => {
   const navigate = useNavigate();
+  // Running inference requires an account, so any upload action while signed
+  // out opens the sign-up popup instead of proceeding.
   const { isAuthenticated, promptAuth } = useAuth();
-  // Signed-out uploads open the sign-up popup instead of proceeding, but only
-  // while the account gate is on (see REQUIRE_AUTH_FOR_INFERENCE above).
   const ensureAccount = (): boolean => {
-    if (!REQUIRE_AUTH_FOR_INFERENCE || isAuthenticated) return true;
+    if (isAuthenticated) return true;
     promptAuth("signup");
     return false;
   };
@@ -203,7 +197,7 @@ const UploadPage: React.FC = () => {
     e.preventDefault();
     setIsDragOver(false);
     // Inlined (not via ensureAccount) so the memoized closure sees fresh auth.
-    if (REQUIRE_AUTH_FOR_INFERENCE && !isAuthenticated) { promptAuth("signup"); return; }
+    if (!isAuthenticated) { promptAuth("signup"); return; }
     if (!e.dataTransfer.files) return;
     const filteredFiles = Array.from(e.dataTransfer.files).filter((file) =>
       allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
@@ -1463,7 +1457,7 @@ const UploadPage: React.FC = () => {
               <button type="button" className="upload-account-link" onClick={() => promptAuth("signup")}>
                 Sign in
               </button>{" "}
-              to keep track of your scans and get notified when they're done.
+              to run inference on the server and get notified when it's done.
             </span>
           </div>
         )}
