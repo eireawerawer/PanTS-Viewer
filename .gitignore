@@ -16,3 +16,6 @@ flask-server/pants-dev.db-wal
 flask-server/pants-dev.db-shm
 
 /CancerVerse/
+
+# Local Claude Code scratch config (launch profiles etc.)
+.claude/
