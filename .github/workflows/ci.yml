@@ -75,6 +75,11 @@ jobs:
       - name: Path-safety unit tests
         run: python -m pytest tests/unit/test_path_safety.py -v
 
+      # Chunked-upload staging area: which chunks the server still holds (what a
+      # resuming client checks its cursor against) and the stale-upload sweep.
+      - name: Chunk-store unit tests
+        run: python -m pytest tests/unit/test_chunk_store.py -v
+
       # SQLite-backed inference job store: leasing/claim exclusivity, cancellation,
       # boot-time reap, legacy import, and job ownership.
       - name: Job-store unit tests

@@ -19,9 +19,13 @@ def _make_client(tmp_path, monkeypatch, configured: bool):
         monkeypatch.setenv("GITHUB_CLIENT_ID", "test-github-id")
         monkeypatch.setenv("GITHUB_CLIENT_SECRET", "test-github-secret")
     else:
+        # Empty, not deleted: the constants reload below re-runs load_dotenv,
+        # which would refill a *missing* key from a developer's real .env and
+        # make this "unconfigured" client look configured. load_dotenv leaves an
+        # existing key alone, and "" is falsy to the provider check either way.
         for k in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
                   "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"):
-            monkeypatch.delenv(k, raising=False)
+            monkeypatch.setenv(k, "")
 
     import constants
     importlib.reload(constants)
