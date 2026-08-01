@@ -64,6 +64,12 @@ import threading
 # directory before it touches os.path; secure_filename is the barrier at each
 # path-construction site.
 from .path_safety import is_safe_id as _is_safe_id
+from .chunk_store import (
+    CHUNK_TTL_SECONDS,
+    first_missing_chunk,
+    received_chunks,
+    sweep_stale_uploads,
+)
 
 
 def _load_metadata_cache():
@@ -1425,6 +1431,53 @@ def get_session_reconstruction(session_id):
 CHUNK_DIR = "/tmp/uploads"  # Temporary folder for chunked uploads
 os.makedirs(CHUNK_DIR, exist_ok=True)
 
+# Chunks are only deleted by finalize-upload/finalize-dicom, so an upload the
+# user abandons (tab closed and never reopened) would sit in CHUNK_DIR forever.
+# Sweep opportunistically from the chunk endpoint rather than running a timer:
+# gunicorn runs a single worker (see deploy/systemd/pants-flask.service), the
+# work is a stat per dir, and the only moment stale chunks cost anything is
+# when someone is uploading again.
+_SWEEP_INTERVAL_SECONDS = 60 * 60
+_last_sweep_at = 0.0
+_sweep_lock = threading.Lock()
+
+
+def _maybe_sweep_chunk_dir():
+    """Reclaim abandoned upload dirs, at most once per _SWEEP_INTERVAL_SECONDS."""
+    global _last_sweep_at
+    now = time.time()
+    with _sweep_lock:
+        if now - _last_sweep_at < _SWEEP_INTERVAL_SECONDS:
+            return
+        _last_sweep_at = now
+    try:
+        removed = sweep_stale_uploads(CHUNK_DIR, CHUNK_TTL_SECONDS, now)
+        if removed:
+            print(f"🧹 Swept {len(removed)} abandoned upload(s): {', '.join(removed)}")
+    except Exception as e:
+        # Never fail a live upload because cleanup had a bad day.
+        print(f"[sweep] failed: {e}")
+
+
+@api_blueprint.route("/upload-status/<session_id>", methods=["GET"])
+def upload_status(session_id):
+    """What the server still holds for a chunked upload.
+
+    A client resuming after a tab close trusts this over its own cursor: the
+    chunks may have been swept (TTL) or lost with the staging disk, in which
+    case `next_chunk` comes back 0 and it re-sends from the start instead of
+    finalizing over gaps.
+    """
+    if not _is_safe_id(session_id):
+        return jsonify({"error": "Invalid session ID"}), 400
+    indices = received_chunks(CHUNK_DIR, session_id)
+    return jsonify({
+        "session_id": session_id,
+        "received": len(indices),
+        "next_chunk": first_missing_chunk(indices),
+    }), 200
+
+
 @api_blueprint.route("/upload-inference-chunk", methods=["POST"])
 def upload_inference_chunk():
     """
@@ -1450,6 +1503,8 @@ def upload_inference_chunk():
             return jsonify({"error": "Invalid session ID"}), 400
         if not str(chunk_index).isdigit():
             return jsonify({"error": "Invalid chunk index"}), 400
+
+        _maybe_sweep_chunk_dir()
 
         session_folder = os.path.join(CHUNK_DIR, session_id)
         os.makedirs(session_folder, exist_ok=True)

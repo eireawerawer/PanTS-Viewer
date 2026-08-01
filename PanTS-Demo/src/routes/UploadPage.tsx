@@ -40,6 +40,7 @@ import {
   setPendingNextChunk,
   type PendingUpload,
 } from '../helpers/pendingUploads';
+import { postWithRetry, resolveResumeStart } from '../helpers/chunkUpload';
 
 const parseApiResponse = async (res: Response): Promise<any> => {
   const contentType = res.headers.get("content-type") || "";
@@ -372,14 +373,23 @@ const UploadPage: React.FC = () => {
     uploadAbortRef.current.set(sid, controller);
     setPhase(sid, "uploading");
     try {
+      // A resumed upload can't trust its own cursor - the server may have swept
+      // its chunks (24h TTL) or lost the staging disk. Ask what it still holds
+      // and continue from there; if nothing survived this comes back 0 and the
+      // file re-sends from the start (it's still in IndexedDB). Fresh uploads
+      // skip the round-trip.
+      const startChunk = p.nextChunk > 0
+        ? await resolveResumeStart(API_BASE, sid, p.nextChunk)
+        : 0;
+
       if (foreground) {
         foregroundUploadSidRef.current = sid;
         setIsUploading(true);
-        setUploadProgress(Math.round((p.nextChunk / totalChunks) * 100));
+        setUploadProgress(Math.round((startChunk / totalChunks) * 100));
         setMessage(`Uploading ${filename}...`);
       }
 
-      for (let i = p.nextChunk; i < totalChunks; i++) {
+      for (let i = startChunk; i < totalChunks; i++) {
         const chunk = file.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, file.size));
         const formData = new FormData();
         formData.append("session_id", sid);
@@ -387,7 +397,10 @@ const UploadPage: React.FC = () => {
         formData.append("total_chunks", totalChunks.toString());
         formData.append("file", chunk);
 
-        const res = await fetch(`${API_BASE}/api/upload-inference-chunk`, {
+        // Retried: a single dropped chunk used to fail the whole run and delete
+        // its resumable copy, making a brief network blip worse than closing
+        // the tab. A 413 or other 4xx still fails fast - it won't fix itself.
+        const res = await postWithRetry(`${API_BASE}/api/upload-inference-chunk`, {
           method: "POST", body: formData, signal: controller.signal,
         });
         if (res.status === 413) throw new Error("Upload chunk too large for server/proxy limit (HTTP 413).");
@@ -395,8 +408,8 @@ const UploadPage: React.FC = () => {
         if (!res.ok) throw new Error(data.error || "Chunk upload failed");
 
         // Persist the cursor every so often (not every chunk - that would be a
-        // lot of IDB writes). On resume we re-send at most a few already-stored
-        // chunks, which the backend just overwrites. Harmless.
+        // lot of IDB writes). It only needs to be approximate: a resume checks
+        // it against the server's actual chunks before sending anything.
         if (i % 16 === 0) await setPendingNextChunk(sid, i + 1);
         if (foreground) setUploadProgress(Math.round(((i + 1) / totalChunks) * 100));
       }
@@ -481,7 +494,10 @@ const UploadPage: React.FC = () => {
         const formData = new FormData();
         formData.append("session_id", sid);
         formData.append("file", files[i]);
-        const res = await fetch(`${API_BASE}/api/upload-dicom-slice`, {
+        // Retried like NIfTI chunks, and it matters more here: a DICOM folder
+        // has no IndexedDB copy, so a blip on any one slice means re-picking
+        // the folder and starting over.
+        const res = await postWithRetry(`${API_BASE}/api/upload-dicom-slice`, {
           method: "POST", body: formData, signal: controller.signal,
         });
         if (res.status === 413) throw new Error("DICOM slice too large for server/proxy limit (HTTP 413).");
