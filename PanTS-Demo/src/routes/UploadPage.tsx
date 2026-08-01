@@ -1,21 +1,57 @@
-import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import React, {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
-  { id: "None",      label: "None",       desc: "View only — files never leave your browser" },
-  { id: "ePAI",      label: "ePAI",       desc: "For detailed pancreas and tumor analysis" },
-  { id: "SuPreM",    label: "SuPreM",     desc: "For whole-body scans from lungs to legs" },
-  { id: "MedFormer", label: "MedFormer",  desc: "For reliable abdominal segmentation" },
-  { id: "R-Super",   label: "R-Super",    desc: "For the highest tumor detection accuracy" },
-  { id: "Atlas-Net", label: "Atlas-Net",  desc: "For anatomically consistent results" },
+  {
+    id: "None",
+    label: "None",
+    desc: "View only — files never leave your browser",
+  },
+  {
+    id: "ePAI",
+    label: "ePAI",
+    desc: "For detailed pancreas and tumor analysis",
+  },
+  {
+    id: "SuPreM",
+    label: "SuPreM",
+    desc: "For whole-body scans from lungs to legs",
+  },
+  {
+    id: "MedFormer",
+    label: "MedFormer",
+    desc: "For reliable abdominal segmentation",
+  },
+  {
+    id: "R-Super",
+    label: "R-Super",
+    desc: "For the highest tumor detection accuracy",
+  },
+  {
+    id: "Atlas-Net",
+    label: "Atlas-Net",
+    desc: "For anatomically consistent results",
+  },
+  {
+    id: "LesionSegmenter",
+    label: "LesionSegmenter",
+    desc: "For fast pancreatic lesion detection",
+  },
 ];
-import { useNavigate } from 'react-router-dom';
-import './UploadPage.css';
+import { useNavigate } from "react-router-dom";
+import "./UploadPage.css";
 
 // Lazy so NiiVue / Cornerstone aren't pulled into the upload bundle until a file
 // is actually previewed. CtPreview handles NIfTI, DicomPreview handles a DICOM series.
-const CtPreview = lazy(() => import('../components/CtPreview/CtPreview'));
-const DicomPreview = lazy(() => import('../components/CtPreview/DicomPreview'));
-import { API_BASE } from '../helpers/constants';
+const CtPreview = lazy(() => import("../components/CtPreview/CtPreview"));
+const DicomPreview = lazy(() => import("../components/CtPreview/DicomPreview"));
+import { API_BASE } from "../helpers/constants";
 import {
   addRecentUpload,
   formatRelativeTime,
@@ -26,21 +62,21 @@ import {
   removeRecentUpload,
   updateRecentUploadStatus,
   type RecentUpload,
-} from '../helpers/recentUploads';
-import Header from '../components/Header';
-import ProcessingSummaryBar from '../components/ProcessingSummaryBar';
-import BatchDetailsModal from '../components/BatchDetailsModal';
-import { useAuth } from '../contexts/authContext';
-import { looksLikeDicom, setLocalDicomFiles } from '../helpers/dicomLocal';
-import { setLocalNiftiFile } from '../helpers/localNifti';
+} from "../helpers/recentUploads";
+import Header from "../components/Header";
+import ProcessingSummaryBar from "../components/ProcessingSummaryBar";
+import BatchDetailsModal from "../components/BatchDetailsModal";
+import { useAuth } from "../contexts/authContext";
+import { looksLikeDicom, setLocalDicomFiles } from "../helpers/dicomLocal";
+import { setLocalNiftiFile } from "../helpers/localNifti";
 import {
   deletePendingUpload,
   loadPendingUploads,
   savePendingUpload,
   setPendingNextChunk,
   type PendingUpload,
-} from '../helpers/pendingUploads';
-import { postWithRetry, resolveResumeStart } from '../helpers/chunkUpload';
+} from "../helpers/pendingUploads";
+import { postWithRetry, resolveResumeStart } from "../helpers/chunkUpload";
 
 const parseApiResponse = async (res: Response): Promise<any> => {
   const contentType = res.headers.get("content-type") || "";
@@ -50,15 +86,15 @@ const parseApiResponse = async (res: Response): Promise<any> => {
   const text = await res.text();
   const shortBody = text.slice(0, 200).replace(/\s+/g, " ").trim();
   throw new Error(
-    `Expected JSON but got ${contentType || "unknown content-type"} (HTTP ${res.status}). Body: ${shortBody}`
+    `Expected JSON but got ${contentType || "unknown content-type"} (HTTP ${res.status}). Body: ${shortBody}`,
   );
 };
 
 // A selection is either a single NIfTI file or a picked DICOM folder (the series'
 // raw .dcm slices). Both are previewable individually and runnable through inference.
 type SelectedItem =
-  | { id: string; kind: 'nifti'; file: File }
-  | { id: string; kind: 'dicom'; files: File[]; label: string };
+  | { id: string; kind: "nifti"; file: File }
+  | { id: string; kind: "dicom"; files: File[]; label: string };
 
 const UploadPage: React.FC = () => {
   const navigate = useNavigate();
@@ -74,7 +110,9 @@ const UploadPage: React.FC = () => {
   // Folder picker for a DICOM series (run inference, or view-only when model is "None").
   const dicomUploadInputRef = useRef<HTMLInputElement | null>(null);
   // One poll timer per in-flight session so runs can proceed in parallel.
-  const pollTimersRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+  const pollTimersRef = useRef<Map<string, ReturnType<typeof setInterval>>>(
+    new Map(),
+  );
   // Whether the current foreground upload got stored in IndexedDB (resumable).
   // If IDB was unavailable we fall back to warning before an unload instead.
   const uploadResumableRef = useRef<boolean>(false);
@@ -91,7 +129,17 @@ const UploadPage: React.FC = () => {
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [inferenceCompleted, setInferenceCompleted] = useState<boolean>(false);
-  const [selectedModel, setSelectedModel] = useState<"None" | "ePAI" | "SuPreM" | "OpenVAE" | "MedFormer" | "R-Super" | "Atlas-Net" | "">("None");
+  const [selectedModel, setSelectedModel] = useState<
+    | "None"
+    | "ePAI"
+    | "SuPreM"
+    | "OpenVAE"
+    | "MedFormer"
+    | "R-Super"
+    | "Atlas-Net"
+    | "LesionSegmenter"
+    | ""
+  >("None");
   const [modelDropOpen, setModelDropOpen] = useState(false);
   const modelDropRef = useRef<HTMLDivElement>(null);
   const [preDropOpen, setPreDropOpen] = useState(false);
@@ -101,14 +149,18 @@ const UploadPage: React.FC = () => {
   const postDropRef = useRef<HTMLDivElement>(null);
   const [postValue, setPostValue] = useState("");
   const [isDragOver, setIsDragOver] = useState(false);
-  const [recentUploads, setRecentUploads] = useState<RecentUpload[]>(() => loadRecentUploads());
+  const [recentUploads, setRecentUploads] = useState<RecentUpload[]>(() =>
+    loadRecentUploads(),
+  );
   // Which batch's "View details" popup is open (null = none).
   const [detailsBatchId, setDetailsBatchId] = useState<string | null>(null);
   // Sub-state of each Active card: "uploading" | "queued" | "running".
-  const [sessionPhases, setSessionPhases] = useState<Record<string, string>>({});
+  const [sessionPhases, setSessionPhases] = useState<Record<string, string>>(
+    {},
+  );
 
   const setPhase = (sid: string, phase?: string) =>
-    setSessionPhases(prev => {
+    setSessionPhases((prev) => {
       if (phase === undefined) {
         if (!(sid in prev)) return prev;
         const { [sid]: _dropped, ...rest } = prev;
@@ -123,14 +175,21 @@ const UploadPage: React.FC = () => {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!ensureAccount()) { e.target.value = ""; return; }
     if (!e.target.files) return;
-    const filteredFiles = Array.from(e.target.files).filter(file =>
-      allowedExtensions.some(ext => file.name.toLowerCase().endsWith(ext))
+    const filteredFiles = Array.from(e.target.files).filter((file) =>
+      allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
     );
     if (filteredFiles.length === 0) {
       alert("Please select .nii or .nii.gz files only");
       return;
     }
-    setSelectedItems(prev => [...prev, ...filteredFiles.map(f => ({ id: crypto.randomUUID(), kind: 'nifti' as const, file: f }))]);
+    setSelectedItems((prev) => [
+      ...prev,
+      ...filteredFiles.map((f) => ({
+        id: crypto.randomUUID(),
+        kind: "nifti" as const,
+        file: f,
+      })),
+    ]);
   };
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -139,14 +198,21 @@ const UploadPage: React.FC = () => {
     // Inlined (not via ensureAccount) so the memoized closure sees fresh auth.
     if (!isAuthenticated) { promptAuth("signup"); return; }
     if (!e.dataTransfer.files) return;
-    const filteredFiles = Array.from(e.dataTransfer.files).filter(file =>
-      allowedExtensions.some(ext => file.name.toLowerCase().endsWith(ext))
+    const filteredFiles = Array.from(e.dataTransfer.files).filter((file) =>
+      allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
     );
     if (filteredFiles.length === 0) {
       alert("Please drop .nii or .nii.gz files only");
       return;
     }
-    setSelectedItems(prev => [...prev, ...filteredFiles.map(f => ({ id: crypto.randomUUID(), kind: 'nifti' as const, file: f }))]);
+    setSelectedItems((prev) => [
+      ...prev,
+      ...filteredFiles.map((f) => ({
+        id: crypto.randomUUID(),
+        kind: "nifti" as const,
+        file: f,
+      })),
+    ]);
   }, [isAuthenticated, promptAuth]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -159,14 +225,19 @@ const UploadPage: React.FC = () => {
   }, []);
 
   const removeItem = (id: string) => {
-    setSelectedItems(prev => prev.filter(item => item.id !== id));
-    setPreviewItemId(prev => (prev === id ? null : prev));
+    setSelectedItems((prev) => prev.filter((item) => item.id !== id));
+    setPreviewItemId((prev) => (prev === id ? null : prev));
   };
 
   // Pick a DICOM folder to RUN INFERENCE on (distinct from the view-only opener):
   // the raw slices are added as one selectable item, previewable and runnable.
-  const handleDicomInferenceSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!ensureAccount()) { e.target.value = ""; return; }
+  const handleDicomInferenceSelect = (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    if (!ensureAccount()) {
+      e.target.value = "";
+      return;
+    }
     const files = Array.from(e.target.files ?? []);
     e.target.value = ""; // allow re-picking the same folder later
     const candidates = files.filter(looksLikeDicom);
@@ -174,9 +245,14 @@ const UploadPage: React.FC = () => {
       alert("No DICOM files (.dcm) found in the selected folder.");
       return;
     }
-    setSelectedItems(prev => [
+    setSelectedItems((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), kind: 'dicom', files: candidates, label: `DICOM series (${candidates.length} slices)` },
+      {
+        id: crypto.randomUUID(),
+        kind: "dicom",
+        files: candidates,
+        label: `DICOM series (${candidates.length} slices)`,
+      },
     ]);
   };
 
@@ -190,7 +266,7 @@ const UploadPage: React.FC = () => {
   };
 
   const stopAllPolling = () => {
-    pollTimersRef.current.forEach(timer => clearInterval(timer));
+    pollTimersRef.current.forEach((timer) => clearInterval(timer));
     pollTimersRef.current.clear();
   };
 
@@ -202,9 +278,11 @@ const UploadPage: React.FC = () => {
     setSessionId(sid);
     setInferenceCompleted(true);
     // Only auto-open the viewer when no other run is still in flight.
-    if (!uploads.some(u => u.status === "Processing")) {
+    if (!uploads.some((u) => u.status === "Processing")) {
       setTimeout(() => {
-        navigate(model === "OpenVAE" ? `/reconstruction/${sid}` : `/session/${sid}`);
+        navigate(
+          model === "OpenVAE" ? `/reconstruction/${sid}` : `/session/${sid}`,
+        );
       }, 600);
     }
   };
@@ -227,13 +305,16 @@ const UploadPage: React.FC = () => {
             stopPolling(sid);
             setPhase(sid);
             setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
-            setMessage("Session no longer exists on the server - marked as Failed.");
+            setMessage(
+              "Session no longer exists on the server - marked as Failed.",
+            );
           }
           return;
         }
         notFoundCount = 0;
 
-        if (!res.ok) throw new Error(data.error || data.status || "Status check failed");
+        if (!res.ok)
+          throw new Error(data.error || data.status || "Status check failed");
 
         if (status === "completed") {
           finishSession(sid, model);
@@ -272,7 +353,9 @@ const UploadPage: React.FC = () => {
 
     // Fire-and-forget: if the job never reached the server (upload phase)
     // this 404s, which is fine - the client side is already torn down.
-    fetch(`${API_BASE}/api/cancel-inference/${sid}`, { method: "POST" }).catch(() => {});
+    fetch(`${API_BASE}/api/cancel-inference/${sid}`, { method: "POST" }).catch(
+      () => {},
+    );
 
     if (foregroundUploadSidRef.current === sid) {
       foregroundUploadSidRef.current = null;
@@ -289,23 +372,27 @@ const UploadPage: React.FC = () => {
     // inferencing server-side, so we reconnect their pollers.
     let cancelled = false;
     (async () => {
-      const processing = loadRecentUploads().filter(u => u.status === "Processing");
+      const processing = loadRecentUploads().filter(
+        (u) => u.status === "Processing",
+      );
       const pending = await loadPendingUploads();
       if (cancelled) return;
-      const pendingById = new Map(pending.map(p => [p.sessionId, p]));
+      const pendingById = new Map(pending.map((p) => [p.sessionId, p]));
 
       for (const u of processing) {
         if (pendingById.has(u.sessionId)) {
-          runUpload(pendingById.get(u.sessionId)!, false);  // resume the upload
+          runUpload(pendingById.get(u.sessionId)!, false); // resume the upload
         } else {
-          startInferencePolling(u.sessionId, u.model);       // resume polling
+          startInferencePolling(u.sessionId, u.model); // resume polling
         }
       }
 
       // Clean up IndexedDB entries whose card no longer exists (deleted or
       // trimmed off the 8-entry list) so the store can't leak.
-      const known = new Set(loadRecentUploads().map(u => u.sessionId));
-      pending.filter(p => !known.has(p.sessionId)).forEach(p => deletePendingUpload(p.sessionId));
+      const known = new Set(loadRecentUploads().map((u) => u.sessionId));
+      pending
+        .filter((p) => !known.has(p.sessionId))
+        .forEach((p) => deletePendingUpload(p.sessionId));
 
       if (processing.length > 0) {
         // Keep a session id bound for the action bar, but don't surface a
@@ -313,7 +400,10 @@ const UploadPage: React.FC = () => {
         setSessionId(processing[0].sessionId);
       }
     })();
-    return () => { cancelled = true; stopAllPolling(); };
+    return () => {
+      cancelled = true;
+      stopAllPolling();
+    };
   }, []);
 
   // Only warn before an unload if the current upload could NOT be stored in
@@ -332,7 +422,10 @@ const UploadPage: React.FC = () => {
   useEffect(() => {
     if (!modelDropOpen) return;
     const handler = (e: MouseEvent) => {
-      if (modelDropRef.current && !modelDropRef.current.contains(e.target as Node))
+      if (
+        modelDropRef.current &&
+        !modelDropRef.current.contains(e.target as Node)
+      )
         setModelDropOpen(false);
     };
     document.addEventListener("mousedown", handler);
@@ -352,7 +445,10 @@ const UploadPage: React.FC = () => {
   useEffect(() => {
     if (!postDropOpen) return;
     const handler = (e: MouseEvent) => {
-      if (postDropRef.current && !postDropRef.current.contains(e.target as Node))
+      if (
+        postDropRef.current &&
+        !postDropRef.current.contains(e.target as Node)
+      )
         setPostDropOpen(false);
     };
     document.addEventListener("mousedown", handler);
@@ -362,13 +458,21 @@ const UploadPage: React.FC = () => {
   /* ── Upload (chunked) ── */
   const CHUNK_SIZE = 256 * 1024;
 
-  // Uploads the file described by `p` from p.nextChunk onward, finalizes, then
-  // starts inference. Resumable: the file lives in IndexedDB and the chunk
-  // cursor is persisted, so a reload can call this again to pick up where it
-  // left off. `foreground` = the run the user just clicked (drives the progress
+  // Uploads the file described by `p`, finalizes, then starts inference.
+  // Resumable: the file lives in IndexedDB and the chunk cursor is persisted, so
+  // a reload can call this again to pick up where it left off - starting from
+  // what the server confirms it holds, not from p.nextChunk directly.
+  // `foreground` = the run the user just clicked (drives the progress
   // bar); resumed background runs show only their Active-section spinner.
   const runUpload = async (p: PendingUpload, foreground: boolean) => {
-    const { sessionId: sid, file, filename, model, bdmapId: bid, totalChunks } = p;
+    const {
+      sessionId: sid,
+      file,
+      filename,
+      model,
+      bdmapId: bid,
+      totalChunks,
+    } = p;
     const controller = new AbortController();
     uploadAbortRef.current.set(sid, controller);
     setPhase(sid, "uploading");
@@ -389,8 +493,45 @@ const UploadPage: React.FC = () => {
         setMessage(`Uploading ${filename}...`);
       }
 
-      for (let i = startChunk; i < totalChunks; i++) {
-        const chunk = file.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, file.size));
+      // Chunks upload with CONCURRENCY in flight at once instead of one at a time --
+      // each chunk lands in its own server-side file (chunk-<index>), reassembled by
+      // finalize-upload, so arrival order doesn't matter and parallelizing is safe.
+      // Chunk SIZE stays untouched (413 handling above implies a proxy/server limit
+      // this value was deliberately chosen to stay under) -- the win comes from
+      // overlapping round-trip latency across many chunks, not from fewer/bigger
+      // requests. A 256KB-chunk file that took N sequential round trips now takes
+      // roughly N/CONCURRENCY.
+      //
+      // Every cursor below starts from startChunk (what the SERVER confirmed it
+      // holds), not p.nextChunk (what this tab last wrote to IndexedDB) - the
+      // two differ whenever the staging area was swept or lost.
+      const CONCURRENCY = 6;
+      let nextIndexToStart = startChunk;
+      let completedCount = startChunk;
+      const completedIndices = new Set<number>();
+      // The resume cursor must only ever advance over a CONTIGUOUS run of completed
+      // chunks -- with parallel uploads, chunk 20 can finish before chunk 15, and
+      // persisting past a gap would make a resumed run skip re-sending chunk 15.
+      let contiguousWatermark = startChunk;
+      const advanceWatermark = async () => {
+        let advanced = false;
+        while (completedIndices.has(contiguousWatermark)) {
+          completedIndices.delete(contiguousWatermark);
+          contiguousWatermark++;
+          advanced = true;
+        }
+        // Same throttling intent as before (avoid an IDB write per chunk) -- persist
+        // on every 16th advance, plus unconditionally once everything is done below.
+        if (advanced && contiguousWatermark % 16 === 0) {
+          await setPendingNextChunk(sid, contiguousWatermark);
+        }
+      };
+
+      const uploadOneChunk = async (i: number) => {
+        const chunk = file.slice(
+          i * CHUNK_SIZE,
+          Math.min((i + 1) * CHUNK_SIZE, file.size),
+        );
         const formData = new FormData();
         formData.append("session_id", sid);
         formData.append("chunk_index", i.toString());
@@ -400,18 +541,47 @@ const UploadPage: React.FC = () => {
         // Retried: a single dropped chunk used to fail the whole run and delete
         // its resumable copy, making a brief network blip worse than closing
         // the tab. A 413 or other 4xx still fails fast - it won't fix itself.
-        const res = await postWithRetry(`${API_BASE}/api/upload-inference-chunk`, {
-          method: "POST", body: formData, signal: controller.signal,
-        });
-        if (res.status === 413) throw new Error("Upload chunk too large for server/proxy limit (HTTP 413).");
+        const res = await postWithRetry(
+          `${API_BASE}/api/upload-inference-chunk`,
+          {
+            method: "POST",
+            body: formData,
+            signal: controller.signal,
+          },
+        );
+        if (res.status === 413)
+          throw new Error(
+            "Upload chunk too large for server/proxy limit (HTTP 413).",
+          );
         const data = await parseApiResponse(res);
         if (!res.ok) throw new Error(data.error || "Chunk upload failed");
 
-        // Persist the cursor every so often (not every chunk - that would be a
-        // lot of IDB writes). It only needs to be approximate: a resume checks
-        // it against the server's actual chunks before sending anything.
-        if (i % 16 === 0) await setPendingNextChunk(sid, i + 1);
-        if (foreground) setUploadProgress(Math.round(((i + 1) / totalChunks) * 100));
+        completedCount++;
+        completedIndices.add(i);
+        await advanceWatermark();
+        if (foreground)
+          setUploadProgress(Math.round((completedCount / totalChunks) * 100));
+      };
+
+      const worker = async () => {
+        while (true) {
+          const i = nextIndexToStart++;
+          if (i >= totalChunks) return;
+          await uploadOneChunk(i);
+        }
+      };
+      await Promise.all(
+        Array.from(
+          { length: Math.min(CONCURRENCY, totalChunks - startChunk) },
+          worker,
+        ),
+      );
+      // Final persist in case the last watermark advance(s) landed on a non-multiple
+      // of 16 -- without this, a crash right after the loop could re-send a few
+      // already-uploaded tail chunks on resume (harmless, but pointless to leave on
+      // the table now that we track the exact watermark).
+      if (contiguousWatermark > startChunk) {
+        await setPendingNextChunk(sid, contiguousWatermark);
       }
 
       if (foreground) setMessage("Finalizing upload...");
@@ -444,7 +614,10 @@ const UploadPage: React.FC = () => {
       inferFd.append("model_name", model);
       inferFd.append("uploaded_filename", uploadedName);
       const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
-        method: "POST", body: inferFd, credentials: "include", signal: controller.signal,
+        method: "POST",
+        body: inferFd,
+        credentials: "include",
+        signal: controller.signal,
       });
       const data = await parseApiResponse(res);
       if (!res.ok) throw new Error(data.error || "Failed to start inference");
@@ -457,6 +630,11 @@ const UploadPage: React.FC = () => {
       // A user cancel aborts our fetches - cancelRun already did the cleanup
       // and set the card to Cancelled, so don't overwrite that with Failed.
       if (controller.signal.aborted) return;
+      // A genuine failure (not a user cancel): with chunks now uploading in
+      // parallel, other in-flight chunk requests would otherwise keep running
+      // to completion for no reason after we've already given up on this
+      // upload. Abort them too.
+      controller.abort();
       console.error(err);
       setPhase(sid);
       if (foreground) {
@@ -498,9 +676,14 @@ const UploadPage: React.FC = () => {
         // has no IndexedDB copy, so a blip on any one slice means re-picking
         // the folder and starting over.
         const res = await postWithRetry(`${API_BASE}/api/upload-dicom-slice`, {
-          method: "POST", body: formData, signal: controller.signal,
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
         });
-        if (res.status === 413) throw new Error("DICOM slice too large for server/proxy limit (HTTP 413).");
+        if (res.status === 413)
+          throw new Error(
+            "DICOM slice too large for server/proxy limit (HTTP 413).",
+          );
         const data = await parseApiResponse(res);
         if (!res.ok) throw new Error(data.error || "DICOM slice upload failed");
         setUploadProgress(Math.round(((i + 1) / files.length) * 100));
@@ -508,11 +691,13 @@ const UploadPage: React.FC = () => {
 
       setMessage("Converting DICOM series to NIfTI...");
       const finalizeRes = await fetch(`${API_BASE}/api/finalize-dicom`, {
-        method: "POST", signal: controller.signal,
+        method: "POST",
+        signal: controller.signal,
         body: new URLSearchParams({ session_id: sid }),
       });
       const finalizeData = await parseApiResponse(finalizeRes);
-      if (!finalizeRes.ok) throw new Error(finalizeData.error || "DICOM conversion failed");
+      if (!finalizeRes.ok)
+        throw new Error(finalizeData.error || "DICOM conversion failed");
       const uploadedName = finalizeData.uploaded_filename || "ct.nii.gz";
 
       foregroundUploadSidRef.current = null;
@@ -525,7 +710,10 @@ const UploadPage: React.FC = () => {
       inferFd.append("model_name", model);
       inferFd.append("uploaded_filename", uploadedName);
       const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
-        method: "POST", body: inferFd, credentials: "include", signal: controller.signal,
+        method: "POST",
+        body: inferFd,
+        credentials: "include",
+        signal: controller.signal,
       });
       const data = await parseApiResponse(res);
       if (!res.ok) throw new Error(data.error || "Failed to start inference");
@@ -563,7 +751,7 @@ const UploadPage: React.FC = () => {
     batch?: { batchId: string; batchLabel: string },
   ) => {
     const sid = crypto.randomUUID();
-    const label = (item.kind === 'dicom' ? item.label : item.file.name) || sid;
+    const label = (item.kind === "dicom" ? item.label : item.file.name) || sid;
 
     setRecentUploads(
       addRecentUpload({
@@ -575,10 +763,14 @@ const UploadPage: React.FC = () => {
         isReconstruction: model === "OpenVAE",
         batchId: batch?.batchId,
         batchLabel: batch?.batchLabel,
-      })
+      }),
     );
 
-    if (item.kind === 'dicom') {
+    // The caller clears the whole selection before looping, so there's nothing to
+    // consume here. A DICOM folder uploads its slices and converts server-side; a
+    // NIfTI file rides the resumable path (stashed in IndexedDB so an interrupted
+    // upload can resume).
+    if (item.kind === "dicom") {
       runDicomUpload(sid, item.files, model);
       return;
     }
@@ -646,9 +838,14 @@ const UploadPage: React.FC = () => {
     try {
       const statusRes = await fetch(`${API_BASE}/api/inference-status/${sid}`);
       const statusData = await parseApiResponse(statusRes);
-      if (!statusRes.ok) throw new Error(statusData.error || statusData.status || "Status check failed");
+      if (!statusRes.ok)
+        throw new Error(
+          statusData.error || statusData.status || "Status check failed",
+        );
       if (statusData.status !== "completed") {
-        setMessage(`Status: ${statusData.status || "unknown"}. Please wait until completed.`);
+        setMessage(
+          `Status: ${statusData.status || "unknown"}. Please wait until completed.`,
+        );
         return;
       }
       stopPolling(sid);
@@ -667,7 +864,9 @@ const UploadPage: React.FC = () => {
       link.click();
       document.body.removeChild(link);
       window.URL.revokeObjectURL(objectUrl);
-      setMessage("Download started: zip includes combined_labels.nii.gz and output.csv");
+      setMessage(
+        "Download started: zip includes combined_labels.nii.gz and output.csv",
+      );
     } catch (err) {
       console.error(err);
       setMessage("Download failed: " + (err as Error).message);
@@ -703,7 +902,10 @@ const UploadPage: React.FC = () => {
         body: formData,
       });
       const data = await parseApiResponse(res);
-      if (!res.ok) throw new Error(data.error || "Failed to start ePAI inference on reconstruction");
+      if (!res.ok)
+        throw new Error(
+          data.error || "Failed to start ePAI inference on reconstruction",
+        );
 
       const sid = data.session_id || newSessionId;
       setSessionId(sid);
@@ -717,18 +919,20 @@ const UploadPage: React.FC = () => {
             model: "ePAI",
             status: "Processing",
             timestamp: Date.now(),
-          })
+          }),
         );
         startInferencePolling(sid, "ePAI");
       }
     } catch (err) {
       console.error(err);
-      setMessage("Failed to start ePAI on reconstruction: " + (err as Error).message);
+      setMessage(
+        "Failed to start ePAI on reconstruction: " + (err as Error).message,
+      );
     }
   };
 
   /* ── Render ── */
-  const previewItem = selectedItems.find(i => i.id === previewItemId) ?? null;
+  const previewItem = selectedItems.find((i) => i.id === previewItemId) ?? null;
 
   return (
     <div className="upload-page-wrapper">
@@ -744,8 +948,10 @@ const UploadPage: React.FC = () => {
         <div className="upload-card">
           {/* ── Drop zone ── */}
           <div
-            className={`dropzone${isDragOver ? ' drag-over' : ''}`}
-            onClick={() => { if (ensureAccount()) fileInputRef.current?.click(); }}
+            className={`dropzone${isDragOver ? " drag-over" : ""}`}
+            onClick={() => {
+              if (ensureAccount()) fileInputRef.current?.click();
+            }}
             onDrop={handleDrop}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -755,43 +961,57 @@ const UploadPage: React.FC = () => {
               type="file"
               multiple
               accept=".nii,.gz"
-              style={{ display: 'none' }}
+              style={{ display: "none" }}
               onChange={handleFileSelect}
             />
             <input
               // Set the folder-picker attributes imperatively — passing webkitdirectory
               // as a JSX/spread prop doesn't reliably apply it, so the picker falls back
               // to single files. directory is the Firefox spelling.
-              ref={el => {
+              ref={(el) => {
                 dicomUploadInputRef.current = el;
                 if (el) {
-                  el.setAttribute('webkitdirectory', '');
-                  el.setAttribute('directory', '');
+                  el.setAttribute("webkitdirectory", "");
+                  el.setAttribute("directory", "");
                 }
               }}
               type="file"
               multiple
-              style={{ display: 'none' }}
+              style={{ display: "none" }}
               onChange={handleDicomInferenceSelect}
             />
-            <svg className="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <svg
+              className="dropzone-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
               <polyline points="17 8 12 3 7 8" />
               <line x1="12" y1="3" x2="12" y2="15" />
             </svg>
             <div className="dropzone-text">Click or drag to upload</div>
-            <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+            <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
               <button
                 type="button"
                 className="dropzone-btn"
-                onClick={e => { e.stopPropagation(); if (ensureAccount()) fileInputRef.current?.click(); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (ensureAccount()) fileInputRef.current?.click();
+                }}
               >
                 Select NIfTI file
               </button>
               <button
                 type="button"
                 className="dropzone-btn"
-                onClick={e => { e.stopPropagation(); if (ensureAccount()) dicomUploadInputRef.current?.click(); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (ensureAccount()) dicomUploadInputRef.current?.click();
+                }}
               >
                 Select DICOM folder
               </button>
@@ -802,18 +1022,31 @@ const UploadPage: React.FC = () => {
           {selectedItems.length > 0 && (
             <div className="file-chips">
               {selectedItems.map((item) => {
-                const name = item.kind === 'dicom' ? item.label : item.file.name;
+                const name =
+                  item.kind === "dicom" ? item.label : item.file.name;
                 const isOpen = previewItemId === item.id;
                 return (
-                  <div key={item.id} className={`file-chip${isOpen ? ' file-chip--active' : ''}`}>
+                  <div
+                    key={item.id}
+                    className={`file-chip${isOpen ? " file-chip--active" : ""}`}
+                  >
                     <span className="file-chip-name">{name}</span>
                     <button
                       className="file-chip-preview"
-                      onClick={() => setPreviewItemId(prev => (prev === item.id ? null : item.id))}
+                      onClick={() =>
+                        setPreviewItemId((prev) =>
+                          prev === item.id ? null : item.id,
+                        )
+                      }
                     >
-                      {isOpen ? 'Hide' : 'Preview'}
+                      {isOpen ? "Hide" : "Preview"}
                     </button>
-                    <button className="file-chip-remove" onClick={() => removeItem(item.id)}>×</button>
+                    <button
+                      className="file-chip-remove"
+                      onClick={() => removeItem(item.id)}
+                    >
+                      ×
+                    </button>
                   </div>
                 );
               })}
@@ -824,12 +1057,23 @@ const UploadPage: React.FC = () => {
           {previewItem && !isUploading && (
             <>
               <div className="ct-preview-label">
-                Preview · {previewItem.kind === 'dicom' ? previewItem.label : previewItem.file.name}
+                Preview ·{" "}
+                {previewItem.kind === "dicom"
+                  ? previewItem.label
+                  : previewItem.file.name}
               </div>
-              <Suspense fallback={<div className="ct-preview ct-preview--msg">Loading preview…</div>}>
-                {previewItem.kind === 'dicom'
-                  ? <DicomPreview files={previewItem.files} />
-                  : <CtPreview file={previewItem.file} />}
+              <Suspense
+                fallback={
+                  <div className="ct-preview ct-preview--msg">
+                    Loading preview…
+                  </div>
+                }
+              >
+                {previewItem.kind === "dicom" ? (
+                  <DicomPreview files={previewItem.files} />
+                ) : (
+                  <CtPreview file={previewItem.file} />
+                )}
               </Suspense>
             </>
           )}
@@ -845,34 +1089,73 @@ const UploadPage: React.FC = () => {
               </div>
               <div className="model-dropdown" ref={preDropRef}>
                 <button
-                  className={`model-dropdown-btn${preValue ? ' has-value' : ''}${preDropOpen ? ' open' : ''}`}
-                  onClick={() => setPreDropOpen(o => !o)}
+                  className={`model-dropdown-btn${preValue ? " has-value" : ""}${preDropOpen ? " open" : ""}`}
+                  onClick={() => setPreDropOpen((o) => !o)}
                   type="button"
                 >
-                  <span>{preValue || 'None (skip)'}</span>
-                  <svg className={`model-dropdown-chevron${preDropOpen ? ' rotated' : ''}`} width="10" height="6" viewBox="0 0 10 6" fill="none">
-                    <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  <span>{preValue || "None (skip)"}</span>
+                  <svg
+                    className={`model-dropdown-chevron${preDropOpen ? " rotated" : ""}`}
+                    width="10"
+                    height="6"
+                    viewBox="0 0 10 6"
+                    fill="none"
+                  >
+                    <path
+                      d="M1 1l4 4 4-4"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
                   </svg>
                 </button>
                 {preDropOpen && (
                   <div className="model-dropdown-menu">
                     {[
-                      { id: "", label: "None (skip)", desc: "Upload and segment as-is" },
-                      { id: "OpenVAE", label: "OpenVAE", desc: "Enhance the scan quality before segmenting" },
-                    ].map(opt => (
+                      {
+                        id: "",
+                        label: "None (skip)",
+                        desc: "Upload and segment as-is",
+                      },
+                      {
+                        id: "OpenVAE",
+                        label: "OpenVAE",
+                        desc: "Enhance the scan quality before segmenting",
+                      },
+                    ].map((opt) => (
                       <div
                         key={opt.id}
-                        className={`model-dropdown-item${preValue === opt.id ? ' selected' : ''}`}
-                        onClick={() => { setPreValue(opt.id); setPreDropOpen(false); }}
+                        className={`model-dropdown-item${preValue === opt.id ? " selected" : ""}`}
+                        onClick={() => {
+                          setPreValue(opt.id);
+                          setPreDropOpen(false);
+                        }}
                       >
                         <div className="model-dropdown-item-content">
-                          <span className="model-dropdown-item-name">{opt.label}</span>
-                          <span className="model-dropdown-item-desc">{opt.desc}</span>
+                          <span className="model-dropdown-item-name">
+                            {opt.label}
+                          </span>
+                          <span className="model-dropdown-item-desc">
+                            {opt.desc}
+                          </span>
                         </div>
                         <div className="model-dropdown-item-side">
                           {preValue === opt.id && (
-                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="model-dropdown-check">
-                              <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 12 12"
+                              fill="none"
+                              className="model-dropdown-check"
+                            >
+                              <path
+                                d="M2 6l3 3 5-5"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
                             </svg>
                           )}
                         </div>
@@ -893,31 +1176,67 @@ const UploadPage: React.FC = () => {
               </div>
               <div className="model-dropdown" ref={modelDropRef}>
                 <button
-                  className={`model-dropdown-btn${selectedModel && selectedModel !== 'None' ? ' has-value' : ''}${modelDropOpen ? ' open' : ''}`}
-                  onClick={() => setModelDropOpen(o => !o)}
+                  className={`model-dropdown-btn${selectedModel && selectedModel !== "None" ? " has-value" : ""}${modelDropOpen ? " open" : ""}`}
+                  onClick={() => setModelDropOpen((o) => !o)}
                   type="button"
                 >
-                  <span>{selectedModel === 'None' ? 'None (view scan)' : MODEL_OPTIONS.find(m => m.id === selectedModel)?.label || 'Select a model'}</span>
-                  <svg className={`model-dropdown-chevron${modelDropOpen ? ' rotated' : ''}`} width="10" height="6" viewBox="0 0 10 6" fill="none">
-                    <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  <span>
+                    {selectedModel === "None"
+                      ? "None (view scan)"
+                      : MODEL_OPTIONS.find((m) => m.id === selectedModel)
+                          ?.label || "Select a model"}
+                  </span>
+                  <svg
+                    className={`model-dropdown-chevron${modelDropOpen ? " rotated" : ""}`}
+                    width="10"
+                    height="6"
+                    viewBox="0 0 10 6"
+                    fill="none"
+                  >
+                    <path
+                      d="M1 1l4 4 4-4"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
                   </svg>
                 </button>
                 {modelDropOpen && (
                   <div className="model-dropdown-menu">
-                    {MODEL_OPTIONS.map(m => (
+                    {MODEL_OPTIONS.map((m) => (
                       <div
                         key={m.id}
-                        className={`model-dropdown-item${selectedModel === m.id ? ' selected' : ''}`}
-                        onClick={() => { setSelectedModel(m.id as typeof selectedModel); setModelDropOpen(false); }}
+                        className={`model-dropdown-item${selectedModel === m.id ? " selected" : ""}`}
+                        onClick={() => {
+                          setSelectedModel(m.id as typeof selectedModel);
+                          setModelDropOpen(false);
+                        }}
                       >
                         <div className="model-dropdown-item-content">
-                          <span className="model-dropdown-item-name">{m.label}</span>
-                          <span className="model-dropdown-item-desc">{m.desc}</span>
+                          <span className="model-dropdown-item-name">
+                            {m.label}
+                          </span>
+                          <span className="model-dropdown-item-desc">
+                            {m.desc}
+                          </span>
                         </div>
                         <div className="model-dropdown-item-side">
                           {selectedModel === m.id && (
-                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="model-dropdown-check">
-                              <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 12 12"
+                              fill="none"
+                              className="model-dropdown-check"
+                            >
+                              <path
+                                d="M2 6l3 3 5-5"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
                             </svg>
                           )}
                         </div>
@@ -939,34 +1258,73 @@ const UploadPage: React.FC = () => {
               </div>
               <div className="model-dropdown" ref={postDropRef}>
                 <button
-                  className={`model-dropdown-btn${postValue ? ' has-value' : ''}${postDropOpen ? ' open' : ''}`}
-                  onClick={() => setPostDropOpen(o => !o)}
+                  className={`model-dropdown-btn${postValue ? " has-value" : ""}${postDropOpen ? " open" : ""}`}
+                  onClick={() => setPostDropOpen((o) => !o)}
                   type="button"
                 >
-                  <span>{postValue || 'None (skip)'}</span>
-                  <svg className={`model-dropdown-chevron${postDropOpen ? ' rotated' : ''}`} width="10" height="6" viewBox="0 0 10 6" fill="none">
-                    <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  <span>{postValue || "None (skip)"}</span>
+                  <svg
+                    className={`model-dropdown-chevron${postDropOpen ? " rotated" : ""}`}
+                    width="10"
+                    height="6"
+                    viewBox="0 0 10 6"
+                    fill="none"
+                  >
+                    <path
+                      d="M1 1l4 4 4-4"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
                   </svg>
                 </button>
                 {postDropOpen && (
                   <div className="model-dropdown-menu">
                     {[
-                      { id: "", label: "None (skip)", desc: "Use results as-is" },
-                      { id: "ShapeKit", label: "ShapeKit", desc: "Clean up and smooth organ outlines" },
-                    ].map(opt => (
+                      {
+                        id: "",
+                        label: "None (skip)",
+                        desc: "Use results as-is",
+                      },
+                      {
+                        id: "ShapeKit",
+                        label: "ShapeKit",
+                        desc: "Clean up and smooth organ outlines",
+                      },
+                    ].map((opt) => (
                       <div
                         key={opt.id}
-                        className={`model-dropdown-item${postValue === opt.id ? ' selected' : ''}`}
-                        onClick={() => { setPostValue(opt.id); setPostDropOpen(false); }}
+                        className={`model-dropdown-item${postValue === opt.id ? " selected" : ""}`}
+                        onClick={() => {
+                          setPostValue(opt.id);
+                          setPostDropOpen(false);
+                        }}
                       >
                         <div className="model-dropdown-item-content">
-                          <span className="model-dropdown-item-name">{opt.label}</span>
-                          <span className="model-dropdown-item-desc">{opt.desc}</span>
+                          <span className="model-dropdown-item-name">
+                            {opt.label}
+                          </span>
+                          <span className="model-dropdown-item-desc">
+                            {opt.desc}
+                          </span>
                         </div>
                         <div className="model-dropdown-item-side">
                           {postValue === opt.id && (
-                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="model-dropdown-check">
-                              <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 12 12"
+                              fill="none"
+                              className="model-dropdown-check"
+                            >
+                              <path
+                                d="M2 6l3 3 5-5"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
                             </svg>
                           )}
                         </div>
@@ -998,7 +1356,10 @@ const UploadPage: React.FC = () => {
                   <span className="progress-label-pct">{uploadProgress}%</span>
                 </div>
                 <div className="progress-track">
-                  <div className="progress-fill progress-fill-upload" style={{ width: `${uploadProgress}%` }} />
+                  <div
+                    className="progress-fill progress-fill-upload"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
                 </div>
               </div>
             </div>
@@ -1011,22 +1372,37 @@ const UploadPage: React.FC = () => {
               <div className="result-btns">
                 {selectedModel === "OpenVAE" ? (
                   <>
-                    <button className="result-btn" onClick={() => navigate(`/reconstruction/${sessionId}`)}>
+                    <button
+                      className="result-btn"
+                      onClick={() => navigate(`/reconstruction/${sessionId}`)}
+                    >
                       View Reconstruction
                     </button>
-                    <button className="result-btn" onClick={handleRunEpaiOnReconstruction}>
+                    <button
+                      className="result-btn"
+                      onClick={handleRunEpaiOnReconstruction}
+                    >
                       Run ePAI on Result
                     </button>
-                    <button className="result-btn" onClick={() => downloadResult(sessionId)}>
+                    <button
+                      className="result-btn"
+                      onClick={() => downloadResult(sessionId)}
+                    >
                       Download
                     </button>
                   </>
                 ) : (
                   <>
-                    <button className="result-btn result-btn-primary" onClick={() => navigate(`/session/${sessionId}`)}>
+                    <button
+                      className="result-btn result-btn-primary"
+                      onClick={() => navigate(`/session/${sessionId}`)}
+                    >
                       View Visualization
                     </button>
-                    <button className="result-btn" onClick={() => downloadResult(sessionId)}>
+                    <button
+                      className="result-btn"
+                      onClick={() => downloadResult(sessionId)}
+                    >
                       Download Results
                     </button>
                   </>

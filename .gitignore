@@ -14,3 +14,5 @@ PanTS/data/pdf/
 flask-server/pants-dev.db
 flask-server/pants-dev.db-wal
 flask-server/pants-dev.db-shm
+
+/CancerVerse/

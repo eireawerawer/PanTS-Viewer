@@ -55,6 +55,8 @@ describe("ComparePage", () => {
 		expect(await screen.findByText("1725 cm³")).toBeTruthy();
 		// …and the volume delta (B − A = +225).
 		expect(await screen.findByText("+225 cm³")).toBeTruthy();
+		// …and the mean HU delta (B − A = 54 - 52 = +2).
+		expect(await screen.findByText("+2 HU mean")).toBeTruthy();
 	});
 
 	it("prompts when only one case id is provided", async () => {

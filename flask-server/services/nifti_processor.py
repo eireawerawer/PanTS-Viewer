@@ -276,7 +276,7 @@ class NiftiProcessor:
         return os.path.splitext(name)[0]
 
 
-    def load_uploaded_nifti(file_storage):
+    def load_uploaded_nifti(self, file_storage):
         """
         Safely load a Flask/Werkzeug uploaded NIfTI file on Windows.
         """
@@ -287,6 +287,24 @@ class NiftiProcessor:
             raise ValueError(f"Uploaded file {file_storage.filename} is empty or already read")
 
         temp_path = None
+
+        try:
+            # delete=False + close-before-reopen: Windows won't let nib.load
+            # open a NamedTemporaryFile that's still held open by this process.
+            with tempfile.NamedTemporaryFile(suffix=".nii.gz", delete=False) as temp:
+                temp.write(data)
+                temp.flush()
+                temp_path = temp.name
+
+            nifti_obj = nib.load(temp_path)
+            img_data = nifti_obj.get_fdata()
+            affine = nifti_obj.affine
+            header = nifti_obj.header.copy()
+        finally:
+            if temp_path is not None and os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        return img_data, affine, header
 
     def combine_labels(self, filenames: list[str], nifti_multi_dict: MultiDict, save=True):
         """
@@ -304,7 +322,7 @@ class NiftiProcessor:
         if len(filenames) == 1:
             filename = filenames[0]
             segmentation = nifti_multi_dict[filename]
-
+            
             img_data, affine, header = self.load_uploaded_nifti(segmentation)
 
             combined_labels_img_data = np.rint(img_data).astype(np.uint16)

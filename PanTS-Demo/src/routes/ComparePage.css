@@ -139,40 +139,119 @@
 .cmp__row {
   display: grid;
   grid-template-columns: 1.3fr 1fr 1fr 1fr;
-  gap: 10px;
+  gap: 18px;
   align-items: center;
-  padding: 11px 16px;
-  font-size: 13px;
+  padding: 16px 20px;
+  font-size: 15px;
 }
-.cmp__row:not(.cmp__row--head):nth-child(odd) { background: rgba(255, 255, 255, 0.025); }
+.cmp__rowgroup { border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+.cmp__rowgroup:last-child { border-bottom: none; }
 .cmp__row--head {
   background: rgba(255, 255, 255, 0.05);
   font-family: "Space Mono", monospace;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: rgba(255, 255, 255, 0.5);
+  padding: 12px 20px;
 }
 .cmp__row--head span:not(:first-child),
 .cmp__cell { text-align: right; }
-.cmp__organ { color: #f4f5f7; }
+.cmp__organ {
+  color: #f4f5f7;
+  font-weight: 600;
+  font-size: 16px;
+}
 .cmp__cell {
   font-family: "Space Mono", monospace;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.82);
+  color: rgba(255, 255, 255, 0.9);
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 2px;
+  gap: 5px;
 }
+.cmp__cell-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.cmp__vol { font-size: 16px; font-weight: 600; }
 .cmp__pct {
   font-style: normal;
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.42);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
 }
-.cmp__delta { font-weight: 600; }
-.cmp-delta--up { color: #6ee7a8; }
-.cmp-delta--down { color: #ff9db1; }
+.cmp__meanhu {
+  font-style: normal;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+}
+.cmp-delta--up .cmp__vol,
+.cmp-delta--up.cmp__meanhu { color: #6ee7a8; }
+.cmp-delta--down .cmp__vol,
+.cmp-delta--down.cmp__meanhu { color: #ff9db1; }
+
+/* Each row expands in place to reveal median/std dev/min/max/skewness/kurtosis (+ deltas)
+   for both cases, so the compact table stays scannable across many organs while the full
+   comparison is one click away. */
+.cmp__row--expandable { cursor: pointer; }
+.cmp__row--expandable:hover { background: rgba(255, 255, 255, 0.05); }
+.cmp__chevron {
+  display: inline-block;
+  width: 12px;
+  margin-right: 4px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.42);
+  transition: transform 0.15s ease;
+}
+.cmp__chevron--open { transform: rotate(90deg); }
+.cmp__truncated-flag {
+  margin-left: 6px;
+  font-size: 11px;
+  color: #ffb454;
+  cursor: help;
+}
+.cmp__detail {
+  padding: 6px 20px 18px 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.cmp__detail-row {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr 1fr 1fr;
+  gap: 18px;
+  font-family: "Space Mono", monospace;
+  font-size: 13px;
+}
+.cmp__detail-row span:not(:first-child) { text-align: right; color: rgba(255, 255, 255, 0.85); }
+.cmp__detail-row span:first-child {
+  color: rgba(255, 255, 255, 0.55);
+  font-family: "Space Grotesk", system-ui, sans-serif;
+}
+.cmp__detail-row--head span:not(:first-child) {
+  color: rgba(255, 255, 255, 0.42);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+}
+.cmp__detail-row--head span:first-child {
+  color: rgba(255, 255, 255, 0.42);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+}
+.cmp__detail-delta { font-weight: 600; }
+.cmp__detail-delta.cmp-delta--up { color: #6ee7a8; }
+.cmp__detail-delta.cmp-delta--down { color: #ff9db1; }
+
+/* Dotted-underline affordance for any stat label with a hover explanation (e.g. Kurtosis) —
+   makes the tooltip discoverable instead of relying on users guessing to hover plain text. */
+.cmp__tooltip-label {
+  cursor: help;
+  border-bottom: 1px dotted rgba(255, 255, 255, 0.4);
+}
 
 @media (max-width: 640px) {
   .cmp__cases { grid-template-columns: 1fr; }
