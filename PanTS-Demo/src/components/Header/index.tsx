@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { IconBrandGithub, IconX } from "@tabler/icons-react";
 import { Link, NavLink } from "react-router-dom";
+import AuthButton from "../AuthButton";
 import styles from "./Header.module.css";
 
 const TABS = [
@@ -90,6 +91,8 @@ export default function Header() {
             <span>GitHub</span>
           </a>
 
+          <AuthButton />
+
           <button
             ref={hamburgerRef}
             type="button"
@@ -168,6 +171,8 @@ export default function Header() {
                 <IconBrandGithub size={16} aria-hidden="true" />
                 <span>GitHub</span>
               </a>
+
+              <AuthButton />
             </div>
           </aside>
         </>

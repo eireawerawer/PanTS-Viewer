@@ -7,6 +7,12 @@ import React, {
   useState,
 } from "react";
 
+// Mirrors the backend's REQUIRE_AUTH_FOR_INFERENCE. Off by default so anonymous
+// visitors can still run inference on the deployed site, which has no working
+// sign-in yet. Set VITE_REQUIRE_AUTH_FOR_INFERENCE=true to restore the gate.
+const REQUIRE_AUTH_FOR_INFERENCE =
+  String(import.meta.env.VITE_REQUIRE_AUTH_FOR_INFERENCE || "").toLowerCase() === "true";
+
 const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "None",
@@ -55,6 +61,8 @@ import { API_BASE } from "../helpers/constants";
 import {
   addRecentUpload,
   formatRelativeTime,
+  groupUploads,
+  isGroupInFlight,
   loadRecentUploads,
   recentStatusColor,
   removeRecentUpload,
@@ -62,6 +70,9 @@ import {
   type RecentUpload,
 } from "../helpers/recentUploads";
 import Header from "../components/Header";
+import ProcessingSummaryBar from "../components/ProcessingSummaryBar";
+import BatchDetailsModal from "../components/BatchDetailsModal";
+import { useAuth } from "../contexts/authContext";
 import { looksLikeDicom, setLocalDicomFiles } from "../helpers/dicomLocal";
 import { setLocalNiftiFile } from "../helpers/localNifti";
 import {
@@ -72,6 +83,7 @@ import {
   setPendingNextChunk,
   type PendingUpload,
 } from "../helpers/pendingUploads";
+import { postWithRetry, resolveResumeStart } from "../helpers/chunkUpload";
 
 const parseApiResponse = async (res: Response): Promise<any> => {
   const contentType = res.headers.get("content-type") || "";
@@ -93,6 +105,14 @@ type SelectedItem =
 
 const UploadPage: React.FC = () => {
   const navigate = useNavigate();
+  const { isAuthenticated, promptAuth } = useAuth();
+  // Signed-out uploads open the sign-up popup instead of proceeding, but only
+  // while the account gate is on (see REQUIRE_AUTH_FOR_INFERENCE above).
+  const ensureAccount = (): boolean => {
+    if (!REQUIRE_AUTH_FOR_INFERENCE || isAuthenticated) return true;
+    promptAuth("signup");
+    return false;
+  };
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Folder picker for a DICOM series (run inference, or view-only when model is "None").
   const dicomUploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -139,6 +159,8 @@ const UploadPage: React.FC = () => {
   const [recentUploads, setRecentUploads] = useState<RecentUpload[]>(() =>
     loadRecentUploads(),
   );
+  // Which batch's "View details" popup is open (null = none).
+  const [detailsBatchId, setDetailsBatchId] = useState<string | null>(null);
   // Sub-state of each Active card: "uploading" | "queued" | "running".
   const [sessionPhases, setSessionPhases] = useState<Record<string, string>>(
     {},
@@ -158,6 +180,7 @@ const UploadPage: React.FC = () => {
 
   /* ── File handling ── */
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!ensureAccount()) { e.target.value = ""; return; }
     if (!e.target.files) return;
     const filteredFiles = Array.from(e.target.files).filter((file) =>
       allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
@@ -179,6 +202,8 @@ const UploadPage: React.FC = () => {
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
+    // Inlined (not via ensureAccount) so the memoized closure sees fresh auth.
+    if (REQUIRE_AUTH_FOR_INFERENCE && !isAuthenticated) { promptAuth("signup"); return; }
     if (!e.dataTransfer.files) return;
     const filteredFiles = Array.from(e.dataTransfer.files).filter((file) =>
       allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
@@ -195,7 +220,7 @@ const UploadPage: React.FC = () => {
         file: f,
       })),
     ]);
-  }, []);
+  }, [isAuthenticated, promptAuth]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -216,6 +241,10 @@ const UploadPage: React.FC = () => {
   const handleDicomInferenceSelect = (
     e: React.ChangeEvent<HTMLInputElement>,
   ) => {
+    if (!ensureAccount()) {
+      e.target.value = "";
+      return;
+    }
     const files = Array.from(e.target.files ?? []);
     e.target.value = ""; // allow re-picking the same folder later
     const candidates = files.filter(looksLikeDicom);
@@ -373,10 +402,9 @@ const UploadPage: React.FC = () => {
         .forEach((p) => deletePendingUpload(p.sessionId));
 
       if (processing.length > 0) {
+        // Keep a session id bound for the action bar, but don't surface a
+        // "Reconnected · N runs" message — the processing summary bar shows this.
         setSessionId(processing[0].sessionId);
-        setMessage(
-          `Reconnected · ${processing.length} run${processing.length === 1 ? "" : "s"} in progress`,
-        );
       }
     })();
     return () => {
@@ -448,10 +476,11 @@ const UploadPage: React.FC = () => {
   // not a client one.
   const CHUNK_SIZE = 512 * 1024;
 
-  // Uploads the file described by `p` from p.nextChunk onward, finalizes, then
-  // starts inference. Resumable: the file lives in IndexedDB and the chunk
-  // cursor is persisted, so a reload can call this again to pick up where it
-  // left off. `foreground` = the run the user just clicked (drives the progress
+  // Uploads the file described by `p`, finalizes, then starts inference.
+  // Resumable: the file lives in IndexedDB and the chunk cursor is persisted, so
+  // a reload can call this again to pick up where it left off - starting from
+  // what the server confirms it holds, not from p.nextChunk directly.
+  // `foreground` = the run the user just clicked (drives the progress
   // bar); resumed background runs show only their Active-section spinner.
   const runUpload = async (p: PendingUpload, foreground: boolean) => {
     const {
@@ -466,10 +495,19 @@ const UploadPage: React.FC = () => {
     uploadAbortRef.current.set(sid, controller);
     setPhase(sid, "uploading");
     try {
+      // A resumed upload can't trust its own cursor - the server may have swept
+      // its chunks (24h TTL) or lost the staging disk. Ask what it still holds
+      // and continue from there; if nothing survived this comes back 0 and the
+      // file re-sends from the start (it's still in IndexedDB). Fresh uploads
+      // skip the round-trip.
+      const startChunk = p.nextChunk > 0
+        ? await resolveResumeStart(API_BASE, sid, p.nextChunk)
+        : 0;
+
       if (foreground) {
         foregroundUploadSidRef.current = sid;
         setIsUploading(true);
-        setUploadProgress(Math.round((p.nextChunk / totalChunks) * 100));
+        setUploadProgress(Math.round((startChunk / totalChunks) * 100));
         setMessage(`Uploading ${filename}...`);
       }
 
@@ -486,15 +524,21 @@ const UploadPage: React.FC = () => {
       const CONCURRENCY = 3;
 
       // Resumed uploads must be sliced exactly as they were originally sliced --
-      // see chunkSizeOf(). New uploads record CHUNK_SIZE at creation.
+      // see chunkSizeOf(). New uploads record CHUNK_SIZE at creation. This guards
+      // a *different* failure than startChunk below: chunkSizeOf keeps the byte
+      // offsets right, startChunk keeps the index right. Both are needed.
       const chunkSize = chunkSizeOf(p);
-      let nextIndexToStart = p.nextChunk;
-      let completedCount = p.nextChunk;
+
+      // Every cursor below starts from startChunk (what the SERVER confirmed it
+      // holds), not p.nextChunk (what this tab last wrote to IndexedDB) - the
+      // two differ whenever the staging area was swept or lost.
+      let nextIndexToStart = startChunk;
+      let completedCount = startChunk;
       const completedIndices = new Set<number>();
       // The resume cursor must only ever advance over a CONTIGUOUS run of completed
       // chunks -- with parallel uploads, chunk 20 can finish before chunk 15, and
       // persisting past a gap would make a resumed run skip re-sending chunk 15.
-      let contiguousWatermark = p.nextChunk;
+      let contiguousWatermark = startChunk;
       const advanceWatermark = async () => {
         let advanced = false;
         while (completedIndices.has(contiguousWatermark)) {
@@ -520,11 +564,17 @@ const UploadPage: React.FC = () => {
         formData.append("total_chunks", totalChunks.toString());
         formData.append("file", chunk);
 
-        const res = await fetch(`${API_BASE}/api/upload-inference-chunk`, {
-          method: "POST",
-          body: formData,
-          signal: controller.signal,
-        });
+        // Retried: a single dropped chunk used to fail the whole run and delete
+        // its resumable copy, making a brief network blip worse than closing
+        // the tab. A 413 or other 4xx still fails fast - it won't fix itself.
+        const res = await postWithRetry(
+          `${API_BASE}/api/upload-inference-chunk`,
+          {
+            method: "POST",
+            body: formData,
+            signal: controller.signal,
+          },
+        );
         if (res.status === 413)
           throw new Error(
             "Upload chunk too large for server/proxy limit (HTTP 413).",
@@ -547,13 +597,16 @@ const UploadPage: React.FC = () => {
         }
       };
       await Promise.all(
-        Array.from({ length: Math.min(CONCURRENCY, totalChunks - p.nextChunk) }, worker),
+        Array.from(
+          { length: Math.min(CONCURRENCY, totalChunks - startChunk) },
+          worker,
+        ),
       );
       // Final persist in case the last watermark advance(s) landed on a non-multiple
       // of 16 -- without this, a crash right after the loop could re-send a few
-      // already-uploaded tail chunks on resume (harmless, per the original comment,
-      // but pointless to leave on the table now that we track the exact watermark).
-      if (contiguousWatermark > p.nextChunk) {
+      // already-uploaded tail chunks on resume (harmless, but pointless to leave on
+      // the table now that we track the exact watermark).
+      if (contiguousWatermark > startChunk) {
         await setPendingNextChunk(sid, contiguousWatermark);
       }
 
@@ -589,6 +642,7 @@ const UploadPage: React.FC = () => {
       const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
         method: "POST",
         body: inferFd,
+        credentials: "include",
         signal: controller.signal,
       });
       const data = await parseApiResponse(res);
@@ -615,7 +669,8 @@ const UploadPage: React.FC = () => {
       }
       await deletePendingUpload(sid);
       setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
-      if (foreground) setMessage("Failed: " + (err as Error).message);
+      // The card already shows "Failed" — don't duplicate it in the status line.
+      if (foreground) setMessage("");
     } finally {
       if (uploadAbortRef.current.get(sid) === controller) {
         uploadAbortRef.current.delete(sid);
@@ -643,7 +698,10 @@ const UploadPage: React.FC = () => {
         const formData = new FormData();
         formData.append("session_id", sid);
         formData.append("file", files[i]);
-        const res = await fetch(`${API_BASE}/api/upload-dicom-slice`, {
+        // Retried like NIfTI chunks, and it matters more here: a DICOM folder
+        // has no IndexedDB copy, so a blip on any one slice means re-picking
+        // the folder and starting over.
+        const res = await postWithRetry(`${API_BASE}/api/upload-dicom-slice`, {
           method: "POST",
           body: formData,
           signal: controller.signal,
@@ -680,6 +738,7 @@ const UploadPage: React.FC = () => {
       const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
         method: "POST",
         body: inferFd,
+        credentials: "include",
         signal: controller.signal,
       });
       const data = await parseApiResponse(res);
@@ -698,7 +757,8 @@ const UploadPage: React.FC = () => {
       foregroundUploadSidRef.current = null;
       setIsUploading(false);
       setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
-      setMessage("Failed: " + (err as Error).message);
+      // Card already shows "Failed"; don't duplicate it in the status line.
+      setMessage("");
     } finally {
       if (uploadAbortRef.current.get(sid) === controller) {
         uploadAbortRef.current.delete(sid);
@@ -707,36 +767,18 @@ const UploadPage: React.FC = () => {
   };
 
   /* ── Run inference ── */
-  const handleRunEpaiInference = async () => {
-    const item = selectedItems[0] ?? null;
-
-    // "None" model = view only: open the scan in its full local viewer, nothing is
-    // uploaded or run. DICOM opens the /dicom viewer, NIfTI the /local-nifti viewer.
-    if (selectedModel === "None") {
-      if (!item) {
-        alert("Select a scan to view first.");
-        return;
-      }
-      if (item.kind === "dicom") {
-        setLocalDicomFiles(item.files);
-        navigate("/dicom");
-      } else {
-        setLocalNiftiFile(item.file);
-        navigate("/local-nifti");
-      }
-      return;
-    }
-
-    if (!item) {
-      alert("Select a file to upload first.");
-      return;
-    }
-
-    const model = selectedModel;
+  // Kick off one scan's upload/inference. Shared by single and batch runs.
+  // `foreground` drives the top progress bar (only the first scan of a run
+  // claims it; the rest upload in the background).
+  const startScanRun = async (
+    item: SelectedItem,
+    model: string,
+    foreground: boolean,
+    batch?: { batchId: string; batchLabel: string },
+  ) => {
     const sid = crypto.randomUUID();
     const label = (item.kind === "dicom" ? item.label : item.file.name) || sid;
 
-    setInferenceCompleted(false);
     setRecentUploads(
       addRecentUpload({
         sessionId: sid,
@@ -745,14 +787,15 @@ const UploadPage: React.FC = () => {
         status: "Processing",
         timestamp: Date.now(),
         isReconstruction: model === "OpenVAE",
+        batchId: batch?.batchId,
+        batchLabel: batch?.batchLabel,
       }),
     );
 
-    // Consume the first item so the next can be queued. A DICOM folder uploads its
-    // slices and converts server-side; a NIfTI file rides the resumable path (stashed
-    // in IndexedDB so an interrupted upload can resume).
-    setSelectedItems((prev) => prev.slice(1));
-
+    // The caller clears the whole selection before looping, so there's nothing to
+    // consume here. A DICOM folder uploads its slices and converts server-side; a
+    // NIfTI file rides the resumable path (stashed in IndexedDB so an interrupted
+    // upload can resume).
     if (item.kind === "dicom") {
       runDicomUpload(sid, item.files, model);
       return;
@@ -769,58 +812,58 @@ const UploadPage: React.FC = () => {
       nextChunk: 0,
       chunkSize: CHUNK_SIZE,
     };
-    uploadResumableRef.current = await savePendingUpload(pending);
-    runUpload(pending, true);
+    const resumable = await savePendingUpload(pending);
+    if (foreground) uploadResumableRef.current = resumable;
+    runUpload(pending, foreground);
   };
 
-  const handleCheckStatus = async () => {
-    if (!sessionId) {
-      setMessage("No session id yet.");
-      return;
-    }
-    try {
-      const res = await fetch(`${API_BASE}/api/inference-status/${sessionId}`);
-      const data = await parseApiResponse(res);
-      if (!res.ok)
-        throw new Error(data.error || data.status || "Status check failed");
-      setMessage(
-        `Status: ${data.status}${data.error ? ` (${data.error})` : ""}`,
-      );
-      const status = (data.status || "").toLowerCase();
-      if (status === "completed") {
-        setInferenceCompleted(true);
-        setRecentUploads(updateRecentUploadStatus(sessionId, "Completed"));
-        stopPolling(sessionId);
-      } else if (status === "cancelled") {
-        setRecentUploads(updateRecentUploadStatus(sessionId, "Cancelled"));
-        stopPolling(sessionId);
-        setPhase(sessionId);
-      } else if (status === "running" || status === "queued") {
-        if (!pollTimersRef.current.has(sessionId)) {
-          // Use the model recorded on the card - the dropdown may have changed
-          // since this run started, and the model decides the viewer route.
-          const model =
-            loadRecentUploads().find((u) => u.sessionId === sessionId)?.model ||
-            selectedModel;
-          startInferencePolling(sessionId, model);
-        }
+  const handleRunEpaiInference = async () => {
+    if (!ensureAccount()) return;
+    const items = selectedItems;
+    const first = items[0] ?? null;
+
+    // "None" model = view only: open the scan in its full local viewer, nothing is
+    // uploaded or run. DICOM opens the /dicom viewer, NIfTI the /local-nifti viewer.
+    if (selectedModel === "None") {
+      if (!first) { alert("Select a scan to view first."); return; }
+      if (first.kind === "dicom") {
+        setLocalDicomFiles(first.files);
+        navigate("/dicom");
+      } else {
+        setLocalNiftiFile(first.file);
+        navigate("/local-nifti");
       }
-    } catch (err) {
-      console.error(err);
-      setMessage("Status check failed: " + (err as Error).message);
+      return;
+    }
+
+    if (!first) {
+      alert("Select a file to upload first.");
+      return;
+    }
+
+    const model = selectedModel;
+    setInferenceCompleted(false);
+
+    // Multiple selected scans run together as one batch (shared id + label). A
+    // single scan runs on its own with no batch metadata.
+    const batch =
+      items.length > 1
+        ? { batchId: crypto.randomUUID(), batchLabel: `${items.length} scans` }
+        : undefined;
+
+    // Snapshot then clear the selection, and start every scan's run.
+    setSelectedItems([]);
+    for (let i = 0; i < items.length; i++) {
+      await startScanRun(items[i], model, i === 0, batch);
     }
   };
 
-  const handleDownloadResult = async () => {
-    if (!sessionId) {
-      setMessage("No session id yet.");
-      return;
-    }
+  // Download one completed scan's result zip. Parameterised so it works from a
+  // completed card and from inside the batch-details modal.
+  const downloadResult = async (sid: string) => {
     setMessage("Preparing download...");
     try {
-      const statusRes = await fetch(
-        `${API_BASE}/api/inference-status/${sessionId}`,
-      );
+      const statusRes = await fetch(`${API_BASE}/api/inference-status/${sid}`);
       const statusData = await parseApiResponse(statusRes);
       if (!statusRes.ok)
         throw new Error(
@@ -832,9 +875,9 @@ const UploadPage: React.FC = () => {
         );
         return;
       }
-      stopPolling(sessionId);
+      stopPolling(sid);
 
-      const resultRes = await fetch(`${API_BASE}/api/get_result/${sessionId}`);
+      const resultRes = await fetch(`${API_BASE}/api/get_result/${sid}`);
       if (!resultRes.ok) {
         const maybeJson = await parseApiResponse(resultRes);
         throw new Error(maybeJson?.error || "Failed to download result zip");
@@ -843,7 +886,7 @@ const UploadPage: React.FC = () => {
       const objectUrl = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = objectUrl;
-      link.download = `epai_output_${sessionId}.zip`;
+      link.download = `epai_output_${sid}.zip`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -855,6 +898,15 @@ const UploadPage: React.FC = () => {
       console.error(err);
       setMessage("Download failed: " + (err as Error).message);
     }
+  };
+
+  // Download a whole batch as one archive. In this mock there's no server-side
+  // bundling endpoint yet, so it surfaces intent; wire to a real batch-zip
+  // endpoint when the backend supports it.
+  const downloadBatch = (uploads: RecentUpload[]) => {
+    const completed = uploads.filter(u => u.status === "Completed");
+    if (completed.length === 0) { setMessage("No completed scans to download yet."); return; }
+    setMessage(`Downloading ${completed.length} scan${completed.length === 1 ? "" : "s"} as a batch…`);
   };
 
   const handleRunEpaiOnReconstruction = async () => {
@@ -924,7 +976,9 @@ const UploadPage: React.FC = () => {
           {/* ── Drop zone ── */}
           <div
             className={`dropzone${isDragOver ? " drag-over" : ""}`}
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => {
+              if (ensureAccount()) fileInputRef.current?.click();
+            }}
             onDrop={handleDrop}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -973,7 +1027,7 @@ const UploadPage: React.FC = () => {
                 className="dropzone-btn"
                 onClick={(e) => {
                   e.stopPropagation();
-                  fileInputRef.current?.click();
+                  if (ensureAccount()) fileInputRef.current?.click();
                 }}
               >
                 Select NIfTI file
@@ -983,7 +1037,7 @@ const UploadPage: React.FC = () => {
                 className="dropzone-btn"
                 onClick={(e) => {
                   e.stopPropagation();
-                  dicomUploadInputRef.current?.click();
+                  if (ensureAccount()) dicomUploadInputRef.current?.click();
                 }}
               >
                 Select DICOM folder
@@ -1317,18 +1371,8 @@ const UploadPage: React.FC = () => {
             </button>
           </div>
 
-          {/* ── Advanced options ── */}
-          {/* ── Action bar ── */}
-          {sessionId && (
-            <div className="action-bar">
-              <button className="action-btn" onClick={handleCheckStatus}>
-                Check Status
-              </button>
-              <button className="action-btn" onClick={handleDownloadResult}>
-                Download
-              </button>
-            </div>
-          )}
+          {/* Check Status removed (auto-polling covers it); Download now lives on
+              completed entries in Completed Uploads, not as an always-on button. */}
 
           {/* ── Progress (upload phase only - running inference shows in Active below) ── */}
           {isUploading && (
@@ -1369,7 +1413,7 @@ const UploadPage: React.FC = () => {
                     </button>
                     <button
                       className="result-btn"
-                      onClick={handleDownloadResult}
+                      onClick={() => downloadResult(sessionId)}
                     >
                       Download
                     </button>
@@ -1384,7 +1428,7 @@ const UploadPage: React.FC = () => {
                     </button>
                     <button
                       className="result-btn"
-                      onClick={handleDownloadResult}
+                      onClick={() => downloadResult(sessionId)}
                     >
                       Download Results
                     </button>
@@ -1394,340 +1438,250 @@ const UploadPage: React.FC = () => {
             </div>
           )}
 
-          {/* ── Status messages ── */}
-          {sessionId && !inferenceCompleted && (
-            <div className="status-msg status-msg-session">
-              Session: {sessionId}
-            </div>
-          )}
+          {/* ── Status messages (errors / transient feedback only) ── */}
           {message && <div className="status-msg">{message}</div>}
         </div>
 
-        {/* ── Active (in-progress) Uploads ── */}
-        {recentUploads.some((u) => u.status === "Processing") && (
-          <div style={{ marginTop: "32px" }}>
-            <div
-              style={{
-                fontFamily: "'Space Grotesk', sans-serif",
-                fontSize: "11px",
-                fontWeight: 600,
-                letterSpacing: "0.12em",
-                textTransform: "uppercase",
-                color: "#8f8f8f",
-                marginBottom: "16px",
-                paddingLeft: "4px",
-              }}
-            >
-              Active
-            </div>
-            <div
-              style={{ display: "flex", flexDirection: "column", gap: "8px" }}
-            >
-              {recentUploads
-                .filter((u) => u.status === "Processing")
-                .map((upload) => {
-                  const phase = sessionPhases[upload.sessionId];
-                  const phaseLabel =
-                    phase === "uploading"
-                      ? "Uploading…"
-                      : phase === "queued"
-                        ? "Queued for GPU"
-                        : "Running…";
-                  return (
-                    <div
-                      key={upload.sessionId}
-                      style={{
-                        background: "#f5f5f5",
-                        border: "1px solid rgba(0,45,114,0.14)",
-                        borderRadius: "12px",
-                        padding: "16px 20px",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "16px",
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: "36px",
-                            height: "36px",
-                            borderRadius: "8px",
-                            background: "rgba(0,45,114,0.04)",
-                            border: "1px solid rgba(0,45,114,0.12)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          <div className="upload-spinner" />
-                        </div>
-                        <div>
-                          <div
-                            style={{
-                              fontFamily: "'Space Grotesk', sans-serif",
-                              fontSize: "14px",
-                              fontWeight: 600,
-                              color: "#111111",
-                            }}
-                          >
-                            {upload.label}
-                          </div>
-                          <div
-                            style={{
-                              fontFamily: "'JetBrains Mono', monospace",
-                              fontSize: "11px",
-                              color: "#6a6a6a",
-                              marginTop: "2px",
-                            }}
-                          >
-                            {upload.model ? `${upload.model} · ` : ""}
-                            {formatRelativeTime(upload.timestamp)}
-                          </div>
-                        </div>
-                      </div>
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "12px",
-                        }}
-                      >
-                        <span
-                          style={{
-                            fontFamily: "'Space Grotesk', sans-serif",
-                            fontSize: "12px",
-                            fontWeight: 500,
-                            color: phase === "queued" ? "#6a6a6a" : "#002D72",
-                          }}
-                        >
-                          {phaseLabel}
-                        </span>
-                        <button
-                          className="active-cancel-btn"
-                          onClick={() => cancelRun(upload)}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-            </div>
+        {/* ── Sign-in prompt (signed-out only) ── */}
+        {!isAuthenticated && (
+          <div className="upload-account-banner">
+            <span>
+              <button type="button" className="upload-account-link" onClick={() => promptAuth("signup")}>
+                Sign in
+              </button>{" "}
+              to keep track of your scans and get notified when they're done.
+            </span>
           </div>
         )}
 
-        {/* ── Recent Uploads ── */}
-        <div style={{ marginTop: "32px" }}>
-          <div
-            style={{
-              fontFamily: "'Space Grotesk', sans-serif",
-              fontSize: "11px",
-              fontWeight: 600,
-              letterSpacing: "0.12em",
-              textTransform: "uppercase",
-              color: "#8f8f8f",
-              marginBottom: "16px",
-              paddingLeft: "4px",
+        {/* ── Processing + Completed, grouped by batch ──
+            Scans run together (multi-select) render as one batch bar; lone scans
+            render as their own card. In-flight groups show above; finished ones
+            drop into Completed Uploads, batches staying grouped. */}
+        {(() => {
+          const groups = groupUploads(recentUploads);
+          const inFlight = groups.filter(isGroupInFlight);
+          const finished = groups.filter(g => !isGroupInFlight(g));
+
+          const canView = (u: RecentUpload) => u.status !== "Failed" && u.status !== "Cancelled";
+          const openSession = (u: RecentUpload) => {
+            if (!canView(u)) return;
+            navigate(`/${u.isReconstruction ? "reconstruction" : "session"}/${u.sessionId}`);
+          };
+          const removeBatch = (uploads: RecentUpload[]) => {
+            let next = recentUploads;
+            uploads.forEach(u => { next = removeRecentUpload(u.sessionId); });
+            setRecentUploads(next);
+          };
+
+          const SectionLabel = ({ children }: { children: React.ReactNode }) => (
+            <div style={{
+              fontFamily: "'Space Grotesk', sans-serif", fontSize: "11px", fontWeight: 600,
+              letterSpacing: "0.12em", textTransform: "uppercase", color: "#8f8f8f",
+              marginBottom: "16px", paddingLeft: "4px",
+            }}>{children}</div>
+          );
+
+          const RemoveBtn = ({ onClick }: { onClick: (e: React.MouseEvent) => void }) => (
+            <button onClick={onClick} title="Remove" style={{
+              background: "transparent", border: "none", padding: "4px", cursor: "pointer",
+              color: "rgba(0,0,0,0.2)", lineHeight: 0, borderRadius: "4px", transition: "color 0.15s",
             }}
-          >
-            Recent Uploads
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-            {recentUploads.filter((u) => u.status !== "Processing").length ===
-            0 ? (
-              <div
-                style={{
-                  background: "#f5f5f5",
-                  border: "1px dashed rgba(0,0,0,0.12)",
-                  borderRadius: "12px",
-                  padding: "24px 20px",
-                  textAlign: "center",
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: "12px",
-                  color: "#8f8f8f",
-                }}
-              >
-                No uploads yet - run a model above and your results will appear
-                here.
-              </div>
-            ) : (
-              recentUploads
-                .filter((u) => u.status !== "Processing")
-                .map((upload) => {
-                  const clickable =
-                    upload.status !== "Failed" && upload.status !== "Cancelled";
-                  const openSession = () => {
-                    if (!clickable) return;
-                    navigate(
-                      `/${upload.isReconstruction ? "reconstruction" : "session"}/${upload.sessionId}`,
-                    );
-                  };
-                  return (
-                    <div
-                      key={upload.sessionId}
-                      onClick={openSession}
-                      style={{
-                        background: "#f5f5f5",
-                        border: "1px solid rgba(0,0,0,0.06)",
-                        borderRadius: "12px",
-                        padding: "16px 20px",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        cursor: clickable ? "pointer" : "default",
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "16px",
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: "36px",
-                            height: "36px",
-                            borderRadius: "8px",
-                            background: "rgba(0,0,0,0.06)",
-                            border: "1px solid rgba(0,0,0,0.12)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          <svg
-                            width="18"
-                            height="18"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="#111111"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          >
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                            <polyline points="14 2 14 8 20 8"></polyline>
-                            <line x1="16" y1="13" x2="8" y2="13"></line>
-                            <line x1="16" y1="17" x2="8" y2="17"></line>
-                            <polyline points="10 9 9 9 8 9"></polyline>
-                          </svg>
-                        </div>
-                        <div>
-                          <div
-                            style={{
-                              fontFamily: "'Space Grotesk', sans-serif",
-                              fontSize: "14px",
-                              fontWeight: 600,
-                              color: "#111111",
-                            }}
-                          >
-                            {upload.label}
-                          </div>
-                          <div
-                            style={{
-                              fontFamily: "'JetBrains Mono', monospace",
-                              fontSize: "11px",
-                              color: "#6a6a6a",
-                              marginTop: "2px",
-                            }}
-                          >
-                            {upload.model ? `${upload.model} · ` : ""}
-                            {formatRelativeTime(upload.timestamp)}
-                          </div>
-                        </div>
-                      </div>
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "12px",
-                        }}
-                      >
-                        <span
-                          style={{
-                            fontFamily: "'Space Grotesk', sans-serif",
-                            fontSize: "12px",
-                            fontWeight: 500,
-                            color: recentStatusColor(upload.status),
-                          }}
-                        >
-                          {upload.status}
-                        </span>
-                        {clickable && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openSession();
-                            }}
-                            style={{
-                              background: "transparent",
-                              border: "1px solid rgba(0,0,0,0.1)",
-                              borderRadius: "6px",
-                              padding: "6px 12px",
-                              color: "#111111",
-                              fontFamily: "'Space Grotesk', sans-serif",
-                              fontSize: "11px",
-                              cursor: "pointer",
-                            }}
-                          >
-                            View
-                          </button>
-                        )}
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setRecentUploads(
-                              removeRecentUpload(upload.sessionId),
-                            );
-                          }}
-                          title="Remove"
-                          style={{
-                            background: "transparent",
-                            border: "none",
-                            padding: "4px",
-                            cursor: "pointer",
-                            color: "rgba(0,0,0,0.2)",
-                            lineHeight: 0,
-                            borderRadius: "4px",
-                            transition: "color 0.15s",
-                          }}
-                          onMouseEnter={(e) =>
-                            (e.currentTarget.style.color = "#ef4444")
-                          }
-                          onMouseLeave={(e) =>
-                            (e.currentTarget.style.color = "rgba(0,0,0,0.2)")
-                          }
-                        >
-                          <svg
-                            width="14"
-                            height="14"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          >
-                            <polyline points="3 6 5 6 21 6" />
-                            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                            <path d="M10 11v6M14 11v6" />
-                            <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                          </svg>
-                        </button>
-                      </div>
+              onMouseEnter={e => (e.currentTarget.style.color = "#ef4444")}
+              onMouseLeave={e => (e.currentTarget.style.color = "rgba(0,0,0,0.2)")}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                <path d="M10 11v6M14 11v6" />
+                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+              </svg>
+            </button>
+          );
+
+          // One shared icon container so single + batch entries line up identically.
+          const iconBox = {
+            width: "40px", height: "40px", borderRadius: "8px", flexShrink: 0,
+            background: "rgba(0,0,0,0.06)", border: "1px solid rgba(0,0,0,0.12)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          } as const;
+
+          const FileIcon = () => (
+            <div style={iconBox}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#111111" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" /><polyline points="10 9 9 9 8 9" />
+              </svg>
+            </div>
+          );
+
+          // Batch: stacked-layers glyph in the identical container (no ✓ — misleading
+          // when a batch has 0 completed).
+          const BatchIcon = () => (
+            <div style={iconBox}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#111111" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="12 2 2 7 12 12 22 7 12 2" />
+                <polyline points="2 17 12 22 22 17" /><polyline points="2 12 12 17 22 12" />
+              </svg>
+            </div>
+          );
+
+          // Shared card wrapper — identical padding/min-height for single + batch.
+          const cardWrap = {
+            background: "#f5f5f5", border: "1px solid rgba(0,0,0,0.06)", borderRadius: "12px",
+            padding: "14px 20px", minHeight: "72px", boxSizing: "border-box",
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px",
+          } as const;
+
+          const smallBtn = {
+            background: "transparent", border: "1px solid rgba(0,0,0,0.1)", borderRadius: "6px",
+            padding: "6px 12px", color: "#111111", fontFamily: "'Space Grotesk', sans-serif",
+            fontSize: "11px", cursor: "pointer",
+          } as const;
+
+          // ── A single in-flight scan (not part of a batch) ──
+          const ProcessingCard = ({ u }: { u: RecentUpload }) => {
+            const phase = sessionPhases[u.sessionId];
+            const phaseLabel = phase === "uploading" ? "Uploading…" : phase === "queued" ? "Queued for GPU" : "Running…";
+            return (
+              <div style={{
+                background: "#f5f5f5", border: "1px solid rgba(0,45,114,0.14)", borderRadius: "12px",
+                padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+                  <div style={{
+                    width: "36px", height: "36px", borderRadius: "8px", flexShrink: 0,
+                    background: "rgba(0,45,114,0.04)", border: "1px solid rgba(0,45,114,0.12)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}><div className="upload-spinner" /></div>
+                  <div>
+                    <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
+                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
+                      {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}
                     </div>
-                  );
-                })
-            )}
-          </div>
-        </div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                  <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: phase === "queued" ? "#6a6a6a" : "#002D72" }}>{phaseLabel}</span>
+                  <button className="active-cancel-btn" onClick={() => cancelRun(u)}>Cancel</button>
+                </div>
+              </div>
+            );
+          };
+
+          // ── A finished individual scan: status, View, Download, remove ──
+          const CompletedCard = ({ u }: { u: RecentUpload }) => (
+            <div onClick={() => openSession(u)} style={{ ...cardWrap, cursor: canView(u) ? "pointer" : "default" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "16px", minWidth: 0 }}>
+                <FileIcon />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
+                    {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
+                <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: recentStatusColor(u.status) }}>{u.status}</span>
+                {canView(u) && <button style={smallBtn} onClick={(e) => { e.stopPropagation(); openSession(u); }}>View</button>}
+                {u.status === "Completed" && <button style={smallBtn} onClick={(e) => { e.stopPropagation(); downloadResult(u.sessionId); }}>Download</button>}
+                <RemoveBtn onClick={(e) => { e.stopPropagation(); setRecentUploads(removeRecentUpload(u.sessionId)); }} />
+              </div>
+            </div>
+          );
+
+          // ── A finished batch: same card shape as a single (uniform icon + height),
+          //    a "N completed · M failed" line, View details + Download + remove ──
+          const CompletedBatchBar = ({ batchId, label, uploads }: { batchId: string; label: string; uploads: RecentUpload[] }) => {
+            const done = uploads.filter(u => u.status === "Completed").length;
+            const failed = uploads.filter(u => u.status === "Failed" || u.status === "Cancelled").length;
+            return (
+              <div style={cardWrap}>
+                <div style={{ display: "flex", alignItems: "center", gap: "16px", minWidth: 0 }}>
+                  <BatchIcon />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{label}</div>
+                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px", display: "flex", alignItems: "center", gap: "6px" }}>
+                      <span>{done} completed</span>
+                      {failed > 0 && (
+                        <>
+                          <span style={{ color: "rgba(0,0,0,0.3)" }}>•</span>
+                          <span style={{ color: "#ef4444" }}>{failed} failed</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
+                  <button style={smallBtn} onClick={() => setDetailsBatchId(batchId)}>View details</button>
+                  <button style={{ ...smallBtn, background: "#002d72", color: "#fff", borderColor: "#002d72" }} onClick={() => downloadBatch(uploads)}>Download</button>
+                  <RemoveBtn onClick={() => removeBatch(uploads)} />
+                </div>
+              </div>
+            );
+          };
+
+          const emptyBox = (
+            <div style={{
+              background: "#f5f5f5", border: "1px dashed rgba(0,0,0,0.12)", borderRadius: "12px",
+              padding: "24px 20px", textAlign: "center", fontFamily: "'JetBrains Mono', monospace",
+              fontSize: "12px", color: "#8f8f8f",
+            }}>No uploads yet - run a model above and your results will appear here.</div>
+          );
+
+          return (
+            <>
+              {inFlight.length > 0 && (
+                <div style={{ marginTop: "32px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                  {inFlight.map(g => {
+                    if (g.kind === "single") return <ProcessingCard key={g.upload.sessionId} u={g.upload} />;
+                    const running = g.uploads.filter(u => u.status === "Processing");
+                    const done = g.uploads.filter(u => u.status === "Completed").length;
+                    const phases = running.map(u => sessionPhases[u.sessionId]);
+                    const statusLabel =
+                      phases.some(p => p === undefined || p === "running") ? "Running…" :
+                      phases.some(p => p === "queued") ? "Queued for GPU" : "Uploading…";
+                    return (
+                      <ProcessingSummaryBar key={g.batchId} title={g.label} running={running.length}
+                        done={done} statusLabel={statusLabel}
+                        onViewDetails={() => setDetailsBatchId(g.batchId)}
+                        onCancelAll={() => running.forEach(u => cancelRun(u))} />
+                    );
+                  })}
+                </div>
+              )}
+
+              <div style={{ marginTop: "32px" }}>
+                <SectionLabel>Completed Uploads</SectionLabel>
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  {finished.length === 0 ? emptyBox : finished.map(g =>
+                    g.kind === "single"
+                      ? <CompletedCard key={g.upload.sessionId} u={g.upload} />
+                      : <CompletedBatchBar key={g.batchId} batchId={g.batchId} label={g.label} uploads={g.uploads} />
+                  )}
+                </div>
+              </div>
+            </>
+          );
+        })()}
+
+        {/* Batch "View details" popup */}
+        {(() => {
+          if (!detailsBatchId) return null;
+          const uploads = recentUploads.filter(u => u.batchId === detailsBatchId);
+          if (uploads.length === 0) return null;
+          const label = uploads[0].batchLabel || `${uploads.length} scans`;
+          return (
+            <BatchDetailsModal
+              label={label}
+              uploads={uploads}
+              onClose={() => setDetailsBatchId(null)}
+              onView={(u) => navigate(`/${u.isReconstruction ? "reconstruction" : "session"}/${u.sessionId}`)}
+              onDownloadScan={(u) => downloadResult(u.sessionId)}
+              onDownloadAll={() => downloadBatch(uploads)}
+            />
+          );
+        })()}
       </div>
     </div>
   );
