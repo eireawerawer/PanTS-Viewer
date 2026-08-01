@@ -34,6 +34,17 @@ def _frontend_url() -> str:
     return os.environ.get("FRONTEND_URL", "http://localhost:5173")
 
 
+# The provider matches redirect_uri as an exact string, so it has to be the
+# app's real public origin. Deriving it from the request means trusting the
+# proxy chain to report scheme/host correctly, which isn't always in our
+# control — an nginx that rewrites X-Forwarded-Proto yields http:// and every
+# sign-in fails. Set PUBLIC_BASE_URL in production to state it outright;
+# unset, we fall back to the request (correct for local dev).
+def _callback_url(provider: str) -> str:
+    base = os.environ.get("PUBLIC_BASE_URL") or request.url_root
+    return urljoin(base.rstrip("/") + "/", f"api/auth/oauth/{provider}/callback")
+
+
 def _provider_configured(provider: str) -> bool:
     return bool(
         os.environ.get(f"{provider.upper()}_CLIENT_ID")
@@ -89,10 +100,7 @@ def oauth_start(provider):
         return jsonify({"error": f"{provider} sign-in isn't configured"}), 503
 
     client = oauth.create_client(provider)
-    # Build the absolute callback URL from this request so it matches whatever
-    # host/port the app is actually served on.
-    redirect_uri = urljoin(request.url_root, f"api/auth/oauth/{provider}/callback")
-    return client.authorize_redirect(redirect_uri)
+    return client.authorize_redirect(_callback_url(provider))
 
 
 @oauth_blueprint.route("/auth/oauth/<provider>/callback", methods=["GET"])
