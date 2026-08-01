@@ -1,5 +1,6 @@
 import sys
 import os
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.serving import run_simple
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from dotenv import load_dotenv
@@ -28,6 +29,15 @@ import logging
 def create_app():
     create_session_dir()
     app = Flask(__name__)
+
+    # Behind nginx, the real scheme and host arrive as X-Forwarded-Proto/Host;
+    # without this Flask sees the proxy's http://127.0.0.1 hop, and the OAuth
+    # redirect_uri (built from request.url_root) comes out http:// and fails to
+    # match what's registered with Google/GitHub. Opt-in because these headers
+    # are client-spoofable when nothing trusted is in front of the app.
+    if os.environ.get("TRUST_PROXY", "false").lower() == "true":
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+
     app.register_blueprint(api_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(auth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(oauth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
