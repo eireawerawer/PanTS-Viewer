@@ -515,13 +515,27 @@ const UploadPage: React.FC = () => {
       // each chunk lands in its own server-side file (chunk-<index>), reassembled by
       // finalize-upload, so arrival order doesn't matter and parallelizing is safe.
       //
-      // 3, not 6. The backend is gunicorn with a single worker and 8 threads, so
-      // concurrent multipart uploads contend on one GIL-bound process rather than
-      // scaling out. Measured (67 MB, 512 KiB chunks, median of 3): 3 in flight
-      // -> 0.48s, 6 in flight -> 0.84s, and at 768 KiB the gap widens to 0.60s vs
-      // 3.86s. Past ~3-4 the extra parallelism costs more in contention than it
-      // buys in overlapped latency.
-      const CONCURRENCY = 3;
+      // 6. An earlier revision lowered this to 3 on the strength of a loopback
+      // benchmark where 3 in flight beat 6 (0.48s vs 0.84s for 67 MB). That
+      // benchmark was measuring the wrong thing: over loopback the round-trip time
+      // is ~0, so it only captured server-side processing contention and was blind
+      // to the reason concurrency exists. Against the real site the change made a
+      // 67 MB upload SLOWER, 18s -> 22s.
+      //
+      // The site serves HTTP/2 (confirmed via ALPN), so these requests multiplex
+      // over a single TCP connection rather than opening one socket each --
+      // concurrency here controls how many bytes are in flight against one
+      // congestion window, not how many connections exist. HTTP/2 flow control
+      // starts each stream at a 64 KiB window, so in-flight bytes track roughly
+      // CONCURRENCY x 64 KiB independently of CHUNK_SIZE: ~192 KiB at 3, ~384 KiB
+      // at 6. On a ~30 Mbps uplink the bandwidth-delay product is on the order of
+      // 150 KiB, so 3 streams sits at the edge of under-filling the link while 6
+      // keeps it saturated.
+      //
+      // Server-side contention is also less of a concern than the loopback numbers
+      // implied, because nginx buffers request bodies by default and hands gunicorn
+      // an already-complete request.
+      const CONCURRENCY = 6;
 
       // Resumed uploads must be sliced exactly as they were originally sliced --
       // see chunkSizeOf(). New uploads record CHUNK_SIZE at creation. This guards
