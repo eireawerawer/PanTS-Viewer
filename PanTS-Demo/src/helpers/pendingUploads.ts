@@ -18,7 +18,20 @@ export type PendingUpload = {
   bdmapId: string;
   totalChunks: number;
   nextChunk: number;  // first chunk not yet confirmed uploaded
+  // Byte size the chunks of THIS upload were cut at. Persisted because
+  // `totalChunks`/`nextChunk` are indices into a chunking of that specific size:
+  // if the app's default chunk size changes between the original run and a resume,
+  // slicing the resumed run at the new size would silently write wrong-sized data
+  // over the server's existing chunk-N files and finalize into a corrupt image.
+  // Absent on records written before this field existed - treat those as 256 KiB.
+  chunkSize?: number;
 };
+
+/** Chunk size to use when resuming `p`, honouring what it was originally cut at. */
+export const LEGACY_CHUNK_SIZE = 256 * 1024;
+export function chunkSizeOf(p: PendingUpload): number {
+  return p.chunkSize ?? LEGACY_CHUNK_SIZE;
+}
 
 const DB_NAME = "bodymaps-uploads";
 const STORE = "pending";

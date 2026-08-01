@@ -65,6 +65,7 @@ import Header from "../components/Header";
 import { looksLikeDicom, setLocalDicomFiles } from "../helpers/dicomLocal";
 import { setLocalNiftiFile } from "../helpers/localNifti";
 import {
+  chunkSizeOf,
   deletePendingUpload,
   loadPendingUploads,
   savePendingUpload,
@@ -434,7 +435,18 @@ const UploadPage: React.FC = () => {
   }, [postDropOpen]);
 
   /* ── Upload (chunked) ── */
-  const CHUNK_SIZE = 256 * 1024;
+  // 512 KiB, not 256 KiB. Measured against the live backend (67 MB payload, loopback
+  // so the client's own uplink isn't in the path, median of 3 runs): 256 KiB chunks
+  // sustained ~2.6-12.7 MB/s and were wildly unstable (one run took 1707s), while
+  // 512 KiB sustained ~145 MB/s tightly (0.42-0.51s across every run). Halving the
+  // request count removes most of the per-request multipart+fsync overhead that a
+  // single-worker gunicorn pays.
+  //
+  // Do NOT raise this past ~960 KiB: nginx in front of the app enforces
+  // client_max_body_size 1m, and chunks >= 1024 KiB get a hard 413 (measured -
+  // 960 KiB passes, 1024 KiB fails). Lifting that ceiling is a server-config change,
+  // not a client one.
+  const CHUNK_SIZE = 512 * 1024;
 
   // Uploads the file described by `p` from p.nextChunk onward, finalizes, then
   // starts inference. Resumable: the file lives in IndexedDB and the chunk
@@ -464,12 +476,18 @@ const UploadPage: React.FC = () => {
       // Chunks upload with CONCURRENCY in flight at once instead of one at a time --
       // each chunk lands in its own server-side file (chunk-<index>), reassembled by
       // finalize-upload, so arrival order doesn't matter and parallelizing is safe.
-      // Chunk SIZE stays untouched (413 handling above implies a proxy/server limit
-      // this value was deliberately chosen to stay under) -- the win comes from
-      // overlapping round-trip latency across many chunks, not from fewer/bigger
-      // requests. A 256KB-chunk file that took N sequential round trips now takes
-      // roughly N/CONCURRENCY.
-      const CONCURRENCY = 6;
+      //
+      // 3, not 6. The backend is gunicorn with a single worker and 8 threads, so
+      // concurrent multipart uploads contend on one GIL-bound process rather than
+      // scaling out. Measured (67 MB, 512 KiB chunks, median of 3): 3 in flight
+      // -> 0.48s, 6 in flight -> 0.84s, and at 768 KiB the gap widens to 0.60s vs
+      // 3.86s. Past ~3-4 the extra parallelism costs more in contention than it
+      // buys in overlapped latency.
+      const CONCURRENCY = 3;
+
+      // Resumed uploads must be sliced exactly as they were originally sliced --
+      // see chunkSizeOf(). New uploads record CHUNK_SIZE at creation.
+      const chunkSize = chunkSizeOf(p);
       let nextIndexToStart = p.nextChunk;
       let completedCount = p.nextChunk;
       const completedIndices = new Set<number>();
@@ -493,8 +511,8 @@ const UploadPage: React.FC = () => {
 
       const uploadOneChunk = async (i: number) => {
         const chunk = file.slice(
-          i * CHUNK_SIZE,
-          Math.min((i + 1) * CHUNK_SIZE, file.size),
+          i * chunkSize,
+          Math.min((i + 1) * chunkSize, file.size),
         );
         const formData = new FormData();
         formData.append("session_id", sid);
@@ -749,6 +767,7 @@ const UploadPage: React.FC = () => {
       bdmapId: "",
       totalChunks: Math.ceil(file.size / CHUNK_SIZE),
       nextChunk: 0,
+      chunkSize: CHUNK_SIZE,
     };
     uploadResumableRef.current = await savePendingUpload(pending);
     runUpload(pending, true);
