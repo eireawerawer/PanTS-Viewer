@@ -29,6 +29,11 @@
   grid-template-columns: repeat(3, 1fr);
   gap: 56px 32px;
   justify-items: center;
+  /* The grid is a <ul> for semantics; strip the default list styling so the
+     visual layout is unchanged. */
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
 /* ── Member card ── */

@@ -1,6 +1,14 @@
+import { useState } from "react";
 import { preload } from "react-dom";
 import Header from "../../components/Header";
 import styles from "./TeamPage.module.css";
+
+// Every card in this grid sits above the fold on a normal screen, so lazy loading
+// buys nothing here and in practice broke the page: the lazy avatars were never
+// fetched at all and rendered as empty grey circles. Load the first screenful
+// eagerly and only lazy-load members beyond it, so the page still scales if the
+// team grows.
+const EAGER_COUNT = 6;
 
 type Member = { name: string; role: string; photo?: string };
 
@@ -47,10 +55,14 @@ function Avatar({
   name: string;
   priority?: boolean;
 }) {
+  // If a headshot is missing or fails to load, fall back to the placeholder
+  // silhouette rather than leaving an empty grey circle.
+  const [failed, setFailed] = useState(false);
+
   return (
     <div className={styles.avatarRing}>
       <div className={styles.avatarInner}>
-        {photo ? (
+        {photo && !failed ? (
           <img
             src={photo}
             alt={name}
@@ -60,6 +72,7 @@ function Avatar({
             loading={priority ? "eager" : "lazy"}
             fetchPriority={priority ? "high" : "auto"}
             decoding="async"
+            onError={() => setFailed(true)}
           />
         ) : (
           <svg
@@ -104,11 +117,13 @@ export default function TeamPage() {
         <h1 className={styles.title}>
           Meet the <span className={styles.titleBold}>team.</span>
         </h1>
-        <div className={styles.grid}>
+        <ul className={styles.grid}>
           {MEMBERS.map((m, i) => (
-            <MemberCard key={m.name} member={m} priority={i === 0} />
+            <li key={m.name}>
+              <MemberCard member={m} priority={i < EAGER_COUNT} />
+            </li>
           ))}
-        </div>
+        </ul>
       </main>
     </div>
   );
