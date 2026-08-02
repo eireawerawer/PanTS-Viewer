@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import AuthModal from "../components/AuthModal";
 import { AuthProvider } from "../contexts/authContext";
 import AccountPage from "../routes/AccountPage";
 
@@ -192,5 +193,63 @@ describe("delete account", () => {
 		expect(
 			await screen.findByText(/30 days to change your mind/i)
 		).toBeInTheDocument();
+	});
+
+	it("does not carry a deletion message onto the sign-in popup", async () => {
+		const user = userEvent.setup();
+		render(
+			<AuthProvider>
+				<MemoryRouter initialEntries={["/account"]}>
+					<Routes>
+						<Route path="/account" element={<AccountPage />} />
+						<Route path="/" element={<AuthModal />} />
+					</Routes>
+				</MemoryRouter>
+			</AuthProvider>
+		);
+
+		await user.click(await screen.findByRole("button", { name: "Delete account" }));
+		await user.type(screen.getByLabelText(/Type DELETE to confirm/i), "DELETE");
+		await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+		await waitFor(() => expect(lastCall("DELETE", "/api/me")).toBeTruthy());
+		expect(screen.queryByText(/scheduled for deletion/i)).not.toBeInTheDocument();
+		expect(screen.queryByText(/Sign back in before/i)).not.toBeInTheDocument();
+	});
+});
+
+describe("success notices", () => {
+	it("clear themselves instead of staying pinned to the page", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true });
+		const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+		renderPage();
+
+		await user.click(await screen.findByRole("button", { name: "Export" }));
+		expect(await screen.findByText(/Your data has been downloaded/i)).toBeInTheDocument();
+
+		await vi.advanceTimersByTimeAsync(6500);
+		await waitFor(() =>
+			expect(screen.queryByText(/Your data has been downloaded/i)).not.toBeInTheDocument()
+		);
+		vi.useRealTimers();
+	});
+
+	it("leaves errors up, since those still need acting on", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true });
+		const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+		global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes("/api/me/export")) return json({ error: "Storage is offline" }, false, 503);
+			if (u.includes("/api/auth/me")) return json({ user: { ...USER } });
+			return json({});
+		}) as unknown as typeof fetch;
+
+		renderPage();
+		await user.click(await screen.findByRole("button", { name: "Export" }));
+		expect(await screen.findByText(/Couldn't prepare your data/i)).toBeInTheDocument();
+
+		await vi.advanceTimersByTimeAsync(10000);
+		expect(screen.getByText(/Couldn't prepare your data/i)).toBeInTheDocument();
+		vi.useRealTimers();
 	});
 });

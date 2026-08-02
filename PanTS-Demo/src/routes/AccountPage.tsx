@@ -36,6 +36,15 @@ const AccountPage: React.FC = () => {
 		}
 	}, [loading, isAuthenticated, navigate, promptAuth]);
 
+	// Success messages clear themselves after a few seconds — they confirm
+	// something that already happened, so leaving one pinned there indefinitely
+	// makes the page look stuck. Errors are left up: those need acting on.
+	useEffect(() => {
+		if (!notice) return;
+		const t = setTimeout(() => setNotice(""), 6000);
+		return () => clearTimeout(t);
+	}, [notice]);
+
 	if (!user) return null;
 
 	// One wrapper so every action reports failure the same way instead of
@@ -81,20 +90,10 @@ const AccountPage: React.FC = () => {
 				);
 				return;
 			}
-			const { restoreBy, graceDays } = await deleteAccount();
-			const until = new Date(restoreBy).toLocaleDateString(undefined, {
-				year: "numeric",
-				month: "long",
-				day: "numeric",
-			});
-			navigate("/", {
-				replace: true,
-				state: {
-					accountNotice:
-						`Your account is scheduled for deletion. Sign back in before ${until} ` +
-						`(${graceDays} days) and everything will be restored.`,
-				},
-			});
+			// authContext parks the "still restorable" message on the sign-in
+			// popup, which is where deleting drops you and where you'd act on it.
+			await deleteAccount();
+			navigate("/", { replace: true });
 		});
 
 	return (
