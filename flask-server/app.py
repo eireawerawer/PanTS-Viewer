@@ -80,6 +80,13 @@ def create_app():
         reaped = job_store.reap_orphaned_jobs()
         if reaped:
             print(f"[boot] reaped {reaped} orphaned inference job(s)")
+        # Accounts whose 30-day grace period elapsed while the server was up (or
+        # down) are removed for good here. Boot is the only trigger for now — a
+        # long-running server won't purge until its next restart, which is fine:
+        # the account is already unusable from the moment it's requested.
+        purged = auth_store.purge_expired_deletions()
+        if purged:
+            print(f"[boot] purged {purged} account(s) past the deletion grace period")
     except Exception as e:
         print(f"[boot] account/job store init skipped: {e}")
 

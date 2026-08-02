@@ -85,3 +85,83 @@ def test_me_jobs_empty_for_new_user(client):
     r = client.get("/api/me/jobs")
     assert r.status_code == 200
     assert r.get_json() == {"jobs": []}
+
+
+# ---- display name ---------------------------------------------------------
+
+def test_register_accepts_a_name_and_me_returns_it(client):
+    r = client.post("/api/auth/register",
+                    json={"email": "n@o.com", "password": "password1", "name": "Ada Lovelace"})
+    assert r.get_json()["user"]["name"] == "Ada Lovelace"
+    assert client.get("/api/auth/me").get_json()["user"]["name"] == "Ada Lovelace"
+
+
+def test_patch_me_updates_the_name(client):
+    client.post("/api/auth/register", json={"email": "p@q.com", "password": "password1"})
+    assert client.get("/api/auth/me").get_json()["user"]["name"] is None
+
+    r = client.patch("/api/auth/me", json={"name": "Grace Hopper"})
+    assert r.status_code == 200
+    assert r.get_json()["user"]["name"] == "Grace Hopper"
+    assert client.get("/api/auth/me").get_json()["user"]["name"] == "Grace Hopper"
+
+
+def test_patch_me_rejects_an_empty_body_and_a_non_string(client):
+    client.post("/api/auth/register", json={"email": "r@s.com", "password": "password1"})
+    assert client.patch("/api/auth/me", json={}).status_code == 400
+    assert client.patch("/api/auth/me", json={"name": 42}).status_code == 400
+
+
+def test_account_endpoints_require_auth(client):
+    assert client.patch("/api/auth/me", json={"name": "x"}).status_code == 401
+    assert client.get("/api/me/export").status_code == 401
+    assert client.delete("/api/me/jobs").status_code == 401
+    assert client.delete("/api/me").status_code == 401
+
+
+# ---- export ---------------------------------------------------------------
+
+def test_export_returns_a_downloadable_file_with_account_and_jobs(client):
+    client.post("/api/auth/register",
+                json={"email": "t@u.com", "password": "password1", "name": "Ada"})
+    r = client.get("/api/me/export")
+    assert r.status_code == 200
+    assert "attachment" in r.headers["Content-Disposition"]
+
+    body = r.get_json()
+    assert body["account"]["email"] == "t@u.com"
+    assert body["account"]["name"] == "Ada"
+    assert body["jobs"] == []
+    assert "password_hash" not in str(body)  # never leak the hash
+
+
+# ---- deletion -------------------------------------------------------------
+
+def test_delete_jobs_keeps_the_account(client):
+    client.post("/api/auth/register", json={"email": "v@w.com", "password": "password1"})
+    r = client.delete("/api/me/jobs")
+    assert r.status_code == 200
+    assert r.get_json()["deleted"] == {"jobs": 0, "files": 0}
+    assert client.get("/api/auth/me").status_code == 200  # still signed in
+
+
+def test_delete_account_signs_out_and_reports_the_deadline(client):
+    client.post("/api/auth/register", json={"email": "x@y.com", "password": "password1"})
+    r = client.delete("/api/me")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["grace_days"] == 30
+    assert body["restore_by"] > body["deletion_requested_at"]
+
+    # session is gone
+    assert client.get("/api/auth/me").status_code == 401
+
+
+def test_signing_back_in_restores_a_deleted_account(client):
+    client.post("/api/auth/register", json={"email": "z@a.com", "password": "password1"})
+    client.delete("/api/me")
+    assert client.get("/api/auth/me").status_code == 401
+
+    back = client.post("/api/auth/login", json={"email": "z@a.com", "password": "password1"})
+    assert back.status_code == 200
+    assert client.get("/api/auth/me").status_code == 200

@@ -11,6 +11,11 @@
 // /me call picks the session up. `oauthProviders` reports which buttons to
 // enable (a provider without server-side credentials stays disabled).
 //
+// The account controls (rename, export, delete history, delete account) all go
+// to real endpoints — see api/auth_blueprint.py. Deleting the account is
+// reversible for a grace period: the server keeps the row and signing back in
+// cancels it.
+//
 // Not wired yet: emailNotifications -> B3, still a client-only localStorage pref.
 import {
 	createContext,
@@ -26,7 +31,10 @@ import { API_BASE } from "../helpers/constants";
 export type AuthUser = {
 	id: string;
 	email: string;
-	name: string; // derived from the email until the backend stores a name
+	/** The name the user set, or one derived from their email if they haven't. */
+	name: string;
+	/** True when `name` is the user's own rather than derived from the email. */
+	hasCustomName: boolean;
 	emailNotifications: boolean; // client-only preference until B3
 };
 
@@ -45,6 +53,17 @@ type AuthContextValue = {
 	oauthProviders: Record<AuthProvider2, boolean> | null;
 	signOut: () => Promise<void>;
 	updatePreferences: (patch: Partial<Pick<AuthUser, "emailNotifications">>) => void;
+	/** Set the display name. An empty string clears it back to the email default. */
+	updateName: (name: string) => Promise<void>;
+	/** Download everything the server holds for this account as a JSON file. */
+	exportData: () => Promise<void>;
+	/** Delete every scan and result, keeping the account. Returns how many went. */
+	deleteScanHistory: () => Promise<number>;
+	/**
+	 * Schedule the account for deletion and sign out. Reversible by signing back
+	 * in — resolves with the deadline and the grace period, so the UI can say so.
+	 */
+	deleteAccount: () => Promise<{ restoreBy: string; graceDays: number }>;
 	// Global auth popup, opened from the header or any gated action.
 	authPrompt: { open: boolean; mode: "signin" | "signup" };
 	promptAuth: (mode?: "signin" | "signup") => void;
@@ -87,13 +106,18 @@ const savePref = (id: string, on: boolean) => {
 	}
 };
 
-type ApiUser = { id: string; email: string };
-const mapApiUser = (u: ApiUser): AuthUser => ({
-	id: u.id,
-	email: u.email,
-	name: nameFromEmail(u.email),
-	emailNotifications: loadPref(u.id),
-});
+type ApiUser = { id: string; email: string; name?: string | null };
+const mapApiUser = (u: ApiUser): AuthUser => {
+	const custom = (u.name || "").trim();
+	return {
+		id: u.id,
+		email: u.email,
+		// Accounts predating the name column have none — fall back to the email.
+		name: custom || nameFromEmail(u.email),
+		hasCustomName: custom.length > 0,
+		emailNotifications: loadPref(u.id),
+	};
+};
 
 const authFetch = (path: string, init?: RequestInit) =>
 	fetch(`${API_BASE}${path}`, {
@@ -247,6 +271,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		[]
 	);
 
+	const updateName = useCallback(async (name: string) => {
+		const res = await authFetch("/api/auth/me", {
+			method: "PATCH",
+			body: JSON.stringify({ name }),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(data.error || "Couldn't save your name. Try again.");
+		setUser(mapApiUser(data.user));
+	}, []);
+
+	// Streams straight from the server so the file is the real record, not a
+	// reconstruction from whatever this browser happens to have cached.
+	const exportData = useCallback(async () => {
+		const res = await authFetch("/api/me/export");
+		if (!res.ok) throw new Error("Couldn't prepare your data. Try again.");
+		const blob = await res.blob();
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement("a");
+		a.href = url;
+		a.download = "bodymaps-export.json";
+		a.click();
+		URL.revokeObjectURL(url);
+	}, []);
+
+	const deleteScanHistory = useCallback(async () => {
+		const res = await authFetch("/api/me/jobs", { method: "DELETE" });
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(data.error || "Couldn't delete your history. Try again.");
+		return Number(data.deleted?.jobs ?? 0);
+	}, []);
+
+	const deleteAccount = useCallback(async () => {
+		const res = await authFetch("/api/me", { method: "DELETE" });
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(data.error || "Couldn't delete your account. Try again.");
+		// The server has already revoked every session and cleared the cookie.
+		setUser(null);
+		pingOtherTabs();
+		return { restoreBy: data.restore_by as string, graceDays: Number(data.grace_days) };
+	}, []);
+
 	const clearOauthError = useCallback(() => setOauthError(null), []);
 
 	const value = useMemo<AuthContextValue>(
@@ -260,6 +325,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			oauthProviders,
 			signOut,
 			updatePreferences,
+			updateName,
+			exportData,
+			deleteScanHistory,
+			deleteAccount,
 			authPrompt,
 			promptAuth,
 			closeAuthPrompt,
@@ -267,7 +336,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			clearOauthError,
 		}),
 		[user, loading, signIn, signUp, signInWithProvider, oauthProviders, signOut,
-		 updatePreferences, authPrompt, promptAuth, closeAuthPrompt, oauthError, clearOauthError]
+		 updatePreferences, updateName, exportData, deleteScanHistory, deleteAccount,
+		 authPrompt, promptAuth, closeAuthPrompt, oauthError, clearOauthError]
 	);
 
 	return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

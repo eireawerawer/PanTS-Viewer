@@ -11,10 +11,12 @@ that step additive.
 
 import json
 import os
+import shutil
 from datetime import timedelta
 
 from sqlalchemy import select
 
+from constants import Constants
 from models.engine import session_scope
 from models.job import (
     Job, utcnow, TERMINAL_STATUSES,
@@ -77,6 +79,82 @@ def list_jobs_for_user(user_id: str) -> list[dict]:
     with session_scope() as s:
         stmt = select(Job).where(Job.user_id == user_id).order_by(Job.created_at.desc())
         return [dict(session_id=j.session_id, **j.to_dict()) for j in s.execute(stmt).scalars()]
+
+
+# ---- deleting a user's history -------------------------------------------
+
+# Every path a job may own. Only those under the sessions root are ever removed
+# — see _sessions_root below for why that restriction is load-bearing.
+_JOB_PATH_FIELDS = ("ct_path", "session_path", "zip_path", "output_mask_dir")
+
+
+def _sessions_root() -> str:
+    """Absolute path of the directory holding per-session artifacts.
+
+    Deletion is confined to this tree. That is not merely defensive: a job run
+    against a dataset case stores a ``ct_path`` pointing into the shared,
+    read-only PanTS dataset (api_blueprint builds it from Constants.PANTS_PATH).
+    Deleting a user's history must never touch those files — they are not the
+    user's data, they are the dataset everyone reads.
+    """
+    return os.path.abspath(Constants.SESSIONS_DIR_NAME)
+
+
+def _is_within(path: str, root: str) -> bool:
+    """True if ``path`` resolves inside ``root`` (symlinks followed)."""
+    try:
+        real_root = os.path.realpath(root)
+        real_path = os.path.realpath(path)
+    except (OSError, ValueError):
+        return False
+    return real_path == real_root or real_path.startswith(real_root + os.sep)
+
+
+def _remove_artifact(path: str | None, root: str) -> bool:
+    """Delete one file or directory, but only inside ``root``. Never raises."""
+    if not path:
+        return False
+    if not _is_within(path, root):
+        return False  # dataset path or something unexpected — leave it alone
+    try:
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        elif os.path.exists(path):
+            os.remove(path)
+        else:
+            return False
+        return True
+    except OSError as e:
+        print(f"[job delete] could not remove {path}: {e}")
+        return False
+
+
+def delete_jobs_for_user(user_id: str) -> dict:
+    """Delete every job owned by a user, along with its files on disk.
+
+    Backs "delete my scan history" and is also the first half of an account
+    purge. Returns ``{"jobs": n, "files": n}``. Files are removed on a
+    best-effort basis: a failure there is logged, never raised, and never blocks
+    the database rows from going — a user asking for their history to be gone
+    should not be stuck because one directory was already missing.
+    """
+    root = _sessions_root()
+    with session_scope() as s:
+        jobs = s.execute(select(Job).where(Job.user_id == user_id)).scalars().all()
+        # Collect paths before the rows go, and de-duplicate: several fields on
+        # one job commonly live under the same session directory.
+        paths: list[str] = []
+        for job in jobs:
+            for field in _JOB_PATH_FIELDS:
+                value = getattr(job, field, None)
+                if value and value not in paths:
+                    paths.append(value)
+        job_count = len(jobs)
+        for job in jobs:
+            s.delete(job)
+
+    removed = sum(1 for p in paths if _remove_artifact(p, root))
+    return {"jobs": job_count, "files": removed}
 
 
 def update_job(session_id: str, **fields) -> dict | None:
