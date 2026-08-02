@@ -31,7 +31,7 @@ export default function AuthButton() {
 
 	if (!isAuthenticated || !user) {
 		return (
-			<button type="button" className={styles.signInBtn} onClick={() => promptAuth("signin")}>
+			<button type="button" className={styles.signInBtn} onClick={() => promptAuth()}>
 				Sign in
 			</button>
 		);

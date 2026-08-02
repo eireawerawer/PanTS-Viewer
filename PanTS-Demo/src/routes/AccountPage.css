@@ -154,6 +154,52 @@
 	transform: translateX(20px);
 }
 
+/* Rows that stack their choices underneath (account type). */
+.account-row--stack {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 14px;
+}
+
+/* Selectable plan / account-type cards */
+.account-options {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	gap: 10px;
+	padding-bottom: 18px;
+}
+.account-option {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	text-align: left;
+	padding: 13px 14px;
+	border-radius: 11px;
+	border: 1px solid rgba(0, 0, 0, 0.12);
+	background: #ffffff;
+	font-family: 'Space Grotesk', sans-serif;
+	cursor: pointer;
+	transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.account-option:hover {
+	border-color: rgba(0, 0, 0, 0.3);
+}
+.account-option--on {
+	border-color: #002d72;
+	background: rgba(0, 45, 114, 0.04);
+	box-shadow: 0 0 0 1px #002d72 inset;
+}
+.account-option-label {
+	font-size: 14px;
+	font-weight: 600;
+	color: #111111;
+}
+.account-option-blurb {
+	font-size: 12px;
+	line-height: 1.45;
+	color: #6a6a6a;
+}
+
 /* Text input (name edit, type-to-confirm) */
 .account-input {
 	flex: 1;

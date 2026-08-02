@@ -110,11 +110,13 @@ type SelectedItem =
 const UploadPage: React.FC = () => {
   const navigate = useNavigate();
   // Running inference requires an account, so any upload action while signed
-  // out opens the sign-up popup instead of proceeding.
+  // out opens the sign-in popup instead of proceeding. Sign-in, not sign-up:
+  // most people hitting this already have an account, and the popup offers a
+  // "Sign up" link out to /signup for the ones who don't.
   const { isAuthenticated, promptAuth } = useAuth();
   const ensureAccount = (): boolean => {
     if (isAuthenticated) return true;
-    promptAuth("signup");
+    promptAuth();
     return false;
   };
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -235,7 +237,7 @@ const UploadPage: React.FC = () => {
     e.preventDefault();
     setIsDragOver(false);
     // Inlined (not via ensureAccount) so the memoized closure sees fresh auth.
-    if (!isAuthenticated) { promptAuth("signup"); return; }
+    if (!isAuthenticated) { promptAuth(); return; }
     if (!e.dataTransfer.files) return;
     const filteredFiles = Array.from(e.dataTransfer.files).filter((file) =>
       allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
@@ -1587,7 +1589,7 @@ const UploadPage: React.FC = () => {
         {!isAuthenticated && (
           <div className="upload-account-banner">
             <span>
-              <button type="button" className="upload-account-link" onClick={() => promptAuth("signup")}>
+              <button type="button" className="upload-account-link" onClick={() => promptAuth()}>
                 Sign in
               </button>{" "}
               to run inference on the server and get notified when it's done.

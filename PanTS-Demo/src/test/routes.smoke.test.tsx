@@ -59,17 +59,36 @@ describe("route smoke tests", () => {
   it("AuthModal opens as a popup with provider options when prompted", async () => {
     const Trigger = () => {
       const { promptAuth } = useAuth();
-      useEffect(() => promptAuth("signin"), [promptAuth]);
+      useEffect(() => promptAuth(), [promptAuth]);
       return null;
     };
-    render(
-      <AuthProvider>
+    // AuthModal links out to /signup, so it needs a router in the tree.
+    renderRoute(
+      <>
         <Trigger />
         <AuthModal />
-      </AuthProvider>,
+      </>,
     );
     expect(await screen.findByText("Sign in with Google")).toBeInTheDocument();
     expect(screen.getByText("Sign in with GitHub")).toBeInTheDocument();
+  });
+
+  it("AuthModal offers sign up as a link to the /signup page, not a popup mode", async () => {
+    const Trigger = () => {
+      const { promptAuth } = useAuth();
+      useEffect(() => promptAuth(), [promptAuth]);
+      return null;
+    };
+    renderRoute(
+      <>
+        <Trigger />
+        <AuthModal />
+      </>,
+    );
+    expect(await screen.findByRole("link", { name: "Sign up" })).toHaveAttribute(
+      "href",
+      "/signup",
+    );
   });
 
   it("AccountPage renders the email-notification setting when signed in", async () => {

@@ -1,9 +1,10 @@
-import { lazy, Suspense } from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router";
+import { lazy, Suspense, useEffect } from "react";
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
 import "./App.css";
 import AuthModal from "./components/AuthModal";
 import { AnnotationProvider } from "./contexts/annotationContexts";
-import { AuthProvider } from "./contexts/authContext";
+import { AuthProvider, useAuth } from "./contexts/authContext";
+import { needsOnboarding } from "./helpers/accountProfile";
 import { FileProvider } from "./contexts/fileContexts";
 import LandingPage from "./routes/LandingPage";
 import ComparePage from "./routes/ComparePage";
@@ -18,6 +19,8 @@ const VisualizationPage = lazy(() => import("./routes/VisualizationPage"));
 const CompareViewerPage = lazy(() => import("./routes/CompareViewerPage"));
 const UploadPage = lazy(() => import("./routes/UploadPage"));
 const AccountPage = lazy(() => import("./routes/AccountPage"));
+const SignupPage = lazy(() => import("./routes/SignupPage"));
+const LegalPage = lazy(() => import("./routes/LegalPage"));
 const RotatingHeartLoader = lazy(() => import("./components/Loading"));
 
 const BASENAME = import.meta.env.VITE_BASENAME;
@@ -49,6 +52,34 @@ function RouteFallback() {
   );
 }
 
+// Routes that must stay reachable while onboarding is incomplete — otherwise the
+// gate below would bounce the signup flow off its own page.
+const ONBOARDING_EXEMPT = ["/signup", "/terms", "/privacy"];
+
+// Sends a signed-in user who never finished signup into the account-type / plan /
+// terms steps. This is what catches OAuth first-timers: the provider callback
+// lands them back in the app with an account but no answers.
+//
+// MOCK LIMITATION: "never finished" is read from this browser's localStorage
+// (helpers/accountProfile.needsOnboarding), so the same OAuth user on a new
+// device is asked again. A user_account.onboarding_completed_at column returned
+// by /api/auth/me is the real fix.
+function OnboardingGate() {
+  const { user, isAuthenticated, loading } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (loading || !isAuthenticated || !user) return;
+    if (ONBOARDING_EXEMPT.some((p) => location.pathname.startsWith(p))) return;
+    if (needsOnboarding(user.id)) {
+      navigate("/signup?step=type", { replace: true });
+    }
+  }, [loading, isAuthenticated, user, location.pathname, navigate]);
+
+  return null;
+}
+
 function App() {
   return (
     <AuthProvider>
@@ -57,6 +88,7 @@ function App() {
           <div className="App">
             <BrowserRouter basename={BASENAME}>
               <ScrollToTopButton />
+              <OnboardingGate />
               <Suspense fallback={<RouteFallback />}>
                 <Routes>
                   <Route path="/" element={<LandingPage />} />
@@ -80,9 +112,12 @@ function App() {
                   />
                   <Route path="/test" element={<RotatingHeartLoader />} />
                   <Route path="/upload" element={<UploadPage />} />
-                  {/* Sign in/up is a popup, so old /login links just land on home. */}
+                  {/* Sign in is a popup; sign up is a page. Old /login links land on home. */}
                   <Route path="/login" element={<Navigate to="/" replace />} />
+                  <Route path="/signup" element={<SignupPage />} />
                   <Route path="/account" element={<AccountPage />} />
+                  <Route path="/terms" element={<LegalPage kind="terms" />} />
+                  <Route path="/privacy" element={<LegalPage kind="privacy" />} />
                   <Route
                     path="/api"
                     element={<Navigate to="/upload" replace />}
@@ -95,10 +130,11 @@ function App() {
                   />
                 </Routes>
               </Suspense>
+              {/* Global sign-in popup, above all routes. Inside the router so it
+                  can link out to /signup. */}
+              <AuthModal />
             </BrowserRouter>
           </div>
-          {/* Global sign-in / sign-up popup, above all routes. */}
-          <AuthModal />
         </AnnotationProvider>
       </FileProvider>
     </AuthProvider>

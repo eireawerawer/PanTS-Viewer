@@ -2,6 +2,12 @@ import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Header from "../components/Header";
 import { useAuth } from "../contexts/authContext";
+import {
+	ACCOUNT_TYPES,
+	PLANS,
+	accountTypeLabel,
+	planLabel,
+} from "../helpers/accountProfile";
 import "./AccountPage.css";
 
 // Account settings: profile (with an editable display name), the email
@@ -14,10 +20,12 @@ const AccountPage: React.FC = () => {
 	const navigate = useNavigate();
 	const {
 		user, isAuthenticated, loading, signOut, updatePreferences,
-		updateName, exportData, deleteScanHistory, deleteAccount, promptAuth,
+		updateName, exportData, deleteScanHistory, deleteAccount, updateAccountProfile,
+		promptAuth,
 	} = useAuth();
 
 	const [editingName, setEditingName] = useState(false);
+	const [changingPlan, setChangingPlan] = useState(false);
 	const [nameDraft, setNameDraft] = useState("");
 	// Which destructive action is awaiting type-to-confirm (null = none).
 	const [confirming, setConfirming] = useState<"history" | "account" | null>(null);
@@ -32,7 +40,7 @@ const AccountPage: React.FC = () => {
 	useEffect(() => {
 		if (!loading && !isAuthenticated) {
 			navigate("/", { replace: true });
-			promptAuth("signin");
+			promptAuth();
 		}
 	}, [loading, isAuthenticated, navigate, promptAuth]);
 
@@ -46,6 +54,8 @@ const AccountPage: React.FC = () => {
 	}, [notice]);
 
 	if (!user) return null;
+
+	const { profile } = user;
 
 	// One wrapper so every action reports failure the same way instead of
 	// silently doing nothing.
@@ -90,8 +100,8 @@ const AccountPage: React.FC = () => {
 				);
 				return;
 			}
-			// authContext parks the "still restorable" message on the sign-in
-			// popup, which is where deleting drops you and where you'd act on it.
+			// The danger-zone copy above states the grace period before you confirm,
+			// so nothing needs to follow you to the signed-out page.
 			await deleteAccount();
 			navigate("/", { replace: true });
 		});
@@ -169,6 +179,79 @@ const AccountPage: React.FC = () => {
 									{user.hasCustomName ? "Edit name" : "Add name"}
 								</button>
 							)}
+						</div>
+					</div>
+				</section>
+
+				{/* Plan — mock: selecting one gates nothing and charges nothing. */}
+				<section className="account-section">
+					<div className="account-section-label">Plan</div>
+					<div className="account-panel">
+						<div className="account-row">
+							<div>
+								<div className="account-row-title">{planLabel(profile.plan)}</div>
+								<div className="account-row-desc">
+									{PLANS.find((p) => p.id === profile.plan)?.tagline} Nothing is charged —
+									pricing isn't set, and every feature is open while BodyMaps is in
+									development.
+								</div>
+							</div>
+							<button
+								type="button"
+								className="account-btn"
+								onClick={() => setChangingPlan((o) => !o)}
+							>
+								{changingPlan ? "Done" : "Change plan"}
+							</button>
+						</div>
+
+						{changingPlan && (
+							<div className="account-options">
+								{PLANS.map((p) => (
+									<button
+										key={p.id}
+										type="button"
+										className={`account-option${profile.plan === p.id ? " account-option--on" : ""}`}
+										aria-pressed={profile.plan === p.id}
+										aria-label={p.label}
+										onClick={() => updateAccountProfile({ plan: p.id })}
+									>
+										<span className="account-option-label">{p.label}</span>
+										<span className="account-option-blurb">{p.tagline}</span>
+									</button>
+								))}
+							</div>
+						)}
+					</div>
+				</section>
+
+				{/* Account type — self-reported; changes what's surfaced, not access. */}
+				<section className="account-section">
+					<div className="account-section-label">Account type</div>
+					<div className="account-panel">
+						<div className="account-row account-row--stack">
+							<div>
+								<div className="account-row-title">{accountTypeLabel(profile.accountType)}</div>
+								<div className="account-row-desc">
+									Tailors what you see — which tools are surfaced and how results are
+									worded. Self-reported, and it doesn't change what you can access.
+								</div>
+							</div>
+							<div className="account-options">
+								{ACCOUNT_TYPES.map((t) => (
+									<button
+										key={t.id}
+										type="button"
+										className={`account-option${profile.accountType === t.id ? " account-option--on" : ""}`}
+										aria-pressed={profile.accountType === t.id}
+										aria-label={t.label}
+										onClick={() => updateAccountProfile({ accountType: t.id })}
+									>
+										<span className="account-option-label">{t.label}</span>
+										<span className="account-option-blurb">{t.blurb}</span>
+									</button>
+								))}
+							</div>
 						</div>
 					</div>
 				</section>
