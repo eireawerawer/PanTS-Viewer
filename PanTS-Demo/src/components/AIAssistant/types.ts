@@ -20,12 +20,34 @@ export type AIAction =
 
 export type ChatRole = "user" | "assistant" | "system";
 
+export type AttachmentKind = "image" | "file";
+
+export interface ChatAttachment {
+  id: string;
+  name: string;
+  kind: AttachmentKind;
+  /** Present for images: a data: URL used both for preview and for the model. */
+  dataUrl?: string;
+  /** Optional short label, e.g. the viewport a screenshot came from. */
+  label?: string;
+  /** Where the attachment came from — screenshots are added/removed as a set. */
+  source?: "screenshot" | "upload";
+}
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
   timestamp: number;
   meta?: string;
+  /** Assistant private reasoning, streamed live and shown in a muted block. */
+  thinking?: string;
+  /** Current progress stage shown while the answer is still forming. */
+  status?: string;
+  /** True while tokens are still arriving for this message. */
+  streaming?: boolean;
+  /** Images / files the user attached to this turn. */
+  attachments?: ChatAttachment[];
 }
 
 export interface ViewerStateSnapshot {
@@ -85,6 +107,11 @@ export interface ViewerActions {
   getSmallestStructure: () => Promise<string>;
 }
 
+export interface ViewportCapture {
+  name: string;
+  dataUrl: string;
+}
+
 export interface AISidebarProps {
   open: boolean;
   onClose: () => void;
@@ -96,4 +123,12 @@ export interface AISidebarProps {
   organReferences?: OrganReferenceSnapshot[];
   demographics?: DemographicsSnapshot | null;
   actions: ViewerActions;
+  /** Captures the current CT viewports (axial/sagittal/coronal/3D) as PNGs. */
+  captureViewport?: () => Promise<ViewportCapture[]>;
+  /** Color→organ legend for the visible masks, sent with screenshots. */
+  getMaskLegend?: () => { organ: string; color: string }[];
+  /** Live drag-resize: called with the pointer's clientX while dragging. */
+  onResize?: (clientX: number) => void;
+  /** Called when the resize drag ends, to persist the final width. */
+  onResizeEnd?: () => void;
 }
