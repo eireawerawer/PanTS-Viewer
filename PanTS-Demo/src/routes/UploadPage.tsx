@@ -75,6 +75,7 @@ import {
   loadPendingUploads,
   savePendingUpload,
   setPendingNextChunk,
+  setPendingUploaded,
   type PendingUpload,
 } from "../helpers/pendingUploads";
 import { postWithRetry, resolveResumeStart } from "../helpers/chunkUpload";
@@ -89,6 +90,15 @@ const parseApiResponse = async (res: Response): Promise<any> => {
   throw new Error(
     `Expected JSON but got ${contentType || "unknown content-type"} (HTTP ${res.status}). Body: ${shortBody}`,
   );
+};
+
+// Coarse on purpose: a to-the-second countdown on a throughput estimate reads as
+// precision that isn't there, and jitters distractingly.
+const formatEta = (seconds: number): string => {
+  if (seconds < 45) return "<1 min";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `~${minutes} min`;
+  return `~${Math.round(seconds / 360) / 10} h`;
 };
 
 // A selection is either a single NIfTI file or a picked DICOM folder (the series'
@@ -121,6 +131,19 @@ const UploadPage: React.FC = () => {
   const uploadAbortRef = useRef<Map<string, AbortController>>(new Map());
   // Which session currently drives the foreground upload progress bar.
   const foregroundUploadSidRef = useRef<string | null>(null);
+  // Uploads run ONE FILE AT A TIME through this chain. Total upload time is
+  // bandwidth-bound either way, but serializing makes the first file land at
+  // ~T/N instead of ~T - and since each file is dispatched to the server's job
+  // queue the moment its own upload finishes, the GPU starts chewing through
+  // the batch while the remaining files are still going up.
+  const uploadChainRef = useRef<Promise<void>>(Promise.resolve());
+  // Bytes still to send, per in-flight session. Summed for the "safe to close"
+  // estimate and dropped when a run ends, so a cancelled or failed file can't
+  // leave phantom bytes inflating the estimate for its siblings.
+  const uploadRemainingRef = useRef<Map<string, number>>(new Map());
+  // Monotonic count of bytes actually put on the wire; the ticker below diffs
+  // it to measure throughput.
+  const bytesSentRef = useRef(0);
 
   const [selectedItems, setSelectedItems] = useState<SelectedItem[]>([]);
   // Which selected item's inline preview is open (null = none). One at a time.
@@ -155,10 +178,25 @@ const UploadPage: React.FC = () => {
   );
   // Which batch's "View details" popup is open (null = none).
   const [detailsBatchId, setDetailsBatchId] = useState<string | null>(null);
-  // Sub-state of each Active card: "uploading" | "queued" | "running".
+  // Sub-state of each Active card: "waiting" | "uploading" | "queued" | "running".
   const [sessionPhases, setSessionPhases] = useState<Record<string, string>>(
     {},
   );
+  // Drives the "safe to close this tab" line. `active` = bytes still going up
+  // (the tab is needed); `eta` = seconds until that stops, or null while
+  // throughput is still being measured.
+  const [closeInfo, setCloseInfo] = useState<{
+    active: boolean;
+    eta: number | null;
+  }>({ active: false, eta: null });
+
+  // Queue a file's upload behind whatever is already uploading.
+  const enqueueUpload = (task: () => Promise<void>): void => {
+    uploadChainRef.current = uploadChainRef.current
+      .catch(() => {})
+      .then(task)
+      .catch(() => {});
+  };
 
   const setPhase = (sid: string, phase?: string) =>
     setSessionPhases((prev) => {
@@ -381,8 +419,17 @@ const UploadPage: React.FC = () => {
       const pendingById = new Map(pending.map((p) => [p.sessionId, p]));
 
       for (const u of processing) {
-        if (pendingById.has(u.sessionId)) {
-          runUpload(pendingById.get(u.sessionId)!, false); // resume the upload
+        const p = pendingById.get(u.sessionId);
+        if (p?.uploadedFilename) {
+          // Fully uploaded, but the tab closed before its job was created. The
+          // file is already on the server - just replay the inference call. Not
+          // queued behind the resuming uploads: it costs one POST and getting it
+          // into the GPU queue now is the whole point.
+          dispatchInference(p.sessionId, p.model, p.uploadedFilename, false);
+        } else if (p) {
+          setPhase(u.sessionId, "waiting");
+          uploadRemainingRef.current.set(p.sessionId, p.file.size);
+          enqueueUpload(() => runUpload(p, false)); // resume the upload
         } else {
           startInferencePolling(u.sessionId, u.model); // resume polling
         }
@@ -419,6 +466,36 @@ const UploadPage: React.FC = () => {
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
   }, [isUploading]);
+
+  // "Safe to close" estimate. Only the upload needs this tab: once a file is
+  // dispatched it lives in the server's DB-backed job queue behind the GPU lock,
+  // so the tab becomes disposable the moment the last byte lands. Rather than
+  // accumulating a fixed total (which a cancel or failure would leave stale),
+  // both terms are re-derived every tick from live state: remaining bytes from
+  // the per-session map, throughput from the delta in bytes actually sent.
+  useEffect(() => {
+    let lastBytes = bytesSentRef.current;
+    let rate = 0; // bytes/sec, smoothed - raw per-second deltas are far too jumpy
+    const timer = setInterval(() => {
+      const sent = bytesSentRef.current;
+      const delta = sent - lastBytes;
+      lastBytes = sent;
+      rate = rate === 0 ? delta : rate * 0.7 + delta * 0.3;
+
+      let remaining = 0;
+      uploadRemainingRef.current.forEach((bytes) => {
+        remaining += bytes;
+      });
+      const active = uploadRemainingRef.current.size > 0;
+      setCloseInfo({
+        active,
+        // Below ~1 KB/s the estimate is noise (or the connection stalled) -
+        // show "uploading" with no number rather than an absurd one.
+        eta: active && rate > 1024 ? Math.max(1, Math.round(remaining / rate)) : null,
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!modelDropOpen) return;
@@ -470,6 +547,61 @@ const UploadPage: React.FC = () => {
   // not a client one.
   const CHUNK_SIZE = 512 * 1024;
 
+  // Hand an already-uploaded file to the server's job queue. Split out of the
+  // upload path because the two halves fail independently: the bytes are on the
+  // server before this runs, so a tab closed in this window only needs the
+  // inference call replayed, not the whole file re-sent. Once this returns
+  // successfully the run is entirely server-side and the tab is free.
+  const dispatchInference = async (
+    sid: string,
+    model: string,
+    uploadedName: string,
+    foreground: boolean,
+  ) => {
+    // Reuse the upload's controller when there is one, so a Cancel pressed
+    // during the upload still aborts this call.
+    let controller = uploadAbortRef.current.get(sid);
+    if (!controller) {
+      controller = new AbortController();
+      uploadAbortRef.current.set(sid, controller);
+    }
+    try {
+      if (foreground) setMessage(`Starting ${model} inference...`);
+      const inferFd = new FormData();
+      inferFd.append("session_id", sid);
+      inferFd.append("model_name", model);
+      inferFd.append("uploaded_filename", uploadedName);
+      const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
+        method: "POST",
+        body: inferFd,
+        credentials: "include",
+        signal: controller.signal,
+      });
+      const data = await parseApiResponse(res);
+      if (!res.ok) throw new Error(data.error || "Failed to start inference");
+
+      // Queued server-side now - nothing here is needed to finish the run, so
+      // drop the resumable record.
+      await deletePendingUpload(sid);
+      setSessionId(sid);
+      setPhase(sid, "queued"); // server queues for the GPU; poll refines this
+      if (foreground) setMessage(`${model} inference started. Session: ${sid}`);
+      startInferencePolling(sid, model);
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      console.error(err);
+      setPhase(sid);
+      await deletePendingUpload(sid);
+      setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
+      // The card already shows "Failed" — don't duplicate it in the status line.
+      if (foreground) setMessage("");
+    } finally {
+      if (uploadAbortRef.current.get(sid) === controller) {
+        uploadAbortRef.current.delete(sid);
+      }
+    }
+  };
+
   // Uploads the file described by `p`, finalizes, then starts inference.
   // Resumable: the file lives in IndexedDB and the chunk cursor is persisted, so
   // a reload can call this again to pick up where it left off - starting from
@@ -497,6 +629,14 @@ const UploadPage: React.FC = () => {
       const startChunk = p.nextChunk > 0
         ? await resolveResumeStart(API_BASE, sid, p.nextChunk)
         : 0;
+
+      // Correct the "safe to close" estimate for what the server already holds:
+      // startScanRun registered the whole file, but a resume only re-sends the
+      // tail.
+      uploadRemainingRef.current.set(
+        sid,
+        Math.max(0, file.size - startChunk * chunkSizeOf(p)),
+      );
 
       if (foreground) {
         foregroundUploadSidRef.current = sid;
@@ -592,6 +732,11 @@ const UploadPage: React.FC = () => {
 
         completedCount++;
         completedIndices.add(i);
+        bytesSentRef.current += chunk.size;
+        uploadRemainingRef.current.set(
+          sid,
+          Math.max(0, (uploadRemainingRef.current.get(sid) ?? 0) - chunk.size),
+        );
         await advanceWatermark();
         if (foreground)
           setUploadProgress(Math.round((completedCount / totalChunks) * 100));
@@ -633,33 +778,18 @@ const UploadPage: React.FC = () => {
       if (!finalizeRes.ok) throw new Error(finalizeData.error);
       const uploadedName = finalizeData.uploaded_filename || filename;
 
-      // File is fully on the server now - drop the IDB copy before we kick off
-      // inference so a later reload resumes by polling, not re-uploading.
-      await deletePendingUpload(sid);
+      // The bytes are on the server but no job exists yet. Keep the IDB record
+      // (minus the now-pointless file blob) flagged as uploaded, so a tab closed
+      // in this window resumes by dispatching rather than by re-uploading a file
+      // the server already has - or worse, failing it. dispatchInference clears it.
+      await setPendingUploaded(sid, uploadedName);
       if (foreground) {
         foregroundUploadSidRef.current = null;
         setUploadProgress(100);
         setIsUploading(false);
       }
 
-      if (foreground) setMessage(`Starting ${model} inference...`);
-      const inferFd = new FormData();
-      inferFd.append("session_id", sid);
-      inferFd.append("model_name", model);
-      inferFd.append("uploaded_filename", uploadedName);
-      const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
-        method: "POST",
-        body: inferFd,
-        credentials: "include",
-        signal: controller.signal,
-      });
-      const data = await parseApiResponse(res);
-      if (!res.ok) throw new Error(data.error || "Failed to start inference");
-
-      setSessionId(sid);
-      setPhase(sid, "queued"); // server queues for the GPU; poll refines this
-      if (foreground) setMessage(`${model} inference started. Session: ${sid}`);
-      startInferencePolling(sid, model);
+      await dispatchInference(sid, model, uploadedName, foreground);
     } catch (err) {
       // A user cancel aborts our fetches - cancelRun already did the cleanup
       // and set the card to Cancelled, so don't overwrite that with Failed.
@@ -680,6 +810,9 @@ const UploadPage: React.FC = () => {
       // The card already shows "Failed" — don't duplicate it in the status line.
       if (foreground) setMessage("");
     } finally {
+      // Whatever happened, this file is no longer contributing bytes - drop it
+      // so a cancel/failure can't leave its unsent bytes inflating the estimate.
+      uploadRemainingRef.current.delete(sid);
       if (uploadAbortRef.current.get(sid) === controller) {
         uploadAbortRef.current.delete(sid);
       }
@@ -720,6 +853,11 @@ const UploadPage: React.FC = () => {
           );
         const data = await parseApiResponse(res);
         if (!res.ok) throw new Error(data.error || "DICOM slice upload failed");
+        bytesSentRef.current += files[i].size;
+        uploadRemainingRef.current.set(
+          sid,
+          Math.max(0, (uploadRemainingRef.current.get(sid) ?? 0) - files[i].size),
+        );
         setUploadProgress(Math.round(((i + 1) / files.length) * 100));
       }
 
@@ -738,24 +876,7 @@ const UploadPage: React.FC = () => {
       setUploadProgress(100);
       setIsUploading(false);
 
-      setMessage(`Starting ${model} inference...`);
-      const inferFd = new FormData();
-      inferFd.append("session_id", sid);
-      inferFd.append("model_name", model);
-      inferFd.append("uploaded_filename", uploadedName);
-      const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
-        method: "POST",
-        body: inferFd,
-        credentials: "include",
-        signal: controller.signal,
-      });
-      const data = await parseApiResponse(res);
-      if (!res.ok) throw new Error(data.error || "Failed to start inference");
-
-      setSessionId(sid);
-      setPhase(sid, "queued"); // server queues for the GPU; poll refines this
-      setMessage(`${model} inference started. Session: ${sid}`);
-      startInferencePolling(sid, model);
+      await dispatchInference(sid, model, uploadedName, true);
     } catch (err) {
       // A user cancel aborts our fetches - cancelRun already set the card to
       // Cancelled, so don't overwrite that with Failed.
@@ -768,6 +889,7 @@ const UploadPage: React.FC = () => {
       // Card already shows "Failed"; don't duplicate it in the status line.
       setMessage("");
     } finally {
+      uploadRemainingRef.current.delete(sid);
       if (uploadAbortRef.current.get(sid) === controller) {
         uploadAbortRef.current.delete(sid);
       }
@@ -775,13 +897,13 @@ const UploadPage: React.FC = () => {
   };
 
   /* ── Run inference ── */
-  // Kick off one scan's upload/inference. Shared by single and batch runs.
-  // `foreground` drives the top progress bar (only the first scan of a run
-  // claims it; the rest upload in the background).
+  // Queue one scan's upload/inference. Shared by single and batch runs. The
+  // upload itself waits its turn on uploadChainRef - only one file is on the
+  // wire at a time - so every scan can drive the foreground progress bar when
+  // it gets there, without two of them fighting over it.
   const startScanRun = async (
     item: SelectedItem,
     model: string,
-    foreground: boolean,
     batch?: { batchId: string; batchLabel: string },
   ) => {
     const sid = crypto.randomUUID();
@@ -799,13 +921,17 @@ const UploadPage: React.FC = () => {
         batchLabel: batch?.batchLabel,
       }),
     );
+    // Sits behind other files on the upload chain until its turn.
+    setPhase(sid, "waiting");
 
     // The caller clears the whole selection before looping, so there's nothing to
     // consume here. A DICOM folder uploads its slices and converts server-side; a
     // NIfTI file rides the resumable path (stashed in IndexedDB so an interrupted
     // upload can resume).
     if (item.kind === "dicom") {
-      runDicomUpload(sid, item.files, model);
+      const bytes = item.files.reduce((sum, f) => sum + f.size, 0);
+      uploadRemainingRef.current.set(sid, bytes);
+      enqueueUpload(() => runDicomUpload(sid, item.files, model));
       return;
     }
 
@@ -821,8 +947,13 @@ const UploadPage: React.FC = () => {
       chunkSize: CHUNK_SIZE,
     };
     const resumable = await savePendingUpload(pending);
-    if (foreground) uploadResumableRef.current = resumable;
-    runUpload(pending, foreground);
+    uploadRemainingRef.current.set(sid, file.size);
+    enqueueUpload(() => {
+      // Set when this file actually starts, not when it was queued - otherwise
+      // the last file in a batch would decide the unload warning for all of them.
+      uploadResumableRef.current = resumable;
+      return runUpload(pending, true);
+    });
   };
 
   const handleRunEpaiInference = async () => {
@@ -859,10 +990,12 @@ const UploadPage: React.FC = () => {
         ? { batchId: crypto.randomUUID(), batchLabel: `${items.length} scans` }
         : undefined;
 
-    // Snapshot then clear the selection, and start every scan's run.
+    // Snapshot then clear the selection, and queue every scan's run. Each lands
+    // on the upload chain in selection order and is dispatched to the GPU queue
+    // as soon as its own upload finishes.
     setSelectedItems([]);
-    for (let i = 0; i < items.length; i++) {
-      await startScanRun(items[i], model, i === 0, batch);
+    for (const item of items) {
+      await startScanRun(item, model, batch);
     }
   };
 
@@ -1471,6 +1604,15 @@ const UploadPage: React.FC = () => {
           const inFlight = groups.filter(isGroupInFlight);
           const finished = groups.filter(g => !isGroupInFlight(g));
 
+          // Only the upload needs this tab open; past that the job lives in the
+          // server's queue. Rides along on each card's status line rather than as
+          // its own banner - it's reassurance, not a state the user must act on.
+          const closeNote = closeInfo.active
+            ? closeInfo.eta === null
+              ? "keep tab open"
+              : `safe to close in ${formatEta(closeInfo.eta)}`
+            : "safe to close";
+
           const canView = (u: RecentUpload) => u.status !== "Failed" && u.status !== "Cancelled";
           const openSession = (u: RecentUpload) => {
             if (!canView(u)) return;
@@ -1550,7 +1692,10 @@ const UploadPage: React.FC = () => {
           // ── A single in-flight scan (not part of a batch) ──
           const ProcessingCard = ({ u }: { u: RecentUpload }) => {
             const phase = sessionPhases[u.sessionId];
-            const phaseLabel = phase === "uploading" ? "Uploading…" : phase === "queued" ? "Queued for GPU" : "Running…";
+            const phaseLabel =
+              phase === "waiting" ? "Waiting to upload…" :
+              phase === "uploading" ? "Uploading…" :
+              phase === "queued" ? "Queued for GPU" : "Running…";
             return (
               <div style={{
                 background: "#f5f5f5", border: "1px solid rgba(0,45,114,0.14)", borderRadius: "12px",
@@ -1566,6 +1711,9 @@ const UploadPage: React.FC = () => {
                     <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
                     <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
                       {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}
+                      <span className={`proc-close-note${closeInfo.active ? "" : " proc-close-note--ready"}`}>
+                        {" "}· {closeNote}
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -1652,6 +1800,7 @@ const UploadPage: React.FC = () => {
                     return (
                       <ProcessingSummaryBar key={g.batchId} title={g.label} running={running.length}
                         done={done} statusLabel={statusLabel}
+                        closeNote={closeNote} closeReady={!closeInfo.active}
                         onViewDetails={() => setDetailsBatchId(g.batchId)}
                         onCancelAll={() => running.forEach(u => cancelRun(u))} />
                     );

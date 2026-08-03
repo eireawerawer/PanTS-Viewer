@@ -9,6 +9,8 @@ type Props = {
 	done: number; // scans finished in this batch
 	statusLabel: string; // dominant phase, e.g. "Running…"
 	title?: string; // defaults to "Processing scans"
+	closeNote?: string; // e.g. "safe to close" - whether the tab is still needed
+	closeReady?: boolean; // true once nothing is uploading (tints the note green)
 	onViewDetails?: () => void; // per-scan status / view / download for the batch
 	onCancelAll?: () => void;
 };
@@ -16,7 +18,7 @@ type Props = {
 const SIZE = 46;
 const STROKE = 4;
 
-const ProcessingSummaryBar: React.FC<Props> = ({ running, done, statusLabel, title = "Processing scans", onViewDetails, onCancelAll }) => {
+const ProcessingSummaryBar: React.FC<Props> = ({ running, done, statusLabel, title = "Processing scans", closeNote, closeReady, onViewDetails, onCancelAll }) => {
 	const total = running + done;
 	const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
@@ -59,8 +61,17 @@ const ProcessingSummaryBar: React.FC<Props> = ({ running, done, statusLabel, tit
 				</div>
 				<div className="proc-sub">
 					<span className="upload-spinner proc-spinner" />
-					{statusLabel}
-					{running > 0 && ` · ${running} in progress`}
+					{/* One text run, not sibling flex items - otherwise the row's gap
+					    opens a hole before the note and wraps it onto its own line. */}
+					<span>
+						{statusLabel}
+						{running > 0 && ` · ${running} in progress`}
+						{closeNote && (
+							<span className={`proc-close-note${closeReady ? " proc-close-note--ready" : ""}`}>
+								{" "}· {closeNote}
+							</span>
+						)}
+					</span>
 				</div>
 			</div>
 

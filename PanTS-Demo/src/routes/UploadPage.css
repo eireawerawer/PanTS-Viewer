@@ -1130,6 +1130,14 @@
   height: 12px;
   border-width: 2px;
 }
+/* "safe to close" hint, tucked onto the status line - lighter than the status
+   beside it so it reads as an aside, not another piece of state. */
+.proc-close-note {
+  color: #9a9a9a;
+}
+.proc-close-note--ready {
+  color: #15803d;
+}
 .proc-cancel {
   flex-shrink: 0;
 }
