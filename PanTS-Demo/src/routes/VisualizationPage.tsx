@@ -128,7 +128,6 @@ import {
 import {
     computeStatRows,
     downloadStats,
-    KURTOSIS_TOOLTIP,
     summarizeOutOfRange,
     type OrganMetric,
 } from "../helpers/organStatsExport";
@@ -237,6 +236,37 @@ const resolveOrganLabel = (idx: number): string | undefined => {
     if (staticName) return filenameToName(staticName);
     return getCustomSegmentLabels()[idx];
 };
+
+// Map an RGB triple to a plain color name so the AI can identify each
+// segmentation-mask color by name (paired with the mask legend it receives).
+const _COLOR_NAMES: { name: string; rgb: [number, number, number] }[] = [
+	{ name: "red", rgb: [220, 30, 30] },
+	{ name: "brownish red", rgb: [150, 40, 30] },
+	{ name: "orange", rgb: [255, 140, 0] },
+	{ name: "yellow", rgb: [230, 210, 60] },
+	{ name: "green", rgb: [40, 170, 70] },
+	{ name: "teal", rgb: [40, 180, 170] },
+	{ name: "light blue", rgb: [120, 190, 235] },
+	{ name: "blue", rgb: [50, 110, 220] },
+	{ name: "purple", rgb: [140, 60, 200] },
+	{ name: "pink", rgb: [235, 110, 175] },
+	{ name: "magenta", rgb: [220, 60, 180] },
+	{ name: "gray", rgb: [200, 200, 200] },
+	{ name: "white", rgb: [245, 245, 245] },
+];
+
+function rgbToColorName(r: number, g: number, b: number): string {
+	let best = _COLOR_NAMES[0];
+	let bestDist = Infinity;
+	for (const c of _COLOR_NAMES) {
+		const d = (c.rgb[0] - r) ** 2 + (c.rgb[1] - g) ** 2 + (c.rgb[2] - b) ** 2;
+		if (d < bestDist) {
+			bestDist = d;
+			best = c;
+		}
+	}
+	return best.name;
+}
 
 const CT_PRESETS = [
 	{ name: "Soft Tissue", width: 400, center: 40 },
@@ -440,6 +470,11 @@ function VisualizationPage() {
 	const [showReportScreen, setShowReportScreen] = useState(false);
 	const [showStats, setShowStats] = useState(false);
 	const [showAISidebar, setShowAISidebar] = useState(false);
+	// Width (px) of the AI sidebar; drag-resizable from its left edge. Both the
+	// sidebar and the content shift read this via the --vp-ai-width CSS var.
+	const [aiWidth, setAiWidth] = useState(400);
+	const aiWidthRef = useRef(400);
+	const vpRootRef = useRef<HTMLDivElement>(null);
 	const [organStats, setOrganStats] = useState<OrganStat[] | null>(null);
 	const [statsLoading, setStatsLoading] = useState(false);
 	const [statsError, setStatsError] = useState(false);
@@ -648,6 +683,75 @@ function VisualizationPage() {
 			document.body.removeChild(link);
 		}
 	}, [caseId]);
+
+	// Downscale a screenshot so the vision model gets a small, fast-to-process
+	// image (full-res panes make local vision models slow and prone to timeout).
+	const downscaleDataUrl = (dataUrl: string, maxDim = 768): Promise<string> =>
+		new Promise((resolve) => {
+			const img = new Image();
+			img.onload = () => {
+				const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+				if (scale >= 1) return resolve(dataUrl);
+				const c = document.createElement("canvas");
+				c.width = Math.round(img.width * scale);
+				c.height = Math.round(img.height * scale);
+				const ctx = c.getContext("2d");
+				if (!ctx) return resolve(dataUrl);
+				ctx.drawImage(img, 0, 0, c.width, c.height);
+				resolve(c.toDataURL("image/jpeg", 0.85));
+			};
+			img.onerror = () => resolve(dataUrl);
+			img.src = dataUrl;
+		});
+
+	// Capture for the AI assistant: the three MPR panes (via the shared helper)
+	// plus the 3D pane's WebGL canvas — the four views the user sees in the 2×2
+	// grid. The segmentation masks are left VISIBLE so the model can identify
+	// each organ by its color (paired with the mask legend). Images are
+	// downscaled before returning so the vision model responds quickly.
+	const captureAllViews = useCallback(async () => {
+		const shots: { name: string; dataUrl: string }[] = await captureViewportImages();
+		try {
+			const pane = document.querySelector<HTMLElement>(".render");
+			const canvas = pane?.querySelector<HTMLCanvasElement>("canvas");
+			if (canvas && canvas.width && pane && pane.offsetParent !== null) {
+				const url = canvas.toDataURL("image/png");
+				if (url && url.length > 128) shots.push({ name: "3d", dataUrl: url });
+			}
+		} catch (error) {
+			console.warn("[BodyMaps AI] 3D capture skipped", error);
+		}
+		// Downscale all shots for fast vision inference.
+		return Promise.all(
+			shots.map(async (s) => ({ name: s.name, dataUrl: await downscaleDataUrl(s.dataUrl) }))
+		);
+	}, []);
+
+	// Color → organ legend for the currently visible masks, so the vision model
+	// can name each colored region correctly instead of guessing.
+	const getMaskLegend = useCallback((): { organ: string; color: string }[] => {
+		const legend: { organ: string; color: string }[] = [];
+		for (const item of checkBoxData) {
+			if (!checkState[item.id]) continue;
+			const rgb = labelColorMap[item.id] ?? segmentation_category_colors[item.id];
+			if (!rgb) continue;
+			legend.push({ organ: item.label, color: rgbToColorName(rgb[0], rgb[1], rgb[2]) });
+		}
+		return legend;
+	}, [checkBoxData, checkState, labelColorMap]);
+
+	// Live drag-resize of the AI panel. During the drag we set the CSS var
+	// directly on the page root (cheap, no React re-render) so the sidebar and
+	// the CT views resize smoothly; on release we persist the width to state.
+	const applyAiWidth = useCallback((clientX: number) => {
+		const w = Math.min(760, Math.max(320, window.innerWidth - clientX));
+		aiWidthRef.current = w;
+		vpRootRef.current?.style.setProperty("--vp-ai-width", `${w}px`);
+	}, []);
+
+	const commitAiWidth = useCallback(() => {
+		setAiWidth(aiWidthRef.current);
+	}, []);
 
 	const startReadingSession = async () => {
 		if (sessionRef.current || sessionStarting) return;
@@ -1732,14 +1836,21 @@ const aiAvailableOrgans = useMemo(() => {
 
 	return (
 		<div
+			ref={vpRootRef}
 			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}`}
 			style={{
 				display: "flex",
 				overflow: "hidden",
 				flexDirection: "column",
 				height: "100vh",
-				width: "100vw",
-			}}>
+				["--vp-ai-width" as string]: `${aiWidth}px`,
+				// When the AI sidebar opens, shrink the app to the left of it so the
+				// CT views reflow beside the panel instead of being covered by it
+				// (the fixed sidebar occupies --vp-ai-width on the right). The
+				// showAISidebar resize effect re-fits the viewports to the new width.
+				width: showAISidebar ? "calc(100vw - var(--vp-ai-width, 400px))" : "100vw",
+				transition: "width 180ms ease",
+			} as React.CSSProperties}>
 		
 			{/* ---- Top toolbar (PYCAD-style). Lives in normal flow, so it sits ABOVE the
 			     viewports and never overlays them. Shown/hidden by the gear button. ---- */}
@@ -2904,9 +3015,7 @@ const aiAvailableOrgans = useMemo(() => {
 														<span>{fmtStat(r.skewness, 2)}</span>
 													</div>
 													<div className="vp-stats__detail-item">
-														<span className="vp-stats__tooltip-label" title={KURTOSIS_TOOLTIP}>
-														Kurtosis
-													</span>
+														<span>Kurtosis</span>
 														<span>{fmtStat(r.kurtosis, 2)}</span>
 													</div>
 													<div className="vp-stats__detail-item">
@@ -3025,6 +3134,10 @@ const aiAvailableOrgans = useMemo(() => {
 				organMetrics={organStats ?? []}
 				demographics={demographics}
 				actions={aiActions}
+				captureViewport={captureAllViews}
+				getMaskLegend={getMaskLegend}
+				onResize={applyAiWidth}
+				onResizeEnd={commitAiWidth}
 			/>
 			</div>
 

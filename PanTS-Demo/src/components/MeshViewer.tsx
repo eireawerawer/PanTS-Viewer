@@ -70,7 +70,10 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
   return (
     <div style={{ display: "flex", width: "100%", height: "100%" }}>
       <main style={{ flex: 1, minWidth: 0 }}>
-        <Canvas camera={{ position: [0, 250, 650], fov: 45, near: 0.1, far: 5000 }}>
+        <Canvas
+          camera={{ position: [0, 250, 650], fov: 45, near: 0.1, far: 5000 }}
+          gl={{ preserveDrawingBuffer: true }}
+        >
           <color attach="background" args={["#050505"]} />
           <ambientLight intensity={0.7} />
           <directionalLight position={[300, 500, 300]} intensity={1.2} />

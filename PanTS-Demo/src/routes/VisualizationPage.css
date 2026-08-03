@@ -4,6 +4,27 @@
   grid-template-rows: 100vh;
   background-color: #08090b;
   color: white;
+  /* Width reserved for the BodyMaps AI sidebar. Shared by the sidebar itself
+     (src/components/AIAssistant/AISidebar.css) and by the content shift below,
+     so the CT views sit flush against the panel with no overlap. */
+  --vp-ai-width: 400px;
+}
+
+/* When the AI sidebar is open the page container shrinks (see the inline width
+   in VisualizationPage.tsx); the fixed, viewport-width bottom bar must shrink
+   with it so it doesn't slide under the panel. */
+.VisualizationPage.ai-panel-open .checkbox-bottom-bar {
+  width: calc(100vw - var(--vp-ai-width, 400px));
+}
+
+@media (max-width: 899px) {
+  /* On narrow screens the sidebar covers the full width, so no content shift. */
+  .VisualizationPage.ai-panel-open {
+    width: 100vw !important;
+  }
+  .VisualizationPage.ai-panel-open .checkbox-bottom-bar {
+    width: 100vw;
+  }
 }
 
 .sidebar {
@@ -1343,12 +1364,6 @@
 .vp-stats__detail-item span:last-child {
   font-size: 11px;
   color: var(--vp-text-dim);
-}
-/* Dotted-underline affordance for a stat label with a hover explanation (e.g. Kurtosis) —
-   makes the tooltip discoverable instead of relying on users guessing to hover plain text. */
-.vp-stats__tooltip-label {
-  cursor: help;
-  border-bottom: 1px dotted var(--vp-text-faint);
 }
 
 /* ---- Case metadata panel — shares the .vp-stats dock shell (right of the stage) ---- */
