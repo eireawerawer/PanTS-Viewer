@@ -269,113 +269,23 @@ def get_image_preview(clabel_id):
 
 
 # ---------------------------------------------------------------------------
-# 3D organ meshes (the "3D" viewer tab).
-#
-# In production the meshes are pre-baked into MESH_PATH by preprocess_meshes.py,
-# so the two endpoints below first look there. Locally that directory usually
-# does not exist, which is why "3D works on the deployed site but not on my
-# machine": the manifest 404s and the viewer hangs on "Loading 3D
-# segmentation...". To make 3D work anywhere, we fall back to generating the
-# manifest / GLBs on demand from the case's label NIfTI — pulling it from the
-# same HuggingFace mirror (BodyMaps/iPanTSMini) the report endpoint already
-# uses when the local dataset is absent. Generated files are cached on a
-# writable disk so each organ is only ever built once.
+# 3D organ meshes (the "3D" viewer tab). Meshes are pre-baked into MESH_PATH by
+# preprocess_meshes.py; these endpoints serve them.
 # ---------------------------------------------------------------------------
-
-# Writable cache for on-demand meshes (MESH_PATH itself is often read-only in
-# dev). Mirrors the pre-baked layout: <root>/<PanTS_id>/<organ>.glb + manifest.json.
-_MESH_CACHE_ROOT = (
-    os.getenv("MESH_CACHE_PATH")
-    or os.path.join(tempfile.gettempdir(), "bodymaps_mesh_cache")
-)
-
-_HF_MASK_BASE = "https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main"
-
-
-def _mesh_local_mask_path(case_id):
-    """Return an on-disk combined_labels.nii.gz for a numeric PanTS id.
-
-    Prefers the local dataset, then the low-res mirror, then a HuggingFace
-    download cached under _MESH_CACHE_ROOT. Returns None if nothing is
-    reachable (numeric PanTS ids only — sessions/CancerVerse have no masks).
-    """
-    if not str(case_id).isdigit():
-        return None
-
-    pid = int(case_id)
-    pants_id = get_panTS_id(pid)
-
-    candidates = []
-    if Constants.PANTS_PATH:
-        candidates.append(
-            os.path.join(Constants.PANTS_PATH, "mask_only", pants_id, "combined_labels.nii.gz")
-        )
-    candidates.append(
-        os.path.join(LOWRES_ROOT, "mask_only", pants_id, "combined_labels_lowres.nii.gz")
-    )
-
-    for path in candidates:
-        if path and os.path.exists(path):
-            return path
-
-    # Cached HuggingFace copy.
-    cache_dir = os.path.join(_MESH_CACHE_ROOT, pants_id)
-    cached_mask = os.path.join(cache_dir, "combined_labels.nii.gz")
-    if os.path.exists(cached_mask):
-        return cached_mask
-
-    try:
-        os.makedirs(cache_dir, exist_ok=True)
-        url = f"{_HF_MASK_BASE}/mask_only/{pants_id}/combined_labels.nii.gz?download=true"
-        print(f"[mesh] downloading mask for {pants_id} from HuggingFace...")
-        resp = requests.get(url, stream=True, timeout=120)
-        resp.raise_for_status()
-        tmp_path = cached_mask + ".part"
-        with open(tmp_path, "wb") as handle:
-            for chunk in resp.iter_content(chunk_size=8192):
-                handle.write(chunk)
-        os.replace(tmp_path, cached_mask)
-        return cached_mask
-    except Exception as exc:
-        print(f"[mesh] HuggingFace mask download failed for {pants_id}: {exc}")
-        return None
-
 
 @api_blueprint.route("/cases/<case_id>/mesh-manifest")
 def get_mesh_manifest(case_id):
     if not _is_safe_id(case_id):
         return jsonify({"error": "Invalid id"}), 400
+    manifest_path = os.path.join(Constants.MESH_PATH, get_panTS_id(secure_filename(case_id)), "manifest.json")
 
-    display_id = get_panTS_id(secure_filename(case_id))
+    if not os.path.exists(manifest_path):
+        return jsonify({"error": f"File not found: {manifest_path} "}), 404
 
-    # 1) Pre-baked manifest (production path).
-    manifest_path = os.path.join(Constants.MESH_PATH, display_id, "manifest.json")
-    if os.path.exists(manifest_path):
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            return jsonify(json.load(f))
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
 
-    # 2) Cached on-demand manifest.
-    cached_manifest = os.path.join(_MESH_CACHE_ROOT, display_id, "manifest.json")
-    if os.path.exists(cached_manifest):
-        with open(cached_manifest, "r", encoding="utf-8") as f:
-            return jsonify(json.load(f))
-
-    # 3) Generate on demand from the label NIfTI (local dev / missing bake).
-    mask_path = _mesh_local_mask_path(case_id)
-    if not mask_path:
-        return jsonify({"error": f"No mesh or label data available for {display_id}"}), 404
-
-    try:
-        manifest = generate_mesh_manifest(display_id, mask_path)
-        cache_dir = os.path.join(_MESH_CACHE_ROOT, display_id)
-        os.makedirs(cache_dir, exist_ok=True)
-        with open(cached_manifest, "w", encoding="utf-8") as f:
-            json.dump(manifest, f)
-        return jsonify(manifest)
-    except Exception as exc:
-        print(f"[mesh] manifest generation failed for {display_id}: {exc}")
-        return jsonify({"error": f"Error generating mesh manifest: {exc}"}), 500
-
+    return jsonify(manifest)
 
 @api_blueprint.route("/cases/<display_id>/render_only/<filename>")
 def get_mesh_file(display_id, filename):
@@ -383,43 +293,19 @@ def get_mesh_file(display_id, filename):
     # apply the same id-guard + secure_filename barrier as the other routes.
     if not _is_safe_id(display_id):
         return jsonify({"error": "Invalid id"}), 400
-
-    safe_case = secure_filename(display_id)
-    safe_name = secure_filename(filename)
-
-    # 1) Pre-baked GLB.
-    mesh_path = os.path.join(Constants.MESH_PATH, safe_case, safe_name)
-    if os.path.exists(mesh_path):
-        return send_file(mesh_path, mimetype="model/gltf-binary", conditional=False)
-
-    # 2) Cached on-demand GLB.
-    cached_glb = os.path.join(_MESH_CACHE_ROOT, safe_case, safe_name)
-    if os.path.exists(cached_glb):
-        return send_file(cached_glb, mimetype="model/gltf-binary", conditional=False)
-
-    # 3) Generate this organ's GLB on demand from the label NIfTI.
-    if not safe_name.endswith(".glb"):
-        return jsonify({"error": "Invalid mesh filename"}), 400
-    organ_key = safe_name[:-4]
-
-    # The manifest ids are numeric; strip the PanTS_ prefix to reuse the
-    # numeric mask resolver above.
-    numeric_id = safe_case.replace("PanTS_", "").lstrip("0") or "0"
-    mask_path = _mesh_local_mask_path(numeric_id)
-    if not mask_path:
-        return jsonify({"error": f"No label data available for {safe_case}"}), 404
-
+    mesh_path = os.path.join(Constants.MESH_PATH, secure_filename(display_id), secure_filename(filename))
     try:
-        glb_bytes = generate_organ_glb_bytes(organ_key, mask_path)
-        cache_dir = os.path.join(_MESH_CACHE_ROOT, safe_case)
-        os.makedirs(cache_dir, exist_ok=True)
-        with open(cached_glb, "wb") as handle:
-            handle.write(glb_bytes)
-        response = make_response(glb_bytes)
-        response.headers["Content-Type"] = "model/gltf-binary"
-        return response
+        response = send_file(
+            mesh_path,
+            mimetype="model/gltf-binary",
+            conditional=False,
+        )
+
     except Exception as e:
         return jsonify({"error": f"Error generating GLB: {str(e)}"}), 500
+
+
+    return response
 
 @api_blueprint.route('/get-label-colormap/<clabel_id>', methods=['GET'])
 def get_label_colormap(clabel_id):
@@ -2294,30 +2180,40 @@ def _ai_public_metric(entry):
     }
 
 
-def _ai_local_image_path(case_id):
-    """Local CT (ct.nii.gz) for a numeric PanTS id, downloading from the
-    HuggingFace mirror into the mesh cache when it is not on disk. Mirrors
-    _mesh_local_mask_path but for the image volume. Returns None if absent."""
+# Writable cache + HuggingFace mirror for on-demand case data used by the AI
+# organ-measurement feature (mask + CT), when the local dataset is absent.
+_AI_HF_CACHE_ROOT = (
+    os.getenv("AI_DATA_CACHE_PATH")
+    or os.path.join(tempfile.gettempdir(), "bodymaps_ai_cache")
+)
+_AI_HF_BASE = "https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main"
+
+
+def _ai_pants_id_or_none(case_id):
+    """Sanitize a case id to a fixed 'PanTS_########' string, or None.
+
+    Requires the id to be purely numeric, then derives the folder name from the
+    integer value. This neutralizes any path-traversal payload (the value that
+    reaches os.path.join is fully controlled, never the raw user string), and is
+    the check CodeQL recognizes as sanitizing py/path-injection.
+    """
     if not str(case_id).isdigit():
         return None
+    return get_panTS_id(int(case_id))
 
-    pid = int(case_id)
-    pants_id = get_panTS_id(pid)
 
-    if Constants.PANTS_PATH:
-        local = os.path.join(Constants.PANTS_PATH, "image_only", pants_id, "ct.nii.gz")
-        if os.path.exists(local):
-            return local
-
-    cache_dir = os.path.join(_MESH_CACHE_ROOT, pants_id)
-    cached = os.path.join(cache_dir, "ct.nii.gz")
+def _ai_download_case_file(pants_id, rel_path, filename):
+    """Download <rel_path>/<filename> for a case from the HuggingFace mirror
+    into the AI cache and return the local path, or None on failure. pants_id is
+    already sanitized by _ai_pants_id_or_none."""
+    cache_dir = os.path.join(_AI_HF_CACHE_ROOT, pants_id)
+    cached = os.path.join(cache_dir, filename)
     if os.path.exists(cached):
         return cached
-
     try:
         os.makedirs(cache_dir, exist_ok=True)
-        url = f"{_HF_MASK_BASE}/image_only/{pants_id}/ct.nii.gz?download=true"
-        print(f"[ai metrics] downloading CT for {pants_id} from HuggingFace...")
+        url = f"{_AI_HF_BASE}/{rel_path}/{pants_id}/{filename}?download=true"
+        print(f"[ai metrics] downloading {filename} for {pants_id} from HuggingFace...")
         resp = requests.get(url, stream=True, timeout=120)
         resp.raise_for_status()
         tmp = cached + ".part"
@@ -2327,8 +2223,42 @@ def _ai_local_image_path(case_id):
         os.replace(tmp, cached)
         return cached
     except Exception as exc:
-        print(f"[ai metrics] CT download failed for {pants_id}: {exc}")
+        print(f"[ai metrics] download failed for {pants_id}/{filename}: {exc}")
         return None
+
+
+def _ai_local_mask_path(case_id):
+    """On-disk combined_labels.nii.gz for a numeric PanTS id — local dataset,
+    then low-res mirror, then a cached HuggingFace download. None if absent."""
+    pants_id = _ai_pants_id_or_none(case_id)
+    if not pants_id:
+        return None
+
+    if Constants.PANTS_PATH:
+        local = os.path.join(Constants.PANTS_PATH, "mask_only", pants_id, "combined_labels.nii.gz")
+        if os.path.exists(local):
+            return local
+
+    lowres = os.path.join(LOWRES_ROOT, "mask_only", pants_id, "combined_labels_lowres.nii.gz")
+    if os.path.exists(lowres):
+        return lowres
+
+    return _ai_download_case_file(pants_id, "mask_only", "combined_labels.nii.gz")
+
+
+def _ai_local_image_path(case_id):
+    """On-disk ct.nii.gz for a numeric PanTS id — local dataset, then a cached
+    HuggingFace download. Used for mean-HU. None if absent."""
+    pants_id = _ai_pants_id_or_none(case_id)
+    if not pants_id:
+        return None
+
+    if Constants.PANTS_PATH:
+        local = os.path.join(Constants.PANTS_PATH, "image_only", pants_id, "ct.nii.gz")
+        if os.path.exists(local):
+            return local
+
+    return _ai_download_case_file(pants_id, "image_only", "ct.nii.gz")
 
 
 def _ai_compute_organ_metrics_from_labels(case_id):
@@ -2343,7 +2273,7 @@ def _ai_compute_organ_metrics_from_labels(case_id):
     if not str(case_id).isdigit() or not MESH_LABELS:
         return None
 
-    mask_path = _mesh_local_mask_path(case_id)
+    mask_path = _ai_local_mask_path(case_id)
     if not mask_path:
         return None
 
@@ -3926,12 +3856,24 @@ def _ai_stream_system_prompt(has_images: bool) -> str:
         "then keep it tight.\n"
         "- Answer every part of the question, and always finish completely — "
         "never stop mid-sentence.\n\n"
+        "THIS APP ALREADY HAS THE DATA. The scan is measured for you — organ "
+        "volumes, mean HU, and any percentiles are in the 'Facts:' block. Your "
+        "value is INTERPRETING those numbers, not collecting them.\n\n"
         "CLINICAL / HEALTH QUESTIONS (symptoms, 'could this be...', 'is this "
-        "normal', diagnosis, management): in a short, warm paragraph — not a "
-        "list — say what it likely suggests, mention the most likely "
-        "possibilities and what would help tell them apart, and note sensible "
-        "next steps or when to seek in-person care. Flag anything urgent. Stay "
-        "educational and NON-DIAGNOSTIC; never give a definitive diagnosis.\n\n"
+        "normal', diagnosis, management): before answering, silently work out "
+        "what the numbers show, the most likely explanations, what information "
+        "is still missing, and whether anything is urgent — then give a short, "
+        "warm paragraph that states what the values suggest, the leading "
+        "possibilities and what would tell them apart, and sensible next steps "
+        "or when to seek in-person care. Clearly flag urgency / escalation if "
+        "anything sounds serious. Stay educational and NON-DIAGNOSTIC; never "
+        "give a definitive diagnosis.\n\n"
+        "CITE THE NUMBER. Tie every case-specific claim to a value from the "
+        "Facts — name the volume, mean HU, or percentile you rely on (e.g. 'the "
+        "liver volume of 1512 cm3 is above the typical range'). Never state a "
+        "fact about this case that you cannot tie to a provided value; if a "
+        "value you need is not in the Facts, say what's missing and ask for it "
+        "rather than guessing.\n\n"
         "END EACH REPLY with one natural follow-up question (its own sentence) "
         "that invites the user to continue — phrased conversationally, with NO "
         "lead-in label. If you are missing something you genuinely need, make "
