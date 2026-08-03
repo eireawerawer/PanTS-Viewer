@@ -248,7 +248,6 @@ function patientFindingText(organ: string, measurements: ReportMeasurements): st
     loc?.type === 'lateral' ? `your ${loc.word} ${organLabel}`
     : loc?.type === 'subregion' ? `the ${loc.word} of your ${organLabel}`
     : `your ${organLabel}`;
-  console.log("DEBUG patientFindingText:", { organ, section: measurements.section, detail });
   const detail = measurements.section || '';
 
   if (!detail) {
@@ -421,7 +420,6 @@ function OrganMetricsCard({
   report: ReportMeasurements;
   needsReview: boolean;
 }) {
-  console.log("DEBUG OrganMetrics:", { report, curData, organMeanHu: report.organMeanHu, computedHu: curData.mean_hu });
   const meanHu = report.organMeanHu ?? curData.mean_hu;
   const organVolume = report.organVolumeCc ?? curData.volume;
   return (

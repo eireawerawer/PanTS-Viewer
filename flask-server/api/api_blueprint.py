@@ -1156,12 +1156,20 @@ setView('patient');
 </html>"""
 
 
+# ============================================================
+# DROP-IN REPLACEMENT for _REPORT_CSS in api_blueprint.py
+# ============================================================
+
 _REPORT_CSS = """
   :root {
-    --ink: #0b0b0b; --muted: #6b6f76; --faint: #9599a1;
-    --surface: #f6f6f8; --card: #ffffff; --line: #e6e6ea;
-    --accent: #c2410c; --accent-bg: #fff4ec;
-    --green: #16a34a; --green-bg: #eefbf1;
+    --jhu-heritage: #002D72;
+    --jhu-spirit:   #68ACE5;
+    --jhu-white:    #FFFFFF;
+
+    --ink: #071C3C; --muted: #4C6584; --faint: #7C93AE;
+    --surface: #F2F6FB; --card: #ffffff; --line: #D6E4F2;
+    --accent: var(--jhu-heritage); --accent-bg: #E7EFFA;
+    --green: #1C7C4F; --green-bg: #EAF7EF;
   }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--surface); color: var(--ink); }
@@ -1176,42 +1184,69 @@ _REPORT_CSS = """
     .wrap { max-width: 1080px; }
     .clean-grid { grid-template-columns: repeat(4, 1fr); }
   }
-  .toggle { display: flex; background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 4px; margin-bottom: 18px; position: sticky; top: 12px; z-index: 10; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
+  .toggle { display: flex; background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 4px; margin-bottom: 18px; position: sticky; top: 12px; z-index: 10; box-shadow: 0 2px 10px rgba(0,45,114,0.08); }
   .toggle button { flex: 1; border: none; background: transparent; border-radius: 999px; padding: 10px; font-size: 14px; font-weight: 600; color: var(--muted); cursor: pointer; }
-  .toggle button.active { background: var(--ink); color: #fff; }
+  .toggle button.active { background: var(--jhu-heritage); color: var(--jhu-white); }
   .disclaimer { font-size: 11.5px; color: var(--faint); font-style: italic; margin: 0 2px 18px; line-height: 1.5; }
-  .header { margin-bottom: 18px; }
-  .header h1 { font-size: 22px; font-weight: 700; margin: 0 0 2px; }
+  .header { margin-bottom: 18px; border-bottom: 3px solid var(--jhu-spirit); padding-bottom: 14px; }
+  .header h1 { font-size: 22px; font-weight: 700; margin: 0 0 2px; color: var(--jhu-heritage); }
   .header .sub { font-size: 13px; color: var(--muted); }
-  .download-btn { display: inline-flex; align-items: center; gap: 8px; background: var(--ink); color: #fff; text-decoration: none; font-size: 14px; font-weight: 600; padding: 10px 16px; border-radius: 10px; }
-  .card { background: var(--card); border-radius: 16px; padding: 16px 18px; margin-bottom: 12px; border: 1px solid var(--line); }
-  .card.flag { background: var(--accent-bg); border-color: #fbd8bf; }
-  .flag-label { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 8px; }
-  .flag-label .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
-  .organ-title { font-size: 17px; font-weight: 700; margin-bottom: 6px; }
-  .body-text { font-size: 15.5px; line-height: 1.55; color: #1c1c1e; }
+  .download-btn { display: inline-flex; align-items: center; gap: 8px; background: var(--jhu-heritage); color: var(--jhu-white); text-decoration: none; font-size: 14px; font-weight: 600; padding: 10px 16px; border-radius: 10px; }
+  .download-btn:hover { background: #001F52; }
+  .card { background: var(--card); border-radius: 16px; padding: 16px 18px; margin-bottom: 12px; border: 1px solid var(--line); box-shadow: 0 2px 8px rgba(0,45,114,0.05); }
+  .card.flag { background: var(--accent-bg); border-color: var(--jhu-spirit); border-left: 4px solid var(--jhu-heritage); }
+  .flag-label { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; color: var(--jhu-heritage); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 8px; }
+  .flag-label .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--jhu-heritage); }
+  .organ-title { font-size: 17px; font-weight: 700; margin-bottom: 6px; color: var(--jhu-heritage); }
+  .body-text { font-size: 15.5px; line-height: 1.55; color: var(--ink); }
   .metrics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
-  .metric { background: rgba(255,255,255,0.6); border-radius: 10px; padding: 10px 12px; }
-  .metric .label { font-size: 11.5px; color: var(--accent); font-weight: 600; text-transform: uppercase; }
-  .metric .value { font-size: 17px; font-weight: 700; margin-top: 2px; }
-  .badge { display: inline-flex; align-items: center; gap: 6px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.03em; padding: 4px 10px; border-radius: 999px; margin-top: 10px; }
-  .section-label { font-size: 12.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin: 20px 4px 10px; }
+  .metric { background: var(--jhu-white); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .metric .label { font-size: 11.5px; color: var(--jhu-heritage); font-weight: 600; text-transform: uppercase; }
+  .metric .value { font-size: 17px; font-weight: 700; margin-top: 2px; color: var(--ink); }
+  .badge { display: inline-flex; align-items: center; gap: 6px; background: var(--jhu-heritage); color: var(--jhu-white); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; padding: 4px 10px; border-radius: 999px; margin-top: 10px; }
+  .section-label { font-size: 12.5px; font-weight: 700; color: var(--jhu-heritage); text-transform: uppercase; letter-spacing: 0.03em; margin: 20px 4px 10px; }
   .clean-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
   .clean-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
   .clean-card .name { font-size: 13px; color: var(--muted); }
-  .clean-card .num { font-size: 19px; font-weight: 700; margin-top: 2px; }
+  .clean-card .num { font-size: 19px; font-weight: 700; margin-top: 2px; color: var(--jhu-heritage); }
   .clean-card .num .unit { font-size: 12px; font-weight: 500; color: var(--muted); }
   .clean-card .hu { font-size: 11.5px; color: var(--faint); margin-top: 2px; }
   .checklist { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
   .row { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 14.5px; }
   .row:last-child { border-bottom: none; }
   .row.flagged { background: var(--accent-bg); }
-  .row.flagged span.name { color: var(--accent); font-weight: 600; }
+  .row.flagged span.name { color: var(--jhu-heritage); font-weight: 600; }
   .check { color: var(--green); font-weight: 700; }
-  .exclaim { color: var(--accent); font-weight: 700; }
-  .show-more { width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; font-size: 14px; font-weight: 600; color: var(--ink); margin-top: 8px; cursor: pointer; }
+  .exclaim { color: var(--jhu-heritage); font-weight: 700; }
+  .show-more { width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; font-size: 14px; font-weight: 600; color: var(--jhu-heritage); margin-top: 8px; cursor: pointer; }
   #more-organs { display: none; }
   #more-organs.open { display: block; }
+
+  .bm-footer { margin-top: 32px; padding: 22px 24px; border-radius: 16px; background: var(--jhu-heritage); display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+  .bm-footer__text { color: var(--jhu-white); }
+  .bm-footer__title { font-size: 15px; font-weight: 700; margin: 0 0 4px; }
+  .bm-footer__sub { font-size: 12.5px; color: var(--jhu-spirit); margin: 0; }
+  .bm-footer__cta { display: inline-flex; align-items: center; gap: 8px; background: var(--jhu-white); color: var(--jhu-heritage); text-decoration: none; font-size: 13.5px; font-weight: 700; padding: 10px 18px; border-radius: 999px; white-space: nowrap; }
+  .bm-footer__cta:hover { background: var(--jhu-spirit); }
+"""
+
+
+# ============================================================
+# In _build_report_html, add this block right before the
+# closing "</div>" of <div class="wrap"> (i.e. right after the
+# checklist / #more-organs block, before the final </div>\n\n<script>)
+# ============================================================
+
+BODYMAPS_FOOTER_HTML = """
+  <div class="bm-footer">
+    <div class="bm-footer__text">
+      <p class="bm-footer__title">Generated by BodyMaps &middot; Johns Hopkins University</p>
+      <p class="bm-footer__sub">AI-powered CT segmentation and tumor detection. Explore your own scans.</p>
+    </div>
+    <a href="https://bodymaps.wse.jhu.edu/dashboard" class="bm-footer__cta" target="_blank" rel="noopener">
+      Visit BodyMaps &rarr;
+    </a>
+  </div>
 """
 
 
