@@ -20,7 +20,7 @@ import {
 	type PrimaryMouseToolName,
 	type SliceInfo,
 } from "../CornerstoneNifti2";
-export type MaskEditMode = "brush" | "eraser" | "smartfill" | "lasso" | null;
+import type { MaskEditMode } from "../../routes/VisualizationPage";
 
 const TOOL_BY_KEY: Record<string, PrimaryMouseToolName> = {
 	l: LENGTH_TOOL,
@@ -55,23 +55,11 @@ interface UseKeyboardShortcutsArgs {
 	setCrosshairToolActive: (active: boolean) => void;
 	setShowStats: (v: boolean) => void;
 	setShowMetadata: (v: boolean) => void;
-<<<<<<< HEAD
-	setShowEditPanel: (v: boolean) => void;
-	setShowMeasurePanel: Dispatch<SetStateAction<boolean>>;
-	/** Which pane single-pane actions (slice step/jump, zoom-to-cursor fallback) target. */
-	getFocusedPane: () => CinePane;
-	/** Live per-pane slice info, read at keypress time (not a render-time snapshot). */
-	sliceInfoRef: MutableRefObject<Record<CinePane, SliceInfo | null>>;
-	/** Current mask-edit mode — determines Shift+[ / Shift+]'s meaning. */
-	editMode: MaskEditMode;
-	/** Toolbar zoom slider state, kept in sync with keyboard zoom so the two never disagree. */
-=======
 	setShowAnnotationToolbar: (v: boolean) => void; // renamed from setShowEditPanel
 	setShowMeasurePanel: Dispatch<SetStateAction<boolean>>;
 	getFocusedPane: () => CinePane;
 	sliceInfoRef: MutableRefObject<Record<CinePane, SliceInfo | null>>;
 	editMode: MaskEditMode;
->>>>>>> 75ca199 (refactor(viewer): extract usePolygonDraw as shared core, add useSliceAnchorPicker, fix useSmartFill/useDraggablePanel)
 	setZoomLevel: Dispatch<SetStateAction<number>>;
 }
 
@@ -103,11 +91,7 @@ export function useKeyboardShortcuts({
 	setCrosshairToolActive,
 	setShowStats,
 	setShowMetadata,
-<<<<<<< HEAD
-	setShowEditPanel,
-=======
 	setShowAnnotationToolbar,
->>>>>>> 75ca199 (refactor(viewer): extract usePolygonDraw as shared core, add useSliceAnchorPicker, fix useSmartFill/useDraggablePanel)
 	setShowMeasurePanel,
 	getFocusedPane,
 	sliceInfoRef,
@@ -288,11 +272,7 @@ export function useKeyboardShortcuts({
 			} else if (key === "m") {
 				setShowStats(false);
 				setShowMetadata(false);
-<<<<<<< HEAD
-				setShowEditPanel(false);
-=======
 				setShowAnnotationToolbar(false);
->>>>>>> 75ca199 (refactor(viewer): extract usePolygonDraw as shared core, add useSliceAnchorPicker, fix useSmartFill/useDraggablePanel)
 				setEditMode(null);
 				setShowMeasurePanel((v) => !v);
 			} else {
@@ -311,11 +291,7 @@ export function useKeyboardShortcuts({
 		setCrosshairToolActive,
 		setShowStats,
 		setShowMetadata,
-<<<<<<< HEAD
-		setShowEditPanel,
-=======
 		setShowAnnotationToolbar,
->>>>>>> 75ca199 (refactor(viewer): extract usePolygonDraw as shared core, add useSliceAnchorPicker, fix useSmartFill/useDraggablePanel)
 		setShowMeasurePanel,
 		getFocusedPane,
 		sliceInfoRef,
