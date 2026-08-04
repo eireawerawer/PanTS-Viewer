@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import * as THREE from "three";
 import type { Color } from "@cornerstonejs/core/types";
-import { extractSegmentSurface, subscribeToSegmentationEdits } from "../helpers/CornerstoneNifti2";
-import { debounce } from "../helpers/debounce";
+import { extractSegmentSurface, subscribeToSegmentationEdits } from "../../helpers/CornerstoneNifti2";
+import { debounce } from "../../helpers/debounce"
 import { rgbToHex } from "./OrganMesh";
 
 type LiveSegmentMeshProps = {

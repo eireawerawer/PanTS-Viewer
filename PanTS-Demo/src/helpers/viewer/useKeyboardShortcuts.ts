@@ -20,7 +20,7 @@ import {
 	type PrimaryMouseToolName,
 	type SliceInfo,
 } from "../CornerstoneNifti2";
-import type { MaskEditMode } from "../../components/MaskEditPanel/MaskEditPanel";
+import type { MaskEditMode } from "../../routes/VisualizationPage";
 
 const TOOL_BY_KEY: Record<string, PrimaryMouseToolName> = {
 	l: LENGTH_TOOL,
@@ -55,15 +55,11 @@ interface UseKeyboardShortcutsArgs {
 	setCrosshairToolActive: (active: boolean) => void;
 	setShowStats: (v: boolean) => void;
 	setShowMetadata: (v: boolean) => void;
-	setShowEditPanel: (v: boolean) => void;
+	setShowAnnotationToolbar: (v: boolean) => void; // renamed from setShowEditPanel
 	setShowMeasurePanel: Dispatch<SetStateAction<boolean>>;
-	/** Which pane single-pane actions (slice step/jump, zoom-to-cursor fallback) target. */
 	getFocusedPane: () => CinePane;
-	/** Live per-pane slice info, read at keypress time (not a render-time snapshot). */
 	sliceInfoRef: MutableRefObject<Record<CinePane, SliceInfo | null>>;
-	/** Current mask-edit mode — determines Shift+[ / Shift+]'s meaning. */
 	editMode: MaskEditMode;
-	/** Toolbar zoom slider state, kept in sync with keyboard zoom so the two never disagree. */
 	setZoomLevel: Dispatch<SetStateAction<number>>;
 }
 
@@ -95,7 +91,7 @@ export function useKeyboardShortcuts({
 	setCrosshairToolActive,
 	setShowStats,
 	setShowMetadata,
-	setShowEditPanel,
+	setShowAnnotationToolbar,
 	setShowMeasurePanel,
 	getFocusedPane,
 	sliceInfoRef,
@@ -276,7 +272,7 @@ export function useKeyboardShortcuts({
 			} else if (key === "m") {
 				setShowStats(false);
 				setShowMetadata(false);
-				setShowEditPanel(false);
+				setShowAnnotationToolbar(false);
 				setEditMode(null);
 				setShowMeasurePanel((v) => !v);
 			} else {
@@ -295,7 +291,7 @@ export function useKeyboardShortcuts({
 		setCrosshairToolActive,
 		setShowStats,
 		setShowMetadata,
-		setShowEditPanel,
+		setShowAnnotationToolbar,
 		setShowMeasurePanel,
 		getFocusedPane,
 		sliceInfoRef,

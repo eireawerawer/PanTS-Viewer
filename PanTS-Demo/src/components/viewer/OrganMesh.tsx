@@ -1,8 +1,8 @@
 import { useGLTF } from "@react-three/drei";
 import { useEffect, useMemo } from "react";
 import * as THREE from "three";
-import { segmentation_category_colors } from '../helpers/constants';
-import type { OrganMeshInfo } from "../types";
+import { segmentation_category_colors } from '../../helpers/constants';
+import type { OrganMeshInfo } from "../../types";
 type OrganMeshProps = {
   organ: OrganMeshInfo;
   visible: boolean;
