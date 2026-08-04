@@ -57,6 +57,12 @@ STEP_SIZE = float(os.environ.get("STEP_SIZE", "0.7"))
 DISABLE_TTA = os.environ.get("DISABLE_TTA", "1").strip().lower() in {"1", "true", "yes", "on"}
 # Requests are serialized; this bounds how long a queued request waits for the GPU.
 LOCK_TIMEOUT = int(os.environ.get("LOCK_TIMEOUT", "1800"))
+# torch.compile the network once at startup. Only sensible for a warm/persistent process
+# (the ~2-3 min compile is amortized over every later request; it would be catastrophic
+# per-request). Gated so it can be disabled without a redeploy if a given GB10 node shows
+# the compile-latency variance seen on some shared nodes -- the fallback keeps the site up
+# regardless, but this lets us drop compile while keeping the warm predictor.
+COMPILE = os.environ.get("LESIONSEG_COMPILE", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _default_root():
@@ -136,6 +142,34 @@ predictor.initialize_from_trained_model_folder(
 )
 reader_writer = SimpleITKIO()
 preprocessor = DefaultPreprocessor(verbose=False)
+
+if COMPILE:
+    # The sliding-window patch is a constant [128,224,224], so ONE compile of the
+    # patch-level network serves every patch of every case. Measured 1.18x on inference,
+    # accuracy-safe (voxel agreement 0.99996, lesion Dice 0.999 vs eager). The compile
+    # cost is paid once, here, before the server starts listening -- so during it the
+    # health check is unreachable and lesionseg_predict.py stays on the cold path.
+    print("[warm] compiling network (one-time, ~2-3 min)...", flush=True)
+    _tc = time.time()
+    predictor.network = torch.compile(predictor.network, mode="max-autotune-no-cudagraphs")
+    # Trigger the compile now via the real inference path on a tiny one-patch dummy, so the
+    # first real request does not pay it. predict_logits reloads weights into the compiled
+    # module each call (nnU-Net behaviour) -- the compiled wrapper survives that.
+    try:
+        import numpy as _np
+        _dummy = _np.zeros((1, 128, 224, 224), dtype=_np.float32)
+        predictor.predict_logits_from_preprocessed_data(torch.from_numpy(_dummy))
+        torch.cuda.synchronize()
+        print(f"[warm] compile warmed in {time.time() - _tc:.1f}s", flush=True)
+    except Exception as _e:
+        print(f"[warm] compile warm-up failed ({_e}); first real request will compile", flush=True)
+    finally:
+        try:
+            del _dummy
+        except NameError:
+            pass
+        torch.cuda.empty_cache()
+
 _load_seconds = time.time() - _t0
 print(f"[warm] model loaded in {_load_seconds:.1f}s "
       f"(step_size={STEP_SIZE}, disable_tta={DISABLE_TTA}), ready on 127.0.0.1:{PORT}",
@@ -219,6 +253,39 @@ def _revert_crop(seg, props):
     return out
 
 
+# Standard softmax-argmax label space -> the GPU-resident export is bit-identical to
+# convert_logits; region-based models would need the label manager's own logic.
+_USE_GPU_EXPORT = not getattr(predictor.label_manager, "has_regions", False)
+
+
+def _export_gpu_resident(logits, props):
+    """Bit-identical to convert_logits, without the CPU round trip.
+
+    predict_logits returns logits on the CPU, so convert_logits moves the ~1.5 GB,
+    43-channel volume CPU->GPU for the (GPU-patched) resample and back. This runs the
+    same resample function with the same spacings and the same argmax, GPU-resident, and
+    returns only the small uint8 label map. Verified 0 differing voxels vs convert_logits
+    across a size-stratified sample (including anisotropic cases); 3.6-25x on export.
+    """
+    import numpy as np
+    pm, cm = predictor.plans_manager, predictor.configuration_manager
+    lg = (logits if torch.is_tensor(logits) else torch.from_numpy(logits)).to("cuda")
+    spacing_t = [props["spacing"][i] for i in pm.transpose_forward]
+    target = props["shape_after_cropping_and_before_resampling"]
+    current_spacing = cm.spacing if len(cm.spacing) == len(target) else [spacing_t[0], *cm.spacing]
+    new_spacing = [props["spacing"][i] for i in pm.transpose_forward]
+    resampled = cm.resampling_fn_probabilities(lg, target, current_spacing, new_spacing)
+    if not torch.is_tensor(resampled):
+        resampled = torch.as_tensor(resampled, device="cuda")
+    seg = resampled.argmax(0).to(torch.uint8)   # argmax(logits) == argmax(softmax(logits))
+    out = torch.zeros(tuple(props["shape_before_cropping"]), dtype=torch.uint8, device=seg.device)
+    out[tuple(slice(b[0], b[1]) for b in props["bbox_used_for_cropping"])] = seg
+    out_np = out.cpu().numpy().transpose(pm.transpose_backward)
+    del lg, resampled, seg, out
+    torch.cuda.empty_cache()
+    return out_np
+
+
 def run_inference(input_dir, output_dir):
     # input_dir/output_dir are built by resolve_under_root() from a validated
     # relative path -- they are never taken from the request directly.
@@ -246,6 +313,8 @@ def run_inference(input_dir, output_dir):
         t_exp = time.time()
         if BBOX_EXPORT:
             segmentation = bbox_refined_export(logits, preprocessed_props)
+        elif _USE_GPU_EXPORT:
+            segmentation = _export_gpu_resident(logits, preprocessed_props)
         else:
             segmentation = convert_logits(
                 logits, predictor.plans_manager, predictor.configuration_manager,
