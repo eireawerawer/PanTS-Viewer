@@ -85,6 +85,7 @@ vi.mock("../helpers/CornerstoneNifti2", () => ({
 	rotatePane90Clockwise: vi.fn(),
 	resetMprOrientation: vi.fn(),
 	buildMaskFilter: vi.fn(() => () => true),
+	hasSegmentationVolume: vi.fn(() => false),
 }));
 
 vi.mock("../helpers/NiiVueNifti", () => ({
