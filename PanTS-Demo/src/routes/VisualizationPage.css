@@ -1032,8 +1032,6 @@
   padding: 3px 6px;
   text-align: center;
   outline: none;
-  /* hide the number input's up/down spinner arrows so it doesn't get wider */
-  -moz-appearance: textfield;
 }
 
 .vp-slice-jump-input::-webkit-outer-spin-button,

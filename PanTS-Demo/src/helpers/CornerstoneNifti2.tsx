@@ -135,7 +135,7 @@ let _lastColorLUT: ColorLUT | null = null;
 // User-created segment labels, reset on each case load.
 let _customSegmentLabels: Record<number, string> = {};
 
-let _crosshairChangeCallbacks = new Set<(mm: number[]) => void>();
+const _crosshairChangeCallbacks = new Set<(mm: number[]) => void>();
 let _isSyncing = false;
 let _crosshairListenerRegistered = false;
 
@@ -3868,34 +3868,6 @@ const _OFFSETS26: number[][] = (() => {
   return out;
 })();
 
-function _morphPass(arr: Uint8Array, w: number, h: number, d: number, offsets: number[][], mode: "dilate" | "erode"): Uint8Array {
-  const idx = (i: number, j: number, k: number) => i + j * w + k * w * h;
-  const next = new Uint8Array(arr.length);
-  for (let k = 0; k < d; k++) for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
-    const li = idx(i, j, k);
-    if (mode === "dilate") {
-      if (arr[li]) { next[li] = 1; continue; }
-      let found = false;
-      for (const [di, dj, dk] of offsets) {
-        const ni = i + di, nj = j + dj, nk = k + dk;
-        if (ni < 0 || ni >= w || nj < 0 || nj >= h || nk < 0 || nk >= d) continue;
-        if (arr[idx(ni, nj, nk)]) { found = true; break; }
-      }
-      next[li] = found ? 1 : 0;
-    } else {
-      if (!arr[li]) { next[li] = 0; continue; }
-      let allFg = true;
-      for (const [di, dj, dk] of offsets) {
-        const ni = i + di, nj = j + dj, nk = k + dk;
-        if (ni < 0 || ni >= w || nj < 0 || nj >= h || nk < 0 || nk >= d) { allFg = false; break; } // volume edge = background
-        if (!arr[idx(ni, nj, nk)]) { allFg = false; break; }
-      }
-      next[li] = allFg ? 1 : 0;
-    }
-  }
-  return next;
-}
-
 // Applying `_morphPass` `iterations` times is O(iterations * volume) — fine
 // for the small radii used by e.g. post-fill closing, but at margin-tool
 // scale (a 100mm grow/shrink can mean iterations in the hundreds) it turns
@@ -5088,7 +5060,6 @@ function _medianFilter3D(mask: Uint8Array, w: number, h: number, d: number, rx: 
 // applyToVisibleSegments mirrors Slicer's "Apply to visible segments" checkbox —
 // when true, runs on every currently-visible segment index, not just the active one.
 export function applySmoothing(
-  method: SmoothingMethod,
   kernelMm: number,
   applyToVisibleSegments = false,
   visibleSegmentIndices: number[] = [],
@@ -5662,12 +5633,7 @@ function _applyBrushLockState(activeIndex: number, unlockedIds: number[] | "all"
   }
 }
 
-// Kept for callers that just need "only the active segment is writable" (unrelated
-// tools/paths that don't go through the masking selector). Brush wiring below no
-// longer calls this directly — see setBrushMaskingScope.
-function _lockAllSegmentsExceptActive(activeIndex: number) {
-  _applyBrushLockState(activeIndex, []);
-}
+
 
 export function getActiveEditSegment(): number {
   return _activeEditSegment;

@@ -20,7 +20,7 @@ import {
 	type PrimaryMouseToolName,
 	type SliceInfo,
 } from "../CornerstoneNifti2";
-import type { MaskEditMode } from "../../components/MaskEditPanel/MaskEditPanel";
+export type MaskEditMode = "brush" | "eraser" | "smartfill" | "lasso" | null;
 
 const TOOL_BY_KEY: Record<string, PrimaryMouseToolName> = {
 	l: LENGTH_TOOL,

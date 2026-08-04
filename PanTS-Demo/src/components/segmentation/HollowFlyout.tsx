@@ -1,10 +1,9 @@
 import { useState } from "react";
 import "./SegmentEffectPanel.css"
-
 import ApplyButton from "../ApplyButton";
 import OperationPicker, { type OperationOption } from "../OperationPicker";
 import NumberSliderField from "../NumberSliderField";
-import { applyHollow, getActualHollowMm } from "../../helpers/CornerstoneNifti2";
+import { applyHollow } from "../../helpers/CornerstoneNifti2";
 import type { HollowSurface, MaskFilter } from "../../helpers/CornerstoneNifti2";
 
 interface Props {
@@ -46,15 +45,10 @@ const MIN_THICKNESS_MM = 0.1;
 // actually use instead of spreading its range across values no one needs.
 const MAX_THICKNESS_MM = 20;
 
-export default function HollowFlyout({ segmentIndex, maskFilter, onLog }: Props) {
-	const [surface, setSurface] = useState<HollowSurface>("inside");
+export default function HollowFlyout({ segmentIndex: _segmentIndex, maskFilter, onLog }: Props) {	const [surface, setSurface] = useState<HollowSurface>("inside");
 	const [thicknessMm, setThicknessMm] = useState(3);
 	const [applying, setApplying] = useState(false);
 
-	// NumberSliderField already keeps the value clamped to [min, max] as the
-	// user types/drags, so thicknessMm is always a valid number in range —
-	// nothing extra to guard before Apply.
-	const actual = getActualHollowMm(thicknessMm);
 
 	const run = () => {
 		setApplying(true);

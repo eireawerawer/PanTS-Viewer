@@ -1,9 +1,6 @@
 import type { WalkthroughStep } from "./ToolWalkthrough";
 import type { PrimaryEditTool } from "../viewer/AnnotationToolbar";
 
-function Kbd({ children }: { children: React.ReactNode }) {
-	return <span className="twt__key">{children}</span>;
-}
 
 // ---------------------------------------------------------------------------
 // Overview walkthrough — shown the first time "Annotate" is pressed, and

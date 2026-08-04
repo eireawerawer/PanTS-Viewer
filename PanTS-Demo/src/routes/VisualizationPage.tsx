@@ -37,7 +37,7 @@ import {
 } from "@tabler/icons-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
-import { buildMaskFilter, type MaskFilter } from "../helpers/CornerstoneNifti2";
+import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
 import { useLocation, useParams } from "react-router-dom";
 import AISidebar from "../components/AIAssistant/AISidebar";
 import { buildViewerActions } from "../components/AIAssistant/assistantActions";
@@ -50,8 +50,7 @@ import SessionSummary from "../components/ReadingSession/SessionSummary";
 import ReportScreen from "../components/ReportScreen/ReportScreen";
 import SliceJumpInput from "../components/SliceJumpInput";
 import SegmentsPopup from "../components/segmentation/SegmentsPopup";
-import MarginPanel, { type EditableArea } from "../components/segmentation/MarginPanel";
-import NumberSliderField from "../components/NumberSliderField";
+import MarginPanel from "../components/segmentation/MarginPanel";
 import IslandsPanel from "../components/segmentation/IslandsPanel";
 import LogicalOperatorsPanel from "../components/segmentation/LogicalOperatorsPanel";
 import { setBrushMaskingScope } from "../helpers/CornerstoneNifti2";
@@ -63,7 +62,6 @@ import CopyAcrossSlicesFlyout from "../components/segmentation/CopyAcrossSlicesF
 import HollowFlyout from "../components/segmentation/HollowFlyout";
 import LevelTracingFlyout from "../components/segmentation/LevelTracingFlyout";
 import { useScissorsTool } from "../helpers/viewer/useScissorsTool";
-import { cutSegmentWithPolygon } from "../helpers/CornerstoneNifti2"; // used only for typing if needed
 import {
   applyMargin, getActualMarginMm,
   applyIslandsOperation, applyLogicalOperator, applySmoothing,
@@ -139,9 +137,7 @@ import {
 	endBrushMaskGuard,
 } from "../helpers/CornerstoneNifti2";
 import { useSmartFill } from "../helpers/viewer/useSmartFill";
-import MaskingSelect, { type MaskingArea } from "../components/segmentation/MaskingSelect";
-import { hasSegmentationVolume } from "../helpers/CornerstoneNifti2"; // add to existing import list
-import { applyScissorsCut } from "../helpers/CornerstoneNifti2";
+import { hasSegmentationVolume } from "../helpers/CornerstoneNifti2"; 
 import { useLevelTracing } from "../helpers/viewer/useLevelTracing";
 import AnnotationToolbar, {
 	type PrimaryEditTool,
@@ -152,6 +148,7 @@ import { useMorphPicker } from "../helpers/viewer/useMorphPicker";
 import { useLassoTool } from "../helpers/viewer/useLassoTool";
 import { useFocusedPane } from "../helpers/viewer/useFocusedPane";
 import { useKeyboardShortcuts } from "../helpers/viewer/useKeyboardShortcuts";
+import { type MaskingArea } from "../components/segmentation/MaskingSelect";
 import { getLocalDicomFiles, loadLocalDicomSeries } from "../helpers/dicomLocal";
 import { downloadUrlAsFile } from "../helpers/downloadFile";
 import { loadLocalNiftiAsRawBlobUrl } from "../helpers/localNifti";
@@ -658,8 +655,6 @@ function VisualizationPage() {
 	const [levelTraceOperation, setLevelTraceOperation] = useState<LevelTraceOperation>("fillInside");
 	const [segmentColorsHex, setSegmentColorsHex] = useState<Record<number, string>>({});
 	const [segmentVisibility, setSegmentVisibility] = useState<Record<number, boolean>>({});
-	const [editableArea, setEditableArea] = useState<EditableArea>("everywhere");
-	const [editableIntensityRange, setEditableIntensityRange] = useState(false);
 	// Existing-organ dropdown in SegmentsPopup — lets the brush target one of the
 	// 32 static catalog organs without listing them all as rows.
 	const [activeCatalogOrganId, setActiveCatalogOrganId] = useState<number | null>(null);
@@ -876,7 +871,7 @@ function VisualizationPage() {
 			<SmoothingFlyout
 			onApply={(method, kernelMm) => {
 				const { applyToVisible, ids } = resolveMaskingTargets();
-				const r = applySmoothing(method, kernelMm, applyToVisible, ids, maskFilter);
+				const r = applySmoothing(kernelMm, applyToVisible, ids, maskFilter);
 				if (r) sessionRef.current?.log("edit", `Smoothing ${method} (${r.changedVoxels.toLocaleString()} vox)`, 2000);
 			}}
 			/>
@@ -3745,6 +3740,10 @@ const aiAvailableOrgans = useMemo(() => {
 				hasAnySegments={hasAnySegments}
 				scopeLocked={false}
 				isRendering={isEditRendering}
+				popupRef={annotationPopupRef}
+				popupDragRef={annotationPopupDragRef}
+				popupMinRef={annotationPopupMinRef}
+				sliceJumpRef={sliceJumpWrapRef}
 			/>
 			<SegmentsPopup
 				open={showAnnotationToolbar}
@@ -3761,6 +3760,9 @@ const aiAvailableOrgans = useMemo(() => {
 				organCatalog={organCatalog}
 				activeCatalogOrganId={activeCatalogOrganId}
 				onSelectCatalogOrgan={handleSelectCatalogOrgan}
+				containerRef={annotationPopupRef}
+				dragHandleRef={annotationPopupDragRef}
+				minButtonRef={annotationPopupMinRef}
 			/>
 
 			{/* Local-DICOM load failure: explain and offer the way back. */}

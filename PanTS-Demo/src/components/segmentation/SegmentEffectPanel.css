@@ -278,7 +278,6 @@
     font-family: "Space Grotesk", system-ui, sans-serif;
     box-sizing: border-box;
     line-height: 1.2;
-    -moz-appearance: textfield;
 }
 
 .seg-effect__number::-webkit-inner-spin-button,

@@ -40,9 +40,9 @@ interface SegmentsPopupProps {
 	 *  for minButtonRef: it's attached to whichever minimize/expand button is
 	 *  currently rendered (expanded header's "Minimize" or the minimized
 	 *  bar's "Expand"), so the Overview walkthrough can spotlight it too. */
-	containerRef?: React.RefObject<HTMLDivElement>;
-	dragHandleRef?: React.RefObject<HTMLDivElement>;
-	minButtonRef?: React.RefObject<HTMLButtonElement>;
+	containerRef?: React.RefObject<HTMLDivElement | null>;
+	dragHandleRef?: React.RefObject<HTMLDivElement | null>;
+	minButtonRef?: React.RefObject<HTMLButtonElement | null>;
 }
 
 const NEXT_COLOR_POOL = ["#f43f5e", "#eab308", "#22c55e", "#6ea8fe", "#a855f7", "#22d3ee", "#f97316", "#ec4899"];

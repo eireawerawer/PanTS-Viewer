@@ -71,25 +71,13 @@ interface AnnotationToolbarProps {
 
 	renderFlyout: (tool: Exclude<PrimaryEditTool, null>) => React.ReactNode;
 
-	/** Refs into the segments popup, supplied by the parent (this component
-	 *  has no visibility into the popup itself) so the Overview walkthrough
-	 *  can spotlight it alongside the dock/panel. All optional — a step
-	 *  simply centers on screen if a ref is never attached. See
-	 *  SegmentsPopup's own doc-comment for exactly what to attach these to. */
-	popupRef?: React.RefObject<HTMLDivElement>;
-	popupDragRef?: React.RefObject<HTMLDivElement>;
-	/** Ref to the popup's own minimize/expand button, so the Overview
-	 *  walkthrough can spotlight it specifically (distinct from the drag
-	 *  header it's paired with). */
-	popupMinRef?: React.RefObject<HTMLButtonElement>;
-	/** Ref into the SliceJumpInput overlay, used by the "Fill between
-	 *  slices" / "Copy across slices" walkthroughs to point at it. */
-	 sliceJumpRef?: React.RefObject<HTMLDivElement>;
-	/** Any extra overview rects the parent wants to contribute (e.g. the
-	 *  popup's own minimize-button rect) beyond what's derivable from
-	 *  popupRef/popupDragRef alone. Optional — merged underneath the rects
-	 *  this component measures itself. */
+	popupRef?: React.RefObject<HTMLDivElement | null>;
+	popupDragRef?: React.RefObject<HTMLDivElement | null>;
+	popupMinRef?: React.RefObject<HTMLButtonElement | null>;
+	sliceJumpRef?: React.RefObject<HTMLDivElement | null>;
 	overviewExtraRects?: OverviewRects;
+
+	
 }
 
 const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon: any; description: string }> = [
