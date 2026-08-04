@@ -1,0 +1,413 @@
+/* AnnotationToolbar.css */
+.atb {
+    position: fixed;
+    left: 50%;
+    bottom: 22px;
+    transform: translateX(-50%);
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px;
+    border-radius: 18px;
+    background: rgba(14, 15, 18, 0.88);
+    backdrop-filter: blur(20px) saturate(150%);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    box-shadow: 0 18px 44px -14px rgba(0, 0, 0, 0.75);
+    font-family: "Space Grotesk", system-ui, sans-serif;
+}
+
+
+.atb__btn {
+    position: relative;
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    border: none;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.85);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.atb__btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.atb__btn.is-active {
+    background: #ffffff;
+    color: #08090b;
+}
+
+
+
+.atb__tooltip {
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 50%;
+    transform: translateX(-50%) translateY(4px);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 160px;
+    max-width: 220px;
+    padding: 8px 10px;
+    border-radius: 9px;
+    background: #16181d;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s, transform 0.12s;
+    z-index: 60;
+}
+
+.atb__tooltip strong {
+    font-size: 12px;
+    color: #fff;
+}
+
+.atb__tooltip span:last-child {
+    font-size: 11px;
+    line-height: 1.4;
+    color: rgba(255, 255, 255, 0.6);
+}
+
+.atb__btn:hover .atb__tooltip {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
+
+
+.atb-flyout__section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.atb-flyout__label {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.5);
+    display: flex;
+    justify-content: space-between;
+}
+
+.atb-flyout__val {
+    color: rgba(255, 255, 255, 0.85);
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.atb-flyout__range {
+    width: 220px;
+}
+
+.atb-flyout__grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(110px, 1fr));
+    gap: 14px;
+    min-width: 380px;
+}
+
+.atb-flyout__col {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.atb-flyout__radio {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: rgba(255, 255, 255, 0.85);
+    cursor: pointer;
+}
+
+.atb-flyout__checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: rgba(255, 255, 255, 0.85);
+    cursor: pointer;
+}
+
+.atb-flyout__span-all {
+    grid-column: 1 / -1;
+    margin-top: 4px;
+}
+
+.atb-flyout__mm-input {
+    width: 90px;
+    margin-top: 4px;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 6px;
+    color: #fff;
+    padding: 4px 6px;
+    font-size: 12px;
+}
+
+/* Vertical dock — plain row of icon buttons, no caret. Height-capped and
+   internally scrollable so it never overflows the viewport. */
+.atb--vertical {
+    /* position/top/left/right/bottom now set inline via dockPanel.pos — remove them here */
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 6px;
+    border-radius: 18px;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: none;
+}
+
+.atb--vertical::-webkit-scrollbar {
+    display: none;
+}
+
+.atb--vertical .atb__btn {
+    width: 55px;
+    height: 50px;
+    border-radius: 5px;
+}
+
+.atb__tooltip--left {
+    bottom: auto;
+    top: 50%;
+    left: auto;
+    right: calc(100% + 12px);
+    transform: translateY(-50%) translateX(4px);
+}
+
+.atb--vertical .atb__btn:hover .atb__tooltip--left {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0);
+}
+
+.atb--disabled .atb__btn {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+/* Top-left corner panel — opens when a tool is selected, replaces the old
+     caret-triggered flyout entirely. Minimizable via its own header button. */
+.atb-corner-panel {
+    position: fixed;
+    top: 18px;
+    left: 18px;
+    z-index: 80;
+    width: 300px;
+    max-height: calc(100vh - 36px);
+    display: flex;
+    flex-direction: column;
+    border-radius: 14px;
+    background: #16181d;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    box-shadow: 0 18px 44px -14px rgba(0, 0, 0, 0.75);
+    font-family: "Space Grotesk", system-ui, sans-serif;
+    color: #fff;
+    overflow: hidden;
+    --vp-text: #ffffff;
+    --vp-text-dim: rgba(255, 255, 255, 0.7);
+    --vp-text-faint: rgba(255, 255, 255, 0.5);
+    --vp-border: rgba(255, 255, 255, 0.09);
+    --vp-panel-strong: rgba(255, 255, 255, 0.07);
+    --vp-hover: rgba(255, 255, 255, 0.08);
+}
+
+.atb-corner-panel .seg-effect {
+    padding: 0;
+    border-top: none;
+    gap: 10px;
+}
+
+.atb-corner-panel.is-minimized {
+    max-height: 46px;
+}
+
+.atb-corner-panel__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+    flex-shrink: 0;
+}
+
+.atb-corner-panel__title {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #fff;
+}
+
+.atb-corner-panel__actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.atb-corner-panel__icon-btn {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.6);
+    cursor: pointer;
+    display: flex;
+    padding: 2px;
+    border-radius: 4px;
+}
+
+.atb-corner-panel__icon-btn:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.atb-corner-panel__body {
+    overflow-y: auto;
+    padding: 12px 14px;
+}
+
+
+.atb-flyout__grid--scissors {
+    min-width: 200px;
+    grid-template-columns: 1fr;
+}
+
+.atb-flyout__radio svg.atb-scissors-icon {
+    flex-shrink: 0;
+}
+
+.atb-flyout__hint {
+    font-size: 11px;
+    line-height: 1.4;
+    color: rgba(255, 255, 255, 0.5);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.atb-flyout__hint-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #f43f5e;
+    box-shadow: 0 0 0 2px rgba(244, 63, 94, 0.35);
+}
+
+.vp-livewire-close-pulse {
+    animation: vp-livewire-pulse 0.9s ease-in-out infinite;
+    transform-origin: center;
+}
+
+@keyframes vp-livewire-pulse {
+
+    0%,
+    100% {
+        opacity: 0.55;
+        r: 12;
+    }
+
+    50% {
+        opacity: 0.15;
+        r: 16;
+    }
+}
+
+.atb-flyout__draw-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 2px;
+}
+
+.atb-flyout__draw-btn {
+    flex: 1;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 7px;
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 7px 8px;
+    cursor: pointer;
+}
+
+.atb-flyout__draw-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.atb-flyout__draw-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.atb-flyout__draw-btn--cancel:hover:not(:disabled) {
+    background: rgba(244, 63, 94, 0.18);
+    border-color: rgba(244, 63, 94, 0.4);
+    color: #fda4af;
+}
+
+
+
+.atb-flyout__target-btn:hover {
+    background: rgba(255, 255, 255, 0.09);
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.atb-flyout__target-btn.is-active {
+    background: #fff;
+    border-color: #fff;
+    color: #08090b;
+}
+
+.atb-flyout__target-toggle-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.atb-flyout__target-btn {
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.75);
+}
+
+.atb-flyout__target-btn.is-active {
+    color: #08090b;
+}
+
+.atb-flyout__magnet-toggle {
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.atb-flyout__magnet-toggle:has(input:checked) {
+    background: rgba(110, 168, 254, 0.14);
+    border-color: rgba(110, 168, 254, 0.4);
+}
+
+.atb__min-btn {
+    margin-top: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 12px 12px 12px 12px;
+    padding-top: 8px;
+    color: #6ea8fe;
+}
+
+.atb__min-btn:hover {
+    color: #9dc2ff;
+    background: rgba(110, 168, 254, 0.1);
+}

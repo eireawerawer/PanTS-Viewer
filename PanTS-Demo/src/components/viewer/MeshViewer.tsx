@@ -1,15 +1,15 @@
 import { Bounds, OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
 import { Suspense, useEffect, useMemo, useState } from "react";
-import { APP_CONSTANTS } from "../helpers/constants";
-import { cornerstoneLpsMmToThree, type Vec3 } from "../helpers/utils";
-import type { MeshManifest } from "../types";
-import { OrganMesh } from "./viewer/OrganMesh";
+import { APP_CONSTANTS } from "../../helpers/constants";
+import { cornerstoneLpsMmToThree, type Vec3 } from "../../helpers/utils";
+import type { MeshManifest } from "../../types";
+import { OrganMesh } from "./OrganMesh";
 import { SceneCrosshair3D } from "./SceneCrosshair3D";
 import type { Color } from "@cornerstonejs/core/types";
-import { LiveSegmentMesh } from "./viewer/LiveSegmentMesh";
-import type { CheckBoxData } from "../types";
-import { getEditedSegments, subscribeToSegmentationEdits } from "../helpers/CornerstoneNifti2";
+import { LiveSegmentMesh } from "./LiveSegmentMesh";
+import type { CheckBoxData } from "../../types";
+import { getEditedSegments, subscribeToSegmentationEdits } from "../../helpers/CornerstoneNifti2";
 
 type SegmentationMeshViewerProps = {
   caseId: string;
@@ -70,10 +70,7 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
   return (
     <div style={{ display: "flex", width: "100%", height: "100%" }}>
       <main style={{ flex: 1, minWidth: 0 }}>
-      <Canvas
-          camera={{ position: [0, 250, 650], fov: 45, near: 0.1, far: 5000 }}
-          gl={{ preserveDrawingBuffer: true }}
-        >
+        <Canvas camera={{ position: [0, 250, 650], fov: 45, near: 0.1, far: 5000 }}>
           <color attach="background" args={["#050505"]} />
           <ambientLight intensity={0.7} />
           <directionalLight position={[300, 500, 300]} intensity={1.2} />

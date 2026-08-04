@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { forwardRef, useState } from "react";
 import { setPaneSliceIndex, type CinePane, type SliceInfo } from "../helpers/CornerstoneNifti2";
 
 type Props = {
@@ -6,7 +6,7 @@ type Props = {
     info: SliceInfo;
 }
 
-function SliceJumpInput({ pane, info }: Props) {
+const SliceJumpInput = forwardRef<HTMLDivElement, Props>(function SliceJumpInput({ pane, info }, ref) {
     const [isEditing, setIsEditing] = useState(false);
     const [inputValue, setInputValue] = useState(String(info.current + 1));
 
@@ -25,6 +25,7 @@ function SliceJumpInput({ pane, info }: Props) {
 
     return (
         <div
+            ref={ref}
             style={{ position: "absolute", right: 10, bottom: 10, zIndex: 50, width: 56, textAlign: "right" }}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
@@ -41,7 +42,7 @@ function SliceJumpInput({ pane, info }: Props) {
                     onChange={(e) => setInputValue(e.target.value)}
                     onBlur={commitEdit}
                     onKeyDown={(e) => {
-                        e.stopPropagation(); // stop the global keydown listener (window) from also eating this keystroke
+                        e.stopPropagation();
                         if (e.key === "Enter") commitEdit();
                         if (e.key === "Escape") setIsEditing(false);
                     }}
@@ -64,6 +65,6 @@ function SliceJumpInput({ pane, info }: Props) {
             )}
         </div>
     );
-}
+});
 
 export default SliceJumpInput;
