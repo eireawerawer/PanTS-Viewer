@@ -79,6 +79,9 @@ export const segmentation_category_colors: { [key: number]: Color } = {
 	30: [100, 149, 237, 254], // Renal vein left (cornflower blue)
 	31: [70, 130, 180, 254],  // Renal vein right (steel blue)
 	32: [192, 192, 192, 254], // CBD stent (silver-gray)
+	33: [255, 140, 0, 254],   // Liver lesion (dark orange)
+	34: [255, 215, 0, 254],   // Kidney lesion (gold)
+	35: [220, 20, 60, 254],   // Colon lesion (crimson)
 };
 
 // Rotating palette of colours to hand out to new classes.
@@ -128,6 +131,9 @@ export const segmentation_categories: SegmentationCategories[] = [
 	"renal_vein_left",
 	"renal_vein_right",
 	"cbd_stent",
+	"liver_lesion",
+	"kidney_lesion",
+	"colon_lesion",
 ];
 
 export const OrganSystemsArray: Systems[] = [
@@ -168,7 +174,7 @@ export const OrganSystems: OrganSystemsType = {
 		"renal_vein_right",
 	],
 	"Endocrine System": ["adrenal_gland_left", "adrenal_gland_right"],
-	"Urinary System": [{ Kidneys: ["kidney_left", "kidney_right"] }, "bladder"],
+	"Urinary System": [{ Kidneys: ["kidney_left", "kidney_right", "kidney_lesion"] }, "bladder"],
 	// bladder
 	"Skeletal System": ["femur_left", "femur_right"],
 
@@ -184,10 +190,12 @@ export const OrganSystems: OrganSystemsType = {
 			],
 		},
 		"colon",
+		"colon_lesion",
 		"duodenum",
 		"intestine",
 		"stomach",
 		"liver",
+		"liver_lesion",
 		"common_bile_duct",
 		"gall_bladder",
 		"cbd_stent",

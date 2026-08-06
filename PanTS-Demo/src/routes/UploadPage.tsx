@@ -165,6 +165,12 @@ const UploadPage: React.FC = () => {
     | ""
   >("None");
   const [modelDropOpen, setModelDropOpen] = useState(false);
+  // LesionSegmenter computes liver/pancreatic/kidney/colon lesions in one pass;
+  // this selects which lesion to feature. Only pancreatic is GT-validated; the
+  // other three are surfaced as experimental.
+  const [lesionTarget, setLesionTarget] = useState<
+    "pancreatic" | "liver" | "kidney" | "colon"
+  >("pancreatic");
   const modelDropRef = useRef<HTMLDivElement>(null);
   const [preDropOpen, setPreDropOpen] = useState(false);
   const preDropRef = useRef<HTMLDivElement>(null);
@@ -571,6 +577,9 @@ const UploadPage: React.FC = () => {
       inferFd.append("session_id", sid);
       inferFd.append("model_name", model);
       inferFd.append("uploaded_filename", uploadedName);
+      if (model === "LesionSegmenter") {
+        inferFd.append("lesion_target", lesionTarget);
+      }
       const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
         method: "POST",
         body: inferFd,
@@ -1413,6 +1422,31 @@ const UploadPage: React.FC = () => {
                   </div>
                 )}
               </div>
+              {selectedModel === "LesionSegmenter" && (
+                <div className="lesion-target-select">
+                  <label
+                    htmlFor="lesion-target"
+                    className="lesion-target-label"
+                  >
+                    Lesion
+                  </label>
+                  <select
+                    id="lesion-target"
+                    className="model-dropdown-btn"
+                    value={lesionTarget}
+                    onChange={(e) =>
+                      setLesionTarget(
+                        e.target.value as typeof lesionTarget
+                      )
+                    }
+                  >
+                    <option value="pancreatic">Pancreatic lesion</option>
+                    <option value="liver">Liver lesion (experimental)</option>
+                    <option value="kidney">Kidney lesion (experimental)</option>
+                    <option value="colon">Colon lesion (experimental)</option>
+                  </select>
+                </div>
+              )}
             </div>
 
             <div className="pipeline-arrow">→</div>
