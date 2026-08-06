@@ -122,7 +122,10 @@ export type SegmentationCategories =
 	| "intestine"
 	| "renal_vein_left"
 	| "renal_vein_right"
-	| "cbd_stent";
+	| "cbd_stent"
+	| "liver_lesion"
+	| "kidney_lesion"
+	| "colon_lesion";
 
 export type OrganMeshInfo = {
   id: number;
