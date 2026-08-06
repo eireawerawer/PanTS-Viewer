@@ -15,7 +15,7 @@ from services.ollama_client import (
     list_ollama_models,
 )
 from services.segmentation_metrics import calculate_session_metrics
-from services.search_ranking import rank_quality_results
+from services.search_ranking import rank_quality_results, select_balanced_tumor_results
 from services.site_normalization import site_country_label, split_site_codes
 from models.application_session import ApplicationSession
 from models.combined_labels import CombinedLabels
@@ -27,6 +27,7 @@ import pandas as pd
 
 from pathlib import Path
 from io import BytesIO
+from typing import List, Tuple
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import cm
@@ -2043,88 +2044,165 @@ def api_facets():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
     
+def _all_dataset_df() -> pd.DataFrame:
+    frames = [DF]
+    if DF_CV is not None:
+        frames.append(DF_CV)
+    return pd.concat(frames, ignore_index=True) if len(frames) > 1 else DF
+
+
+def _has_both_tumor_cohorts(df: pd.DataFrame) -> bool:
+    if "__tumor01" not in df.columns:
+        return False
+    values = set(pd.to_numeric(df["__tumor01"], errors="coerce").dropna().astype(int))
+    return 0 in values and 1 in values
+
+
+def _has_tumor_capacity(df: pd.DataFrame, count: int) -> bool:
+    """Return whether an even-sized result can be split equally by tumor status."""
+    if count < 1 or "__tumor01" not in df.columns:
+        return False
+    values = pd.to_numeric(df["__tumor01"], errors="coerce")
+    tumor_target = count // 2
+    non_tumor_target = count - tumor_target
+    return int((values == 1).sum()) >= tumor_target and int(
+        (values == 0).sum()
+    ) >= non_tumor_target
+
+
+def _exclude_recent_cases(
+    df: pd.DataFrame,
+    recent_ids: List[str],
+    minimum: int,
+) -> Tuple[pd.DataFrame, int]:
+    """Exclude recent cases, relaxing oldest ids until enough candidates remain."""
+    if not recent_ids or "__case_str" not in df.columns:
+        return df, 0
+
+    deduped = list(dict.fromkeys(case_id for case_id in recent_ids if case_id))
+    keys = df["__case_str"].astype(str)
+    require_balance = _has_tumor_capacity(df, minimum)
+    active = deduped
+    while active:
+        mask = ~keys.isin(set(active))
+        filtered = df[mask]
+        enough_balance = (
+            not require_balance or _has_tumor_capacity(filtered, minimum)
+        )
+        if len(filtered) >= minimum and enough_balance:
+            return filtered, int((~mask).sum())
+        active = active[1:]
+    return df, 0
+
+
 @api_blueprint.route("/random", methods=['GET'])
 def api_random_topk_rotate_norand():
-    """
-    Recommend complete, tumor-positive, high-resolution cases first, diversify
-    nearby demographics, then rotate through the top-K while excluding recent ids.
-    """
+    """Select quality-ranked, tumor-balanced recommendations in random order."""
     try:
         scope = (request.args.get("scope", "filtered") or "filtered").strip().lower()
-        base_df = apply_filters(DF).copy()
-        if len(base_df) == 0 and scope == "all":
-            base_df = DF.copy()
-
+        base_df = (
+            _all_dataset_df().copy()
+            if scope == "all"
+            else apply_filters(select_dataset_df()).copy()
+        )
         base_df = ensure_sort_cols(base_df)
 
-        # 只取完整資料；若沒有完整的就退回全部
-        df_full = base_df[base_df["__complete"]] if "__complete" in base_df.columns else base_df
-        if len(df_full) == 0:
-            df_full = base_df
-        has_sex_filter = any(
+        try:
+            n = int(request.args.get("n") or 3)
+        except Exception:
+            n = 3
+        n = max(1, min(n, len(base_df))) if len(base_df) else 1
+
+        complete_df = (
+            base_df[base_df["__complete"]]
+            if "__complete" in base_df.columns
+            else base_df
+        )
+        base_can_balance = _has_tumor_capacity(base_df, n)
+        complete_can_balance = _has_tumor_capacity(complete_df, n)
+        df_full = (
+            complete_df
+            if len(complete_df) >= n and (not base_can_balance or complete_can_balance)
+            else base_df
+        )
+
+        recent_ids = [
+            value.strip()
+            for value in (request.args.get("recent") or "").split(",")
+            if value.strip()
+        ]
+        df_full, used_recent = _exclude_recent_cases(df_full, recent_ids, n)
+
+        has_sex_filter = scope != "all" and any(
             key in request.args for key in ("sex", "sex[]", "sex_is_null")
         )
-        has_age_filter = any(
+        has_age_filter = scope != "all" and any(
             key in request.args
             for key in ("age_bin", "age_bin[]", "age_from", "age_to", "age_is_null")
+        )
+        has_tumor_filter = scope != "all" and any(
+            key in request.args for key in ("tumor", "tumor_is_null")
         )
         df = rank_quality_results(
             df_full,
             balance_sex=not has_sex_filter,
             balance_age=not has_age_filter,
         )
-
         if len(df) == 0:
             return jsonify({"items": [], "total": 0, "meta": {"k": 0, "used_recent": 0}}), 200
 
-        # n, k
-        try: n = int(request.args.get("n") or 3)
-        except Exception: n = 3
         n = max(1, min(n, len(df)))
-
-        try: K = int(request.args.get("k") or 100)
-        except Exception: K = 100
+        try:
+            K = int(request.args.get("k") or 100)
+        except Exception:
+            K = 100
         K = max(n, min(K, len(df)))
 
-        # recent 排除
-        recent_raw = (request.args.get("recent") or "").strip()
-        used_recent = 0
-        if recent_raw:
-            recent_ids = {s.strip() for s in recent_raw.split(",") if s.strip()}
-            key = df["__case_str"].astype(str) if "__case_str" in df.columns else None
-            if key is not None:
-                mask = ~key.isin(recent_ids)
-                used_recent = int((~mask).sum())
-                df2 = df[mask]
-                if len(df2): df = df2
-
         topk = df.iloc[:K]
-        if len(topk) == 0:
-            return jsonify({"items": [], "total": 0, "meta": {"k": 0, "used_recent": used_recent}}), 200
-
         off_arg = request.args.get("offset")
         if off_arg is not None:
-            try: offset = int(off_arg) % len(topk)
-            except Exception: offset = 0
+            try:
+                offset = int(off_arg) % len(topk)
+            except Exception:
+                offset = 0
         else:
             now = datetime.utcnow()
             offset = ((now.minute * 60) + now.second) % len(topk)
 
-        idx = list(range(len(topk))) + list(range(len(topk)))
-        pick = idx[offset:offset + min(n, len(topk))]
-        sub = topk.iloc[pick]
+        sub = (
+            select_balanced_tumor_results(
+                df,
+                count=n,
+                pool_size=K,
+                offset=offset,
+            )
+            if not has_tumor_filter
+            else df.iloc[0:0]
+        )
+        tumor_balancing = len(sub) == n
+        if not tumor_balancing:
+            indexes = list(range(len(topk))) + list(range(len(topk)))
+            picked = indexes[offset : offset + min(n, len(topk))]
+            sub = topk.iloc[picked]
+        next_offset = (offset + len(sub)) % len(topk)
 
-        items = [row_to_item(r) for _, r in sub.iterrows()]
+        items = [row_to_item(row) for _, row in sub.iterrows()]
         resp = jsonify({
             "items": clean_json_list(items),
             "total": int(len(df)),
-            "meta": {"k": int(len(topk)), "used_recent": used_recent, "offset": int(offset)}
+            "meta": {
+                "k": int(len(topk)),
+                "used_recent": used_recent,
+                "offset": int(offset),
+                "next_offset": int(next_offset),
+                "tumor_balancing": tumor_balancing,
+            },
         })
-        r = make_response(resp)
-        r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        r.headers["Pragma"] = "no-cache"
-        r.headers["Expires"] = "0"
-        return r
+        response = make_response(resp)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     except Exception as e:
         return jsonify({"error": str(e)}), 400
