@@ -3,6 +3,7 @@ from flask import Blueprint, send_file, make_response, request, jsonify
 from services.nifti_processor import NiftiProcessor
 from services.session_manager import SessionManager, generate_uuid
 from services.auto_segmentor import run_auto_segmentation
+from services.case_quality import load_case_quality_manifest, merge_case_quality
 from services.manufacturer_normalization import canonicalize_manufacturer
 from services.site_normalization import split_site_codes
 from models.application_session import ApplicationSession
@@ -47,7 +48,7 @@ def combine_label_npz(index: int):
     npz_processor.combine_labels(index)
     return
 def get_panTS_id(index):
-    index_str = str(index).strip()
+    index_str = re.sub(r"^PanTS_?", "", str(index).strip(), flags=re.IGNORECASE)
     if not re.fullmatch(r"\d+", index_str):
         raise ValueError("Invalid case id: numeric value expected")
 
@@ -1274,11 +1275,27 @@ def ensure_sort_cols(df: pd.DataFrame) -> pd.DataFrame:
     df["__complete"] = complete
     return df
 
-# load meta
-if not os.path.exists(META_FILE):
-    raise FileNotFoundError(f"metadata not found: {META_FILE}")
-DF_RAW = pd.read_excel(META_FILE)
-DF = _norm_cols(DF_RAW)
+# load meta — OPTIONAL in local dev. metadata.xlsx powers the case library and
+# search; without it those simply return nothing. The viewer (loads a case by
+# id) and the AI assistant (organ volumes come straight from the NIfTI masks /
+# HuggingFace) both still work, so a missing file must NOT crash the backend.
+if os.path.exists(META_FILE):
+    try:
+        DF_RAW = pd.read_excel(META_FILE)
+    except Exception as _meta_err:
+        print(f"[WARN] Could not read metadata {META_FILE}: {_meta_err} — case library will be empty.")
+        DF_RAW = pd.DataFrame()
+else:
+    print(f"[WARN] metadata not found: {META_FILE} — case library/search will be empty. "
+          "Set PANTS_PATH in flask-server/.env to your dataset to enable it.")
+    DF_RAW = pd.DataFrame()
+
+_CASE_QUALITY = load_case_quality_manifest(Constants.CASE_QUALITY_MANIFEST)
+try:
+    DF = merge_case_quality(_norm_cols(DF_RAW), _CASE_QUALITY)
+except Exception as _norm_err:
+    print(f"[WARN] metadata normalization failed: {_norm_err} — using empty catalog.")
+    DF = pd.DataFrame()
 
 # CancerVerse metadata (CT-only second dataset). Loaded through the SAME _norm_cols
 # so search/sort/row_to_item work unchanged. Optional: if the path/CSV is absent
@@ -1293,7 +1310,10 @@ CANCERVERSE_META_FILE = (
 DF_CV = None
 if CANCERVERSE_META_FILE and os.path.exists(CANCERVERSE_META_FILE):
     try:
-        DF_CV = _norm_cols(pd.read_csv(CANCERVERSE_META_FILE))
+        DF_CV = merge_case_quality(
+            _norm_cols(pd.read_csv(CANCERVERSE_META_FILE)),
+            _CASE_QUALITY,
+        )
     except Exception as _cv_err:
         print(f"[WARN] Could not load CancerVerse metadata: {_cv_err}")
         DF_CV = None

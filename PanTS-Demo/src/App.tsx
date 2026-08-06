@@ -1,7 +1,9 @@
 import { lazy, Suspense } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 import "./App.css";
+import AuthModal from "./components/AuthModal";
 import { AnnotationProvider } from "./contexts/annotationContexts";
+import { AuthProvider } from "./contexts/authContext";
 import { FileProvider } from "./contexts/fileContexts";
 import LandingPage from "./routes/LandingPage";
 import ComparePage from "./routes/ComparePage";
@@ -17,6 +19,7 @@ const CompareViewerPage = lazy(() => import("./routes/CompareViewerPage"));
 const UploadPage = lazy(() => import("./routes/UploadPage"));
 const LiveRoomPage = lazy(() => import("./liveRooms/LiveRoomPage"));
 const SoloChallengePage = lazy(() => import("./education/SoloChallengePage"));
+const AccountPage = lazy(() => import("./routes/AccountPage"));
 const RotatingHeartLoader = lazy(() => import("./components/Loading"));
 
 const BASENAME = import.meta.env.VITE_BASENAME;
@@ -50,49 +53,59 @@ function RouteFallback() {
 
 function App() {
   return (
-    <FileProvider>
-      <AnnotationProvider>
-        <div className="App">
-          <BrowserRouter basename={BASENAME}>
-            <ScrollToTopButton />
-            <Suspense fallback={<RouteFallback />}>
-              <Routes>
-                <Route path="/" element={<LandingPage />} />
-                <Route
-                  path="/home.html"
-                  element={<Navigate to="/" replace />}
-                />
-                <Route path="/dashboard" element={<Homepage />} />
-                <Route path="/case/:caseId" element={<VisualizationPage />} />
-                <Route path="/live/:roomId" element={<LiveRoomPage />} />
-                <Route path="/live/challenge/:challengeId" element={<SoloChallengePage />} />
-                <Route
-                  path="/session/:sessionId"
-                  element={<VisualizationPage />}
-                />
-                {/* Local DICOM series picked on the Upload page (files held in memory). */}
-                <Route path="/dicom" element={<VisualizationPage />} />
-                {/* Local NIfTI picked on the Upload page (file held in memory). */}
-                <Route path="/local-nifti" element={<VisualizationPage />} />
-                <Route
-                  path="/reconstruction/:reconstructionId"
-                  element={<VisualizationPage />}
-                />
-                <Route path="/test" element={<RotatingHeartLoader />} />
-                <Route path="/upload" element={<UploadPage />} />
-                <Route
-                  path="/api"
-                  element={<Navigate to="/upload" replace />}
-                />
-                <Route path="/team" element={<TeamPage />} />
-                <Route path="/compare" element={<ComparePage />} />
-                <Route path="/compare-viewer" element={<CompareViewerPage />} />
-              </Routes>
-            </Suspense>
-          </BrowserRouter>
-        </div>
-      </AnnotationProvider>
-    </FileProvider>
+    <AuthProvider>
+      <FileProvider>
+        <AnnotationProvider>
+          <div className="App">
+            <BrowserRouter basename={BASENAME}>
+              <ScrollToTopButton />
+              <Suspense fallback={<RouteFallback />}>
+                <Routes>
+                  <Route path="/" element={<LandingPage />} />
+                  <Route
+                    path="/home.html"
+                    element={<Navigate to="/" replace />}
+                  />
+                  <Route path="/dashboard" element={<Homepage />} />
+                  <Route path="/case/:caseId" element={<VisualizationPage />} />
+                  <Route path="/live/:roomId" element={<LiveRoomPage />} />
+                  <Route path="/live/challenge/:challengeId" element={<SoloChallengePage />} />
+                  <Route
+                    path="/session/:sessionId"
+                    element={<VisualizationPage />}
+                  />
+                  {/* Local DICOM series picked on the Upload page (files held in memory). */}
+                  <Route path="/dicom" element={<VisualizationPage />} />
+                  {/* Local NIfTI picked on the Upload page (file held in memory). */}
+                  <Route path="/local-nifti" element={<VisualizationPage />} />
+                  <Route
+                    path="/reconstruction/:reconstructionId"
+                    element={<VisualizationPage />}
+                  />
+                  <Route path="/test" element={<RotatingHeartLoader />} />
+                  <Route path="/upload" element={<UploadPage />} />
+                  {/* Sign in/up is a popup, so old /login links just land on home. */}
+                  <Route path="/login" element={<Navigate to="/" replace />} />
+                  <Route path="/account" element={<AccountPage />} />
+                  <Route
+                    path="/api"
+                    element={<Navigate to="/upload" replace />}
+                  />
+                  <Route path="/team" element={<TeamPage />} />
+                  <Route path="/compare" element={<ComparePage />} />
+                  <Route
+                    path="/compare-viewer"
+                    element={<CompareViewerPage />}
+                  />
+                </Routes>
+              </Suspense>
+            </BrowserRouter>
+          </div>
+          {/* Global sign-in / sign-up popup, above all routes. */}
+          <AuthModal />
+        </AnnotationProvider>
+      </FileProvider>
+    </AuthProvider>
   );
 }
 
