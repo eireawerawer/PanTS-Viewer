@@ -19,15 +19,21 @@ type SegmentationMeshViewerProps = {
   crosshairMm: Vec3 | null
   customOrgans?: CheckBoxData[];
   labelColorMap?: { [key: number]: Color };
+  // Uploaded scans have no pre-baked meshes; fetch from the session route, which
+  // builds them on demand from the session's combined_labels.
+  isSession?: boolean;
 };
 
-export async function fetchMeshManifest(caseId: string): Promise<MeshManifest> {
-  const res = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/cases/${caseId}/mesh-manifest`);
+export async function fetchMeshManifest(caseId: string, isSession = false): Promise<MeshManifest> {
+  const base = isSession
+    ? `${APP_CONSTANTS.API_ORIGIN}/api/sessions/${caseId}/mesh-manifest`
+    : `${APP_CONSTANTS.API_ORIGIN}/api/cases/${caseId}/mesh-manifest`;
+  const res = await fetch(base);
   if (!res.ok) throw new Error(`Failed to fetch mesh manifest: ${res.status}`);
   return res.json();
 }
 
-export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}}: SegmentationMeshViewerProps) {
+export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}, isSession = false}: SegmentationMeshViewerProps) {
   const [manifest, setManifest] = useState<MeshManifest | null>(null);
   const [loaded, setLoaded] = useState<Record<number, boolean>>({});
   // Bumped on every mask edit so editedSegments below is recomputed — the 3D pane
@@ -50,7 +56,7 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
 
   useEffect(() => {
     let alive = true;
-    fetchMeshManifest(caseId)
+    fetchMeshManifest(caseId, isSession)
       .then((data) => {
         if (!alive) return;
         setManifest(data);
@@ -60,7 +66,7 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
       })
       .catch((err) => console.error(err));
     return () => { alive = false; };
-  }, [caseId]);
+  }, [caseId, isSession]);
 
   const organs = useMemo(() => manifest?.organs ?? [], [manifest]);
 

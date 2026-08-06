@@ -47,6 +47,9 @@ LABELS = {
     30: {"key": "renal_vein_left", "name": "Left Renal Vein"},
     31: {"key": "renal_vein_right", "name": "Right Renal Vein"},
     32: {"key": "cbd_stent", "name": "Common Bile Duct Stent"},
+    33: {"key": "liver_lesion", "name": "Liver Lesion"},
+    34: {"key": "kidney_lesion", "name": "Kidney Lesion"},
+    35: {"key": "colon_lesion", "name": "Colon Lesion"},
 }
 
 
@@ -176,7 +179,11 @@ def generate_organ_glb_bytes(
 def generate_mesh_manifest(
     case_id: str,
     label_nifti_path: str,
+    route_base: str = "cases",
 ) -> dict:
+    # route_base selects which serving route the per-organ GLB URLs point at:
+    # "cases" for pre-baked dataset meshes, "sessions" for on-demand meshes
+    # generated from an uploaded scan's combined_labels.
     img, data = load_clean_label_data(label_nifti_path)
 
     present_labels = set(np.unique(data).astype(int).tolist())
@@ -200,7 +207,7 @@ def generate_mesh_manifest(
                 "id": key,
                 "key": meta["key"],
                 "name": meta["name"],
-                "url": f"{os.getenv('API_ORIGIN', 'http://localhost:5001')}/api/cases/{case_id}/render_only/{filename}",
+                "url": f"{os.getenv('API_ORIGIN', 'http://localhost:5001')}/api/{route_base}/{case_id}/render_only/{filename}",
             }
         )
 

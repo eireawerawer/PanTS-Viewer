@@ -1527,6 +1527,56 @@ def get_session_segmentation(session_id):
     return response
 
 
+def _session_seg_path(session_id):
+    """Return the combined_labels.nii.gz path for a finished session, or None."""
+    job = _get_inference_job(session_id) or {}
+    output_mask_dir = job.get("output_mask_dir")
+    if not output_mask_dir:
+        return None
+    seg_path = os.path.join(output_mask_dir, "combined_labels.nii.gz")
+    return seg_path if os.path.exists(seg_path) else None
+
+
+# 3D organ meshes for an UPLOADED scan. Unlike dataset cases (whose meshes are
+# pre-baked into MESH_PATH by preprocess_meshes.py), a session has no pre-baked
+# meshes, so we build them on demand from the session's combined_labels and cache
+# them next to it. Without these routes the 3D pane hangs on "Loading 3D
+# segmentation..." because /cases/<id>/mesh-manifest 404s for a session id.
+@api_blueprint.route('/sessions/<session_id>/mesh-manifest', methods=['GET'])
+def get_session_mesh_manifest(session_id):
+    if not _is_safe_id(session_id):
+        return jsonify({"error": "Invalid id"}), 400
+    seg_path = _session_seg_path(session_id)
+    if not seg_path:
+        return jsonify({"error": "Segmentation not ready for session"}), 404
+    manifest = generate_mesh_manifest(session_id, seg_path, route_base="sessions")
+    return jsonify(manifest)
+
+
+@api_blueprint.route('/sessions/<session_id>/render_only/<filename>', methods=['GET'])
+def get_session_mesh_file(session_id, filename):
+    if not _is_safe_id(session_id):
+        return jsonify({"error": "Invalid id"}), 400
+    filename = secure_filename(filename)
+    seg_path = _session_seg_path(session_id)
+    if not seg_path:
+        return jsonify({"error": "Segmentation not ready for session"}), 404
+    # Cache the generated GLB next to the mask so repeat views / organ toggles
+    # don't re-run marching cubes.
+    cache_dir = os.path.join(os.path.dirname(seg_path), "render_only")
+    os.makedirs(cache_dir, exist_ok=True)
+    glb_path = os.path.join(cache_dir, filename)
+    if not os.path.exists(glb_path):
+        organ_key = os.path.splitext(filename)[0]
+        try:
+            glb_bytes = generate_organ_glb_bytes(organ_key, seg_path)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 404
+        with open(glb_path, "wb") as f:
+            f.write(glb_bytes)
+    return send_file(glb_path, mimetype="model/gltf-binary", conditional=False)
+
+
 @api_blueprint.route('/session-reconstruction/<session_id>', methods=['GET'])
 def get_session_reconstruction(session_id):
     """Serves the OpenVAE reconstructed CT for a session."""
