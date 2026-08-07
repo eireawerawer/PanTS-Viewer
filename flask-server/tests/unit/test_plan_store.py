@@ -112,6 +112,27 @@ def test_postprocessing_is_gated_but_not_metered(plans):
     assert plan_store.usage_summary(user_id)["scans"]["used"] == 0
 
 
+def test_assistant_needs_an_account(plans):
+    plan_store, _ = plans
+    blocked = plan_store.check_assistant(None)
+    assert blocked is not None
+    assert blocked["reason"] == "auth_required"
+
+
+def test_assistant_lets_a_signed_in_user_through(plans):
+    plan_store, user_id = plans
+    assert plan_store.check_assistant(user_id) is None
+
+
+def test_assistant_gate_still_applies_the_daily_allowance(plans):
+    plan_store, user_id = plans
+    for _ in range(10):
+        plan_store.record_ai_message(user_id)
+    blocked = plan_store.check_assistant(user_id)
+    assert blocked is not None
+    assert blocked["reason"] == "daily_ai_messages"
+
+
 def test_assistant_allowance(plans):
     plan_store, user_id = plans
     for _ in range(10):

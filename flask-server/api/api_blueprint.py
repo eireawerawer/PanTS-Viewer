@@ -3599,24 +3599,27 @@ def ai_models():
         }), 200
 
 
-def _ai_quota_block():
-    """402 body if the signed-in user is out of assistant messages, else None.
+def _ai_gate():
+    """Whether this caller may send an assistant message. None means yes.
 
-    Signed-out callers pass through unmetered — the assistant has always been
-    usable without an account on public dataset cases, and closing that is a
-    product decision rather than part of the plan work. Signed-in users are
-    metered against their plan's daily allowance.
+    Two refusals, both shaped like an assistant reply so the sidebar can render
+    them in the thread rather than needing a special case:
+
+      401 — signed out. The assistant costs real compute, so it needs an
+            account, the same rule inference has. Leaving it open also made the
+            daily allowance pointless: signing out was an unlimited tier.
+      402 — signed in, but the plan's daily allowance is spent.
     """
     user = current_user()
-    if user is None:
-        return None
-    blocked = plan_store.check_ai_message(user["id"])
+    blocked = plan_store.check_assistant(user["id"] if user else None)
     if blocked is None:
         return None
+    signed_out = blocked["reason"] == "auth_required"
+    code = "auth_required" if signed_out else "plan_limit"
     return jsonify({
-        "reply": blocked["message"], "actions": [], "source": "plan_limit",
-        "code": "plan_limit", **blocked,
-    }), 402
+        "reply": blocked["message"], "actions": [], "source": code,
+        "code": code, **blocked,
+    }), 401 if signed_out else 402
 
 
 @api_blueprint.route("/ai-command", methods=["POST"])
@@ -3642,12 +3645,11 @@ def ai_command():
                 }
             ), 400
 
-        blocked = _ai_quota_block()
+        blocked = _ai_gate()
         if blocked is not None:
             return blocked
-        user = current_user()
-        if user is not None:
-            plan_store.record_ai_message(user["id"])
+        # The gate guarantees a signed-in user past this point.
+        plan_store.record_ai_message(current_user()["id"])
 
         available_organs = body.get(
             "available_organs"
@@ -3976,14 +3978,12 @@ def ai_command_stream():
 
     message = str(body.get("message") or "").strip()
 
-    # Checked before the stream opens, so the client gets a plain 402 it can act
-    # on rather than an error event buried in a 200 response body.
-    blocked = _ai_quota_block()
+    # Checked before the stream opens, so the client gets a plain 401/402 it can
+    # act on rather than an error event buried in a 200 response body.
+    blocked = _ai_gate()
     if blocked is not None:
         return blocked
-    _quota_user = current_user()
-    if _quota_user is not None:
-        plan_store.record_ai_message(_quota_user["id"])
+    plan_store.record_ai_message(current_user()["id"])
 
     available_organs = body.get("available_organs") or []
     if not isinstance(available_organs, list):

@@ -207,6 +207,21 @@ def check_inference(user_id: str, model: str) -> dict | None:
     return None
 
 
+def check_assistant(user_id: str | None) -> dict | None:
+    """Whether this caller may send an assistant message. None means yes.
+
+    Signed out is a refusal, not a pass: the assistant costs real compute and is
+    metered per account, so it needs one — and leaving it open made the daily
+    allowance meaningless, since signing out was an unlimited tier.
+
+    The decision lives here rather than in the endpoint so it's testable without
+    importing api_blueprint, which drags in the whole nibabel/scipy stack.
+    """
+    if user_id is None:
+        return {"reason": "auth_required", "message": "Sign in to use the assistant."}
+    return check_ai_message(user_id)
+
+
 def check_ai_message(user_id: str) -> dict | None:
     plan = get_plan(user_id)
     daily = limits_for(plan)["daily_ai_messages"]
