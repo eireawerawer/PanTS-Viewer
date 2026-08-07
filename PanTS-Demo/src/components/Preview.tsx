@@ -57,6 +57,18 @@ export default function Preview({
 			setImgError(true); // both sources failed
 		}
 	};
+	const tumorLabel =
+		previewMetadata.tumor === 1
+			? "Tumor"
+			: previewMetadata.tumor === 0
+				? "No Tumor"
+				: "Unknown";
+	const tumorColor =
+		previewMetadata.tumor === 1
+			? "#ef4444"
+			: previewMetadata.tumor === 0
+				? "#10b981"
+				: "#6b7280";
 
 	return (
 		<div
@@ -276,11 +288,11 @@ export default function Preview({
 					<span>Age {previewMetadata.age || "—"}y</span>
 					<span
 						style={{
-							color: previewMetadata.tumor ? "#ef4444" : "#10b981",
+							color: tumorColor,
 							fontWeight: 600,
 						}}
 					>
-						{previewMetadata.tumor ? "Tumor" : "No Tumor"}
+						{tumorLabel}
 					</span>
 				</div>
 			</div>

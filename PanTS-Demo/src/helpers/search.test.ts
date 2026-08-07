@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	buildSearchParams,
+	caseIdToApiId,
 	countActiveFilters,
 	EMPTY_FILTERS,
 	itemToId,
@@ -27,6 +28,13 @@ describe("itemToId", () => {
 	it("keeps CancerVerse ids as the full prefixed string (not a stripped number)", () => {
 		expect(itemToId({ case_id: "CV_00000001" })).toBe("CV_00000001");
 		expect(itemToId({ "PanTS ID": "CV_00012345" })).toBe("CV_00012345");
+	});
+});
+
+describe("caseIdToApiId", () => {
+	it("formats PanTS ids and preserves CancerVerse ids", () => {
+		expect(caseIdToApiId(42)).toBe("PanTS_00000042");
+		expect(caseIdToApiId("CV_00000007")).toBe("CV_00000007");
 	});
 });
 

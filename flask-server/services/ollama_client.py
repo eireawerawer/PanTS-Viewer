@@ -179,6 +179,44 @@ def _post_chat(
     return data
 
 
+def chat_structured_json(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    schema: dict[str, Any],
+    timeout: float | None = None,
+    temperature: float = 0.0,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """Call Ollama with text or image messages and a JSON response schema."""
+    selected_model = str(model or "").strip()
+    if not selected_model:
+        raise ValueError("An Ollama model name is required.")
+    if not messages:
+        raise ValueError("At least one Ollama message is required.")
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        raise ValueError("A JSON object schema is required.")
+
+    payload: dict[str, Any] = {
+        "model": selected_model,
+        "stream": False,
+        "keep_alive": "10m",
+        "messages": messages,
+        "options": {
+            "temperature": temperature,
+            "num_ctx": 4096,
+            "seed": seed,
+        },
+        "format": schema,
+    }
+    data = _post_chat(
+        payload,
+        timeout if timeout is not None else OLLAMA_CHAT_TIMEOUT,
+    )
+    content = (((data.get("message") or {}).get("content") or "")).strip()
+    return _extract_json_object(content)
+
+
 def chat_json(
     *,
     model: str | None,

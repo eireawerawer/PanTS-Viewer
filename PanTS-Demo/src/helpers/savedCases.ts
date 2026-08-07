@@ -8,7 +8,7 @@ export type SavedCase = {
 	id: number | string; // PanTS number (8854) or CancerVerse string ("CV_00000001")
 	sex: string;
 	age: number;
-	tumor: number;
+	tumor: 0 | 1 | null;
 	savedAt: number;
 };
 

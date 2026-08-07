@@ -3445,7 +3445,7 @@ const aiAvailableOrgans = useMemo(() => {
 									<span>(switch to Volume rendering above)</span>
 								</div>
 							) : (
-								<SegmentationMeshViewer caseId={caseId} crosshairMm={crosshairMm} checkState={checkState} loading={loading} opacity={opacityValue} customOrgans={customOrgans} labelColorMap={labelColorMap} />
+								<SegmentationMeshViewer caseId={caseId} isSession={!!sessionId && !pantsCase} crosshairMm={crosshairMm} checkState={checkState} loading={loading} opacity={opacityValue} customOrgans={customOrgans} labelColorMap={labelColorMap} />
 							)}
 						</div>
 						{!loading && (

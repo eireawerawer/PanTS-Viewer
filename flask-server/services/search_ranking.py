@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections import Counter
+from random import Random, SystemRandom
 
 import pandas as pd
 
 
 QUALITY_COLUMNS = (
-    ("__tumor01", False),
+    ("__thumbnail_quality_rank", True),
+    ("__ct_bytes", False),
     ("__voxel_count", False),
     ("__spacing_volume", True),
     ("__shape_sum", False),
@@ -84,11 +86,10 @@ def rank_quality_results(
     balance_age: bool = True,
     diversity_window: int = 96,
 ) -> pd.DataFrame:
-    """Rank tumors and high-resolution scans first, then diversify nearby results.
+    """Rank thumbnail usability and scan detail, then diversify nearby results.
 
-    Diversification is constrained to fixed-size quality windows and never crosses
-    tumor tiers. That keeps the ranking useful while preventing a first page made up
-    of one sex or one narrow age band when those fields were not explicitly filtered.
+    Diversification stays inside thumbnail-quality tiers, so an unknown or distorted
+    thumbnail cannot move ahead of a vision-verified undistorted thumbnail.
     """
     if df.empty:
         return df
@@ -114,8 +115,8 @@ def rank_quality_results(
 
     window = max(1, int(diversity_window))
     tiers = (
-        ranked.groupby("__tumor01", sort=False, dropna=False)
-        if "__tumor01" in ranked.columns
+        ranked.groupby("__thumbnail_quality_rank", sort=False, dropna=False)
+        if "__thumbnail_quality_rank" in ranked.columns
         else [(None, ranked)]
     )
     blocks: list[pd.DataFrame] = []
@@ -130,3 +131,47 @@ def rank_quality_results(
             )
 
     return pd.concat(blocks) if blocks else ranked
+
+
+def select_balanced_tumor_results(
+    ranked: pd.DataFrame,
+    *,
+    count: int,
+    pool_size: int,
+    offset: int = 0,
+    rng: Random | None = None,
+) -> pd.DataFrame:
+    """Select equal tumor cohorts, then randomize their display arrangement.
+
+    Returns an empty frame when the requested balance cannot be satisfied so the
+    caller can deliberately choose its fallback behavior.
+    """
+    if ranked.empty or count < 1 or "__tumor01" not in ranked.columns:
+        return ranked.iloc[0:0]
+
+    tumor_values = pd.to_numeric(ranked["__tumor01"], errors="coerce")
+    tumor_positions = [
+        position for position, value in enumerate(tumor_values) if value == 1
+    ]
+    non_tumor_positions = [
+        position for position, value in enumerate(tumor_values) if value == 0
+    ]
+    tumor_target = count // 2
+    non_tumor_target = count - tumor_target
+    if (
+        len(tumor_positions) < tumor_target
+        or len(non_tumor_positions) < non_tumor_target
+    ):
+        return ranked.iloc[0:0]
+
+    per_cohort_pool = max(tumor_target, non_tumor_target, (pool_size + 1) // 2)
+
+    def rotate_take(positions: list[int], amount: int) -> list[int]:
+        pool = positions[:per_cohort_pool]
+        start = offset % len(pool)
+        return [pool[(start + index) % len(pool)] for index in range(amount)]
+
+    selected = rotate_take(tumor_positions, tumor_target)
+    selected.extend(rotate_take(non_tumor_positions, non_tumor_target))
+    (rng or SystemRandom()).shuffle(selected)
+    return ranked.iloc[selected]

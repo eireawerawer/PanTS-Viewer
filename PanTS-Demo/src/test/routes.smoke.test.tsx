@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useEffect, type ReactElement } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -48,6 +48,14 @@ describe("route smoke tests", () => {
   it("Homepage (Dashboard) renders", async () => {
     renderRoute(<Homepage />);
     expect(await screen.findByText("Browse Library")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("tumor=1&sort_by=quality"),
+      );
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("tumor=0&sort_by=quality"),
+      );
+    });
   });
 
   it("UploadPage renders", async () => {
