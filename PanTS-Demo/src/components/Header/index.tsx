@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { IconBrandGithub, IconX } from "@tabler/icons-react";
+import { IconX } from "@tabler/icons-react";
 import { Link, NavLink } from "react-router-dom";
 import AuthButton from "../AuthButton";
 import styles from "./Header.module.css";
@@ -79,18 +79,7 @@ export default function Header() {
           ))}
         </div>
 
-        <div className={styles.githubContainer}>
-          <a
-            href="https://github.com/BodyMaps/BodyMaps-website"
-            target="_blank"
-            rel="noopener noreferrer"
-            className={styles.githubLink}
-            aria-label="Open the BodyMaps repository on GitHub"
-          >
-            <IconBrandGithub size={18} aria-hidden="true" />
-            <span>GitHub</span>
-          </a>
-
+        <div className={styles.navActions}>
           <AuthButton />
 
           <button
@@ -161,17 +150,6 @@ export default function Header() {
             </nav>
 
             <div className={styles.drawerFooter}>
-              <a
-                href="https://github.com/BodyMaps/BodyMaps-website"
-                target="_blank"
-                rel="noopener noreferrer"
-                className={styles.mobileGithubLink}
-                aria-label="Open the BodyMaps repository on GitHub"
-              >
-                <IconBrandGithub size={16} aria-hidden="true" />
-                <span>GitHub</span>
-              </a>
-
               <AuthButton />
             </div>
           </aside>

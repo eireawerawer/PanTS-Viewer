@@ -1,10 +1,9 @@
-import { lazy, Suspense, useEffect } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
+import { lazy, Suspense } from "react";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 import "./App.css";
 import AuthModal from "./components/AuthModal";
 import { AnnotationProvider } from "./contexts/annotationContexts";
-import { AuthProvider, useAuth } from "./contexts/authContext";
-import { needsOnboarding } from "./helpers/accountProfile";
+import { AuthProvider } from "./contexts/authContext";
 import { FileProvider } from "./contexts/fileContexts";
 import LandingPage from "./routes/LandingPage";
 import ComparePage from "./routes/ComparePage";
@@ -18,7 +17,12 @@ import ScrollToTopButton from "./components/ScrollToTopButton";
 const VisualizationPage = lazy(() => import("./routes/VisualizationPage"));
 const CompareViewerPage = lazy(() => import("./routes/CompareViewerPage"));
 const UploadPage = lazy(() => import("./routes/UploadPage"));
-const AccountPage = lazy(() => import("./routes/AccountPage"));
+const SettingsPage = lazy(() => import("./routes/Settings"));
+const ProfileSettings = lazy(() => import("./routes/Settings/ProfileSettings"));
+const PlanSettings = lazy(() => import("./routes/Settings/PlanSettings"));
+const HistorySettings = lazy(() => import("./routes/Settings/HistorySettings"));
+const NotificationSettings = lazy(() => import("./routes/Settings/NotificationSettings"));
+const PrivacySettings = lazy(() => import("./routes/Settings/PrivacySettings"));
 const SignupPage = lazy(() => import("./routes/SignupPage"));
 const LegalPage = lazy(() => import("./routes/LegalPage"));
 const RotatingHeartLoader = lazy(() => import("./components/Loading"));
@@ -52,34 +56,6 @@ function RouteFallback() {
   );
 }
 
-// Routes that must stay reachable while onboarding is incomplete — otherwise the
-// gate below would bounce the signup flow off its own page.
-const ONBOARDING_EXEMPT = ["/signup", "/terms", "/privacy"];
-
-// Sends a signed-in user who never finished signup into the account-type / plan /
-// terms steps. This is what catches OAuth first-timers: the provider callback
-// lands them back in the app with an account but no answers.
-//
-// MOCK LIMITATION: "never finished" is read from this browser's localStorage
-// (helpers/accountProfile.needsOnboarding), so the same OAuth user on a new
-// device is asked again. A user_account.onboarding_completed_at column returned
-// by /api/auth/me is the real fix.
-function OnboardingGate() {
-  const { user, isAuthenticated, loading } = useAuth();
-  const location = useLocation();
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    if (loading || !isAuthenticated || !user) return;
-    if (ONBOARDING_EXEMPT.some((p) => location.pathname.startsWith(p))) return;
-    if (needsOnboarding(user.id)) {
-      navigate("/signup?step=type", { replace: true });
-    }
-  }, [loading, isAuthenticated, user, location.pathname, navigate]);
-
-  return null;
-}
-
 function App() {
   return (
     <AuthProvider>
@@ -88,7 +64,6 @@ function App() {
           <div className="App">
             <BrowserRouter basename={BASENAME}>
               <ScrollToTopButton />
-              <OnboardingGate />
               <Suspense fallback={<RouteFallback />}>
                 <Routes>
                   <Route path="/" element={<LandingPage />} />
@@ -115,7 +90,15 @@ function App() {
                   {/* Sign in is a popup; sign up is a page. Old /login links land on home. */}
                   <Route path="/login" element={<Navigate to="/" replace />} />
                   <Route path="/signup" element={<SignupPage />} />
-                  <Route path="/account" element={<AccountPage />} />
+                  {/* Settings is a shell with a left nav; each section is its
+                      own URL so a link can point straight at one. */}
+                  <Route path="/account" element={<SettingsPage />}>
+                    <Route index element={<ProfileSettings />} />
+                    <Route path="plan" element={<PlanSettings />} />
+                    <Route path="history" element={<HistorySettings />} />
+                    <Route path="notifications" element={<NotificationSettings />} />
+                    <Route path="privacy" element={<PrivacySettings />} />
+                  </Route>
                   <Route path="/terms" element={<LegalPage kind="terms" />} />
                   <Route path="/privacy" element={<LegalPage kind="privacy" />} />
                   <Route

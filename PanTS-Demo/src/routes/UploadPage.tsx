@@ -60,13 +60,21 @@ import {
   loadRecentUploads,
   recentStatusColor,
   removeRecentUpload,
+  splitByAge,
   updateRecentUploadStatus,
   type RecentUpload,
 } from "../helpers/recentUploads";
 import Header from "../components/Header";
 import ProcessingSummaryBar from "../components/ProcessingSummaryBar";
 import BatchDetailsModal from "../components/BatchDetailsModal";
+import UpgradeDialog, { type UpgradeBlock } from "../components/UpgradeDialog";
 import { useAuth } from "../contexts/authContext";
+import {
+  canPostprocess,
+  isModelLocked,
+  maxConcurrentScans,
+  type PlanId,
+} from "../helpers/accountProfile";
 import { looksLikeDicom, setLocalDicomFiles } from "../helpers/dicomLocal";
 import { setLocalNiftiFile } from "../helpers/localNifti";
 import {
@@ -113,12 +121,19 @@ const UploadPage: React.FC = () => {
   // out opens the sign-in popup instead of proceeding. Sign-in, not sign-up:
   // most people hitting this already have an account, and the popup offers a
   // "Sign up" link out to /signup for the ones who don't.
-  const { isAuthenticated, promptAuth } = useAuth();
+  const { isAuthenticated, promptAuth, user, refreshUsage } = useAuth();
   const ensureAccount = (): boolean => {
     if (isAuthenticated) return true;
     promptAuth();
     return false;
   };
+  // Everything the plan won't allow routes through one dialog; this is what's
+  // currently being explained (null = nothing blocked).
+  const [upgradeBlock, setUpgradeBlock] = useState<UpgradeBlock | null>(null);
+  const plan = user?.plan ?? "free";
+  // Cosmetic mirror of the server's rules — see helpers/accountProfile. The
+  // server still gets the final say via a 402, which lands in the same dialog.
+  const modelLocked = (id: string) => isAuthenticated && isModelLocked(plan, id);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Folder picker for a DICOM series (run inference, or view-only when model is "None").
   const dicomUploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -580,11 +595,27 @@ const UploadPage: React.FC = () => {
         signal: controller.signal,
       });
       const data = await parseApiResponse(res);
+      // 402 is the plan refusing, not a failure — the server's reason drives
+      // the upgrade dialog. The scan goes to Cancelled rather than Failed:
+      // nothing broke, it just never ran.
+      if (res.status === 402 && data?.code === "plan_limit") {
+        await deletePendingUpload(sid);
+        setPhase(sid);
+        setRecentUploads(updateRecentUploadStatus(sid, "Cancelled"));
+        setUpgradeBlock({
+          reason: data.reason, message: data.message, feature: data.feature,
+          limit: data.limit, used: data.used, resetsAt: data.resets_at ?? null,
+          plan: (data.plan as PlanId) ?? "free",
+        });
+        if (foreground) setMessage("");
+        return;
+      }
       if (!res.ok) throw new Error(data.error || "Failed to start inference");
 
       // Queued server-side now - nothing here is needed to finish the run, so
       // drop the resumable record.
       await deletePendingUpload(sid);
+      refreshUsage(); // a scan was just spent; keep the settings counter honest
       setSessionId(sid);
       setPhase(sid, "queued"); // server queues for the GPU; poll refines this
       if (foreground) setMessage(`${model} inference started. Session: ${sid}`);
@@ -982,6 +1013,18 @@ const UploadPage: React.FC = () => {
       return;
     }
 
+    // Caught here rather than per-file, so a plan that runs one scan at a time
+    // says so before anything uploads instead of accepting the first and
+    // rejecting the rest one 402 at a time.
+    const slots = maxConcurrentScans(plan as PlanId);
+    const running = recentUploads.filter((u) => u.status === "Processing").length;
+    if (items.length + running > slots) {
+      setUpgradeBlock({
+        reason: "concurrent_scans", limit: slots, used: running, plan: plan as PlanId,
+      });
+      return;
+    }
+
     const model = selectedModel;
     setInferenceCompleted(false);
 
@@ -1374,11 +1417,23 @@ const UploadPage: React.FC = () => {
                 </button>
                 {modelDropOpen && (
                   <div className="model-dropdown-menu">
-                    {MODEL_OPTIONS.map((m) => (
+                    {MODEL_OPTIONS.map((m) => {
+                      // Locked models stay visible with an "Upgrade" pill rather
+                      // than being hidden — you can't want what you can't see,
+                      // and ChatGPT's model picker works the same way.
+                      const locked = modelLocked(m.id);
+                      return (
                       <div
                         key={m.id}
-                        className={`model-dropdown-item${selectedModel === m.id ? " selected" : ""}`}
+                        className={`model-dropdown-item${selectedModel === m.id ? " selected" : ""}${locked ? " locked" : ""}`}
                         onClick={() => {
+                          if (locked) {
+                            setModelDropOpen(false);
+                            setUpgradeBlock({
+                              reason: "model_locked", feature: m.label, plan: plan as PlanId,
+                            });
+                            return;
+                          }
                           setSelectedModel(m.id as typeof selectedModel);
                           setModelDropOpen(false);
                         }}
@@ -1392,7 +1447,8 @@ const UploadPage: React.FC = () => {
                           </span>
                         </div>
                         <div className="model-dropdown-item-side">
-                          {selectedModel === m.id && (
+                          {locked && <span className="model-dropdown-lock">Upgrade</span>}
+                          {!locked && selectedModel === m.id && (
                             <svg
                               width="12"
                               height="12"
@@ -1411,7 +1467,8 @@ const UploadPage: React.FC = () => {
                           )}
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -1462,11 +1519,21 @@ const UploadPage: React.FC = () => {
                         label: "ShapeKit",
                         desc: "Clean up and smooth organ outlines",
                       },
-                    ].map((opt) => (
+                    ].map((opt) => {
+                      const locked =
+                        opt.id !== "" && isAuthenticated && !canPostprocess(plan);
+                      return (
                       <div
                         key={opt.id}
-                        className={`model-dropdown-item${postValue === opt.id ? " selected" : ""}`}
+                        className={`model-dropdown-item${postValue === opt.id ? " selected" : ""}${locked ? " locked" : ""}`}
                         onClick={() => {
+                          if (locked) {
+                            setPostDropOpen(false);
+                            setUpgradeBlock({
+                              reason: "postprocessing", feature: opt.label, plan: plan as PlanId,
+                            });
+                            return;
+                          }
                           setPostValue(opt.id);
                           setPostDropOpen(false);
                         }}
@@ -1480,7 +1547,8 @@ const UploadPage: React.FC = () => {
                           </span>
                         </div>
                         <div className="model-dropdown-item-side">
-                          {postValue === opt.id && (
+                          {locked && <span className="model-dropdown-lock">Upgrade</span>}
+                          {!locked && postValue === opt.id && (
                             <svg
                               width="12"
                               height="12"
@@ -1499,7 +1567,8 @@ const UploadPage: React.FC = () => {
                           )}
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -1592,7 +1661,7 @@ const UploadPage: React.FC = () => {
               <button type="button" className="upload-account-link" onClick={() => promptAuth()}>
                 Sign in
               </button>{" "}
-              to run inference on the server and get notified when it's done.
+              to run inference.
             </span>
           </div>
         )}
@@ -1604,7 +1673,9 @@ const UploadPage: React.FC = () => {
         {(() => {
           const groups = groupUploads(recentUploads);
           const inFlight = groups.filter(isGroupInFlight);
-          const finished = groups.filter(g => !isGroupInFlight(g));
+          // Only the last day stays here. Anything older is history, and lives
+          // in settings — this page is for the work in front of you.
+          const { recent: finished, older } = splitByAge(groups.filter(g => !isGroupInFlight(g)));
 
           // Only the upload needs this tab open; past that the job lives in the
           // server's queue. Rides along on each card's status line rather than as
@@ -1819,10 +1890,18 @@ const UploadPage: React.FC = () => {
                       : <CompletedBatchBar key={g.batchId} batchId={g.batchId} label={g.label} uploads={g.uploads} />
                   )}
                 </div>
+                {older.length > 0 && (
+                  <button type="button" className="upload-history-link"
+                    onClick={() => navigate("/account/history")}>
+                    {older.length} older {older.length === 1 ? "scan" : "scans"} in History →
+                  </button>
+                )}
               </div>
             </>
           );
         })()}
+
+        <UpgradeDialog block={upgradeBlock} onClose={() => setUpgradeBlock(null)} />
 
         {/* Batch "View details" popup */}
         {(() => {

@@ -17,8 +17,10 @@ export type RecentUpload = {
 };
 
 export const RECENT_UPLOADS_KEY = "recentUploads";
-// Raised from 8 so a multi-scan batch isn't half-evicted from the list.
-export const MAX_RECENT_UPLOADS = 60;
+// Raised from 8 so a multi-scan batch isn't half-evicted from the list, and
+// again from 60 once anything older than a day became the History page's
+// content — a history that forgets your 61st scan isn't much of one.
+export const MAX_RECENT_UPLOADS = 200;
 
 const TERMINAL: RecentUploadStatus[] = ["Completed", "Failed", "Cancelled"];
 export const isTerminalStatus = (s: RecentUploadStatus): boolean => TERMINAL.includes(s);
@@ -67,6 +69,25 @@ export const isGroupInFlight = (g: UploadGroup): boolean =>
 	g.kind === "single"
 		? g.upload.status === "Processing"
 		: g.uploads.some((u) => u.status === "Processing");
+
+// How long a finished scan stays on the Upload page before it belongs to
+// history. A day is the window in which you're still working with a result;
+// past that the Upload page is showing you a filing cabinet.
+export const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Split finished groups into what the Upload page shows and what History gets.
+ *  A batch is judged by its most recent scan, so a batch straddling the
+ *  boundary stays whole rather than being torn in half. */
+export const splitByAge = (
+	groups: UploadGroup[],
+	now: number = Date.now()
+): { recent: UploadGroup[]; older: UploadGroup[] } => {
+	const cutoff = now - RECENT_WINDOW_MS;
+	return {
+		recent: groups.filter((g) => g.timestamp >= cutoff),
+		older: groups.filter((g) => g.timestamp < cutoff),
+	};
+};
 
 export const loadRecentUploads = (): RecentUpload[] => {
 	try {

@@ -10,6 +10,11 @@ import type {
 } from "./types";
 import "./AISidebar.css";
 
+// The plan's daily message allowance is spent (HTTP 402). Distinguished from a
+// transport error so the streaming path doesn't retry on the non-streaming one,
+// which would be refused for the same reason.
+class PlanLimitError extends Error {}
+
 // Bumped to v2 so a previously-stored reasoning model (e.g. qwen3) is reset —
 // the default now prefers a non-reasoning model that never leaks "thinking".
 const MODEL_STORAGE_KEY = "bodymaps-ai-model-v2";
@@ -622,8 +627,16 @@ export default function AISidebar({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        credentials: "include",
         signal,
       });
+      // 402 = the plan's daily message allowance is spent. Surfaced as the
+      // assistant's own reply rather than a modal: the sidebar is a
+      // conversation, and a dialog over it would lose the thread.
+      if (response.status === 402) {
+        const limit = await response.json().catch(() => ({}));
+        throw new PlanLimitError(limit.message || "You've reached today's message limit.");
+      }
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
 
       const reader = response.body.getReader();
@@ -720,9 +733,13 @@ export default function AISidebar({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        credentials: "include",
         signal,
       });
       const data = await response.json();
+      if (response.status === 402) {
+        throw new PlanLimitError(data.message || "You've reached today's message limit.");
+      }
       if (!response.ok) throw new Error(data.reply || `HTTP ${response.status}`);
       const returnedActions: AIAction[] = Array.isArray(data.actions) ? data.actions : [];
       if (returnedActions.length) void applyReturnedActions(returnedActions);
@@ -818,12 +835,22 @@ export default function AISidebar({
       } catch (streamError) {
         if (isAbort(streamError)) {
           // User pressed Stop — keep whatever was streamed, no error.
+        } else if (streamError instanceof PlanLimitError) {
+          // A spent allowance is an answer, not a transport failure: retrying
+          // on the non-streaming endpoint would just be refused again.
+          updateMessage(assistantId, (m) => ({
+            ...m, content: streamError.message, status: undefined,
+          }));
         } else {
           console.warn("[BodyMaps AI stream] falling back:", streamError);
           try {
             await sendNonStreaming(assistantId, payload, controller.signal);
           } catch (error) {
-            if (!isAbort(error)) {
+            if (error instanceof PlanLimitError) {
+              updateMessage(assistantId, (m) => ({
+                ...m, content: error.message, status: undefined,
+              }));
+            } else if (!isAbort(error)) {
               console.error("[BodyMaps AI send error]", error);
               updateMessage(assistantId, (m) => ({
                 ...m,

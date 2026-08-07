@@ -77,31 +77,13 @@
   color: #ffffff;
 }
 
-/* ── GitHub link container (right side) ── */
-.githubContainer {
+/* ── Right-side actions (auth button + hamburger) ── */
+.navActions {
   display: flex;
   justify-content: flex-end;
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
-}
-
-/* ── GitHub link (desktop) ── */
-.githubLink {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  border-radius: 6px;
-  padding: 8px 12px;
-  font-size: 12px;
-  color: #6a6a6a;
-  text-decoration: none;
-  transition: color 0.2s, background 0.2s;
-  min-height: 44px;
-}
-.githubLink:hover {
-  color: #111111;
-  background: rgba(0, 0, 0, 0.05);
 }
 
 /* ── Hamburger button (hidden on desktop) ── */
@@ -147,8 +129,7 @@
   .nav { padding: 14px 20px; }
   .tabBar { display: none; }
   .hamburger { display: flex; }
-  .githubLink { display: none; }
-  .githubContainer { width: auto; }
+  .navActions { width: auto; }
 
   /* Backdrop */
   .backdrop {
@@ -256,21 +237,4 @@
   padding: 12px;
   border-top: 1px solid rgba(0, 0, 0, 0.07);
   flex-shrink: 0;
-}
-.mobileGithubLink {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
-  border-radius: 10px;
-  font-size: 14px;
-  font-weight: 600;
-  color: #6a6a6a;
-  text-decoration: none;
-  min-height: 44px;
-  transition: color 0.15s, background 0.15s;
-}
-.mobileGithubLink:hover {
-  color: #111111;
-  background: rgba(0, 0, 0, 0.04);
 }

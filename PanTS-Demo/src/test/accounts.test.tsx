@@ -4,24 +4,18 @@ import type { ReactElement } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../contexts/authContext";
-import { loadProfile } from "../helpers/accountProfile";
 import SignupPage from "../routes/SignupPage";
 
-// The signup flow end to end at the component level: all four steps, and where
-// each answer lands. Account type and plan are a localStorage mock, so asserting
-// on storage is the real check; the name is NOT — it goes to the server with the
-// registration, so that one is asserted on the request.
+// Signing up, at the component level. One screen now: providers, email,
+// password, done — no account type, no plan picker, no terms checkbox. A new
+// account lands on Free and meets its limits when it reaches them.
 //
-// The account page has its own suite (accountPage.test.tsx), which exercises the
-// real endpoints rather than the mock.
+// Settings has its own suite (accountPage.test.tsx).
 
-const USER = { id: "u1", email: "test@example.com" };
+const USER = { id: "u1", email: "test@example.com", plan: "free" };
 
-// /auth/me answers with a user only after `signedIn` flips, so the same stub
-// serves both the signed-out signup case and the signed-in account case.
 let signedIn = false;
-// What the register endpoint actually received, so the name can be asserted on
-// the request rather than on local storage.
+// What the register endpoint received, so the request can be asserted on.
 let registeredWith: Record<string, unknown> | null = null;
 
 const jsonResponse = (body: unknown) => ({
@@ -69,66 +63,102 @@ const renderAt = (ui: ReactElement, path = "/") =>
 	);
 
 describe("SignupPage", () => {
-	it("walks all four steps and stores the answers against the user", async () => {
+	it("creates the account from one screen and goes straight to the app", async () => {
 		const user = userEvent.setup();
 		renderAt(<SignupPage />, "/signup");
 
-		// Step 1 — credentials.
 		expect(await screen.findByText("Create your account")).toBeInTheDocument();
-		await user.type(screen.getByLabelText(/^Name$/i), "Ada Lovelace");
 		await user.type(screen.getByLabelText(/^Email$/i), "test@example.com");
 		await user.type(screen.getByLabelText(/^Password$/i), "hunter2hunter2");
-		await user.type(screen.getByLabelText(/Confirm password/i), "hunter2hunter2");
-		await user.click(screen.getByRole("button", { name: "Continue" }));
+		await user.click(screen.getByRole("button", { name: "Create account" }));
 
-		// Step 2 — account type.
-		expect(await screen.findByText("How will you use BodyMaps?")).toBeInTheDocument();
-		await user.click(screen.getByRole("button", { name: "Clinician" }));
-		await user.click(screen.getByRole("button", { name: "Continue" }));
-
-		// Step 3 — plan. No prices anywhere.
-		expect(await screen.findByText("Choose a plan")).toBeInTheDocument();
-		expect(document.body.textContent).not.toMatch(/\$\d/);
-		await user.click(screen.getByRole("button", { name: "Pro" }));
-		await user.click(screen.getByRole("button", { name: "Continue" }));
-
-		// Step 4 — terms. Finish stays disabled until the box is ticked.
-		expect(await screen.findByText("Terms and privacy")).toBeInTheDocument();
-		const finish = screen.getByRole("button", { name: "Finish" });
-		expect(finish).toBeDisabled();
-		await user.click(screen.getByRole("checkbox"));
-		expect(finish).toBeEnabled();
-		await user.click(finish);
-
-		// Account type and plan are the mock; the name is not — it was sent to
-		// /auth/register and lives in user_account.name.
-		await waitFor(() => {
-			const profile = loadProfile(USER.id);
-			expect(profile).toMatchObject({ accountType: "clinician", plan: "pro" });
-			expect(profile?.acceptedTermsAt).toBeTruthy();
-			expect(profile?.onboardingCompletedAt).toBeTruthy();
+		expect(await screen.findByText("Upload page")).toBeInTheDocument();
+		expect(registeredWith).toMatchObject({
+			email: "test@example.com", password: "hunter2hunter2",
 		});
-		expect(registeredWith).toMatchObject({ email: "test@example.com", name: "Ada Lovelace" });
-		expect(loadProfile(USER.id)).not.toHaveProperty("name");
 	});
 
-	it("refuses to advance when the passwords don't match", async () => {
+	it("asks nothing beyond an email and a password", async () => {
+		renderAt(<SignupPage />, "/signup");
+		await screen.findByText("Create your account");
+
+		// The steps that used to follow are gone, not merely reordered.
+		expect(screen.queryByLabelText(/^Name$/i)).not.toBeInTheDocument();
+		expect(screen.queryByLabelText(/Confirm password/i)).not.toBeInTheDocument();
+		expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+		expect(document.body.textContent).not.toMatch(/How will you use|Choose a plan/i);
+		for (const plan of ["Free", "Pro", "Team", "Enterprise"]) {
+			expect(screen.queryByRole("button", { name: plan })).not.toBeInTheDocument();
+		}
+	});
+
+	it("accepts the terms inline rather than as a step", async () => {
+		renderAt(<SignupPage />, "/signup");
+		await screen.findByText("Create your account");
+
+		expect(screen.getByText(/By continuing you agree to our/i)).toBeInTheDocument();
+		// The links are still there for anyone who wants to read them.
+		expect(screen.getByRole("link", { name: "Terms of Service" })).toHaveAttribute("href", "/terms");
+		expect(screen.getByRole("link", { name: "Privacy Policy" })).toHaveAttribute("href", "/privacy");
+	});
+
+	it("offers both providers", async () => {
+		renderAt(<SignupPage />, "/signup");
+		await screen.findByText("Create your account");
+
+		expect(screen.getByRole("button", { name: /Continue with Google/i })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /Continue with GitHub/i })).toBeInTheDocument();
+	});
+
+	it("disables a provider the server has no credentials for", async () => {
+		global.fetch = vi.fn(async (url: RequestInfo | URL) => {
+			const u = String(url);
+			if (u.includes("/api/auth/me")) return jsonResponse({ user: null });
+			if (u.includes("/api/auth/oauth/providers")) return jsonResponse({ google: true, github: false });
+			return jsonResponse({});
+		}) as unknown as typeof fetch;
+
+		renderAt(<SignupPage />, "/signup");
+		await screen.findByText("Create your account");
+
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /Continue with GitHub/i })).toBeDisabled()
+		);
+		expect(screen.getByRole("button", { name: /Continue with Google/i })).toBeEnabled();
+	});
+
+	it("reports a rejected registration without leaving the page", async () => {
+		global.fetch = vi.fn(async (url: RequestInfo | URL) => {
+			const u = String(url);
+			if (u.includes("/api/auth/me")) return jsonResponse({ user: null });
+			if (u.includes("/api/auth/oauth/providers")) return jsonResponse({ google: true, github: false });
+			if (u.includes("/api/auth/register")) {
+				return {
+					ok: false, status: 409,
+					json: async () => ({ error: "An account with that email already exists" }),
+					text: async () => "",
+					headers: { get: () => "application/json" },
+				};
+			}
+			return jsonResponse({});
+		}) as unknown as typeof fetch;
+
 		const user = userEvent.setup();
 		renderAt(<SignupPage />, "/signup");
 
-		await user.type(await screen.findByLabelText(/^Name$/i), "Ada");
-		await user.type(screen.getByLabelText(/^Email$/i), "test@example.com");
+		await user.type(await screen.findByLabelText(/^Email$/i), "taken@example.com");
 		await user.type(screen.getByLabelText(/^Password$/i), "hunter2hunter2");
-		await user.type(screen.getByLabelText(/Confirm password/i), "something-else");
-		await user.click(screen.getByRole("button", { name: "Continue" }));
+		await user.click(screen.getByRole("button", { name: "Create account" }));
 
-		expect(await screen.findByText("Passwords don't match.")).toBeInTheDocument();
+		expect(
+			await screen.findByText("An account with that email already exists")
+		).toBeInTheDocument();
 		expect(screen.getByText("Create your account")).toBeInTheDocument();
 	});
 
-	it("sends someone with no account back to step 1 even when asked for a later step", async () => {
-		// ?step=type is the OAuth entry point; without a session it must not stick.
-		renderAt(<SignupPage />, "/signup?step=type");
-		expect(await screen.findByText("Create your account")).toBeInTheDocument();
+	it("sends someone who is already signed in to the app", async () => {
+		signedIn = true;
+		renderAt(<SignupPage />, "/signup");
+		await waitFor(() => expect(screen.getByText("Upload page")).toBeInTheDocument());
 	});
 });

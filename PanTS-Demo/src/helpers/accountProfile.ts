@@ -1,118 +1,222 @@
-// Account profile: account type, plan, and onboarding state.
+// Plans, what each one allows, and the one remaining client-only profile field.
 //
-// MOCK — everything here lives in localStorage, keyed by user id. Nothing is
-// enforced: no feature is gated by plan or type, no quota is counted, no queue
-// priority is applied. This is the shape the signup flow collects so the UI can
-// be built and reacted to before any of it is made real.
+// PLAN_LIMITS mirrors flask-server/services/plan_store.py. The server is what
+// actually decides — it returns 402 with a reason, and that reason is what the
+// upgrade dialog reports. This copy exists so the UI can grey a locked control
+// out up front instead of letting you click into a rejection. A drift between
+// the two is a cosmetic bug here and a real one there; change them together.
 //
-// Deliberately NOT here: the display name and account deletion. Both have real
-// server-side homes (user_account.name, user_account.deletion_requested_at) and
-// go through authContext's updateName / deleteAccount. Mirroring them here too
-// would give each two sources of truth that drift the moment one is written
-// without the other.
-//
-// This file is the single seam for what remains. When the backend grows
-// `account_type` and `plan` columns, only load/persist below change — every
-// caller reads through authContext, which reads through here.
-//
-// Follows the helpers/recentUploads.ts pattern (typed shape, try/catch around
-// every storage access, pure functions so it can be unit-tested).
+// The plan itself is NOT stored here. It lives on user_account.plan and arrives
+// through authContext. What's left in localStorage is `accountType`, which is
+// self-reported, optional, and gates nothing.
 
 export type AccountType = "patient" | "clinician" | "researcher" | "student";
 export type PlanId = "free" | "pro" | "team" | "enterprise";
+/** Which tab of the plan picker a plan appears under. */
+export type PlanGroup = "individual" | "team";
 
-export type AccountProfile = {
-	accountType: AccountType;
-	plan: PlanId;
-	/** ISO timestamp of terms acceptance; null until the signup flow's last step. */
-	acceptedTermsAt: string | null;
-	/** ISO timestamp; null means signup was never finished (drives OAuth onboarding). */
-	onboardingCompletedAt: string | null;
+/** null means unlimited, matching the server's representation. */
+export type PlanLimits = {
+	dailyScans: number | null;
+	concurrentScans: number | null;
+	/** Model ids the plan may run; null means every model. */
+	models: string[] | null;
+	postprocessing: boolean;
+	dailyAiMessages: number | null;
+	createReports: boolean;
+	retentionDays: number | null;
+	priorityQueue: boolean;
 };
 
-export const PROFILE_KEY_PREFIX = "accountProfile:";
+export const PLAN_LIMITS: Record<PlanId, PlanLimits> = {
+	free: {
+		dailyScans: 3,
+		concurrentScans: 1,
+		models: ["LesionSegmenter"],
+		postprocessing: false,
+		dailyAiMessages: 10,
+		createReports: false,
+		retentionDays: 7,
+		priorityQueue: false,
+	},
+	pro: {
+		dailyScans: 50,
+		concurrentScans: 5,
+		models: null,
+		postprocessing: true,
+		dailyAiMessages: 200,
+		createReports: true,
+		retentionDays: 365,
+		priorityQueue: true,
+	},
+	team: {
+		dailyScans: 50,
+		concurrentScans: 5,
+		models: null,
+		postprocessing: true,
+		dailyAiMessages: 200,
+		createReports: true,
+		retentionDays: 365,
+		priorityQueue: true,
+	},
+	enterprise: {
+		dailyScans: null,
+		concurrentScans: null,
+		models: null,
+		postprocessing: true,
+		dailyAiMessages: null,
+		createReports: true,
+		retentionDays: null,
+		priorityQueue: true,
+	},
+};
 
-const profileKey = (userId: string) => `${PROFILE_KEY_PREFIX}${userId}`;
+export const limitsFor = (plan: PlanId | undefined): PlanLimits =>
+	PLAN_LIMITS[plan ?? "free"] ?? PLAN_LIMITS.free;
 
-export const ACCOUNT_TYPES: { id: AccountType; label: string; blurb: string }[] = [
-	{
-		id: "patient",
-		label: "Patient",
-		blurb: "Understand your own scan in plain language.",
-	},
-	{
-		id: "clinician",
-		label: "Clinician",
-		blurb: "Read scans for patients, with the full measurement toolset.",
-	},
-	{
-		id: "researcher",
-		label: "Researcher",
-		blurb: "Run cohorts and export structured results in bulk.",
-	},
-	{
-		id: "student",
-		label: "Student or trainee",
-		blurb: "Learn anatomy against the public PanTS dataset.",
-	},
-];
+// Plan cards. Kept to a name, one line, a price, and a handful of short bullets
+// — the shape Claude and ChatGPT both use. Longer copy was the old version's
+// problem: four plans each explaining themselves in paragraphs is a wall, and
+// nobody reads a wall to pick a tier.
+export type Plan = {
+	id: PlanId;
+	label: string;
+	group: PlanGroup;
+	/** One line under the name. Six words is the budget. */
+	blurb: string;
+	/** Shown where a price goes. No numbers: pricing hasn't been set. */
+	price: string;
+	/** Small pill in the card's top corner (member counts), if any. */
+	badge?: string;
+	/** Renders "Everything in <that plan>, plus:" above the bullets. */
+	inherits?: PlanId;
+	/** Short noun phrases, not sentences. */
+	points: string[];
+	cta: string;
+};
 
-// No prices yet — deliberately. These describe who each plan is for, which is
-// the part worth settling before anyone picks a number.
-export const PLANS: { id: PlanId; label: string; tagline: string; points: string[] }[] = [
+export const PLANS: Plan[] = [
 	{
 		id: "free",
 		label: "Free",
-		tagline: "For a single scan, or to try things out.",
+		group: "individual",
+		blurb: "Try BodyMaps",
+		// Not "Free" — that's the plan's name, and repeating it in the price slot
+		// reads as a rendering bug.
+		price: "No cost",
 		points: [
-			"A few scans per month",
+			"3 scans a day",
+			"LesionSegmenter model",
 			"Full viewer and 3D reconstruction",
-			"Standard queue",
-			"Results kept short-term",
+			"10 assistant messages a day",
+			"Results kept 7 days",
 		],
+		cta: "Start free",
 	},
 	{
 		id: "pro",
 		label: "Pro",
-		tagline: "For one clinician or researcher working seriously.",
+		group: "individual",
+		blurb: "For everyday clinical and research work",
+		price: "Not priced yet",
+		inherits: "free",
 		points: [
-			"Room for regular use",
-			"Priority in the inference queue",
-			"Several scans processing at once",
-			"Specialized models",
-			"Long-term result retention",
+			"50 scans a day",
+			"Every model",
+			"5 scans at once",
+			"Priority in the queue",
+			"Create reports and annotations",
+			"Results kept a year",
 		],
+		cta: "Upgrade to Pro",
 	},
 	{
 		id: "team",
 		label: "Team",
-		tagline: "For a practice or research group working together.",
+		group: "team",
+		blurb: "For a practice or lab",
+		price: "Not priced yet",
+		badge: "2–15 members",
+		inherits: "pro",
+		// No "everything in Pro per member" bullet: the inherits line above the
+		// list already says it.
 		points: [
-			"Everything in Pro, per seat",
-			"Shared case library and annotations",
-			"Pooled quota across the team",
-			"Roles and an audit log",
+			"Shared case library",
+			"Shared annotations and reports",
+			"Usage pooled across the team",
+			"Central billing",
 		],
+		cta: "Choose Team",
 	},
 	{
 		id: "enterprise",
 		label: "Enterprise",
-		tagline: "For a hospital or institution.",
+		group: "team",
+		blurb: "For a hospital or institution",
+		// "Talk to us" is the button; the price slot needs to say something else.
+		price: "Custom",
+		badge: "15+ members",
+		inherits: "team",
 		points: [
 			"Single sign-on",
-			"Dedicated or on-premise compute",
-			"Custom retention, DPA and BAA",
-			"API access and support commitments",
+			"Signed BAA and DPA",
+			"On-premise processing",
+			"Access audit log",
+			"Retention set to your policy",
+			"PACS integration",
 		],
+		cta: "Talk to us",
 	},
 ];
 
-export const DEFAULT_PROFILE: AccountProfile = {
-	accountType: "patient",
-	plan: "free",
-	acceptedTermsAt: null,
-	onboardingCompletedAt: null,
+export const planLabel = (id: PlanId): string =>
+	PLANS.find((p) => p.id === id)?.label ?? id;
+
+/** The plan an upgrade prompt should point at. Enterprise has nowhere to go. */
+export const nextPlanUp = (plan: PlanId): PlanId | null =>
+	plan === "free" ? "pro" : plan === "pro" ? "team" : plan === "team" ? "enterprise" : null;
+
+// ---- feature checks --------------------------------------------------------
+// Cosmetic only — each has a server-side counterpart that does the real work.
+
+/** Whether a model id is outside the plan's allowance. "None" is view-only and
+ *  never reaches the server, so it's never locked. */
+export const isModelLocked = (plan: PlanId, modelId: string): boolean => {
+	if (modelId === "None") return false;
+	const allowed = limitsFor(plan).models;
+	return allowed !== null && !allowed.includes(modelId);
 };
+
+export const canPostprocess = (plan: PlanId): boolean => limitsFor(plan).postprocessing;
+
+export const canCreateReports = (plan: PlanId): boolean => limitsFor(plan).createReports;
+
+/** How many scans this plan may have running at once (Infinity if unlimited). */
+export const maxConcurrentScans = (plan: PlanId): number =>
+	limitsFor(plan).concurrentScans ?? Infinity;
+
+// ---- account type (self-reported, optional, gates nothing) -----------------
+
+export const ACCOUNT_TYPES: { id: AccountType; label: string }[] = [
+	{ id: "patient", label: "Patient" },
+	{ id: "clinician", label: "Clinician" },
+	{ id: "researcher", label: "Researcher" },
+	{ id: "student", label: "Student" },
+];
+
+export const accountTypeLabel = (id: AccountType | null): string =>
+	ACCOUNT_TYPES.find((t) => t.id === id)?.label ?? "Not set";
+
+export type AccountProfile = {
+	/** null until the user picks one in settings. Nothing depends on it. */
+	accountType: AccountType | null;
+};
+
+export const DEFAULT_PROFILE: AccountProfile = { accountType: null };
+
+export const PROFILE_KEY_PREFIX = "accountProfile:";
+
+const profileKey = (userId: string) => `${PROFILE_KEY_PREFIX}${userId}`;
 
 export const loadProfile = (userId: string): AccountProfile | null => {
 	try {
@@ -120,9 +224,10 @@ export const loadProfile = (userId: string): AccountProfile | null => {
 		if (!raw) return null;
 		const parsed = JSON.parse(raw);
 		if (!parsed || typeof parsed !== "object") return null;
-		// Merge over defaults so a profile written by an older build (missing a
-		// field added later) still loads instead of throwing.
-		return { ...DEFAULT_PROFILE, ...parsed };
+		// Merge over defaults so a profile written by an older build still loads.
+		// Older builds also wrote plan/onboarding keys here; they're ignored now
+		// that the plan is a server column, and dropped on the next write.
+		return { accountType: parsed.accountType ?? null };
 	} catch {
 		return null;
 	}
@@ -152,20 +257,3 @@ export const clearProfile = (userId: string) => {
 		console.warn("clearProfile failed", e);
 	}
 };
-
-/**
- * Whether to send this user through the account-type/plan/terms steps.
- *
- * MOCK LIMITATION: "needs onboarding" really means "no profile in *this
- * browser's* localStorage", so an OAuth user returning on a new device is asked
- * again. The real fix is a user_account.onboarding_completed_at column returned
- * by /api/auth/me — this function is the one place that changes when it lands.
- */
-export const needsOnboarding = (userId: string): boolean =>
-	loadProfile(userId)?.onboardingCompletedAt == null;
-
-export const planLabel = (id: PlanId): string =>
-	PLANS.find((p) => p.id === id)?.label ?? id;
-
-export const accountTypeLabel = (id: AccountType): string =>
-	ACCOUNT_TYPES.find((t) => t.id === id)?.label ?? id;

@@ -1,5 +1,8 @@
 /* Fullscreen sign-up. Same light/monochrome vocabulary as the auth popup
-   (components/AuthModal.css): Space Grotesk, JHU blue, soft radii. */
+   (components/AuthModal.css): Space Grotesk, JHU blue, soft radii.
+
+   One column, one card, nothing above the fold but the thing you came to do —
+   the layout Claude and ChatGPT both land on. */
 
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
@@ -15,10 +18,7 @@
 .signup-header {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
-	gap: 16px;
 	padding: 20px 28px;
-	flex-wrap: wrap;
 }
 
 .signup-brand {
@@ -36,10 +36,6 @@
 	border-radius: 8px;
 }
 
-.signup-header-alt {
-	font-size: 13px;
-	color: #6a6a6a;
-}
 .signup-link {
 	background: none;
 	border: none;
@@ -55,79 +51,33 @@
 	flex: 1;
 	display: flex;
 	justify-content: center;
-	padding: 16px 20px 64px;
+	/* Sits a little above centre — a card pinned to the exact middle of a tall
+	   viewport reads as floating. */
+	align-items: flex-start;
+	padding: 4vh 20px 64px;
 }
 
 .signup-panel {
 	width: 100%;
-	max-width: 560px;
+	max-width: 420px;
 	background: #ffffff;
 	border: 1px solid rgba(0, 0, 0, 0.08);
 	border-radius: 18px;
 	box-shadow: 0 18px 44px rgba(0, 0, 0, 0.06);
-	padding: 32px 32px 28px;
-}
-
-/* Progress dots */
-.signup-steps {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	list-style: none;
-	margin: 0 0 22px;
-	padding: 0;
-}
-.signup-step {
-	flex: 1;
-}
-.signup-step-dot {
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	height: 26px;
-	border-radius: 999px;
-	background: rgba(0, 0, 0, 0.05);
-	color: #8f8f8f;
-	font-family: 'JetBrains Mono', monospace;
-	font-size: 12px;
-	font-weight: 500;
-	transition: background 0.2s, color 0.2s;
-}
-.signup-step--current .signup-step-dot {
-	background: #002d72;
-	color: #ffffff;
-}
-.signup-step--done .signup-step-dot {
-	background: rgba(0, 45, 114, 0.14);
-	color: #002d72;
+	padding: 32px 32px 26px;
 }
 
 .signup-title {
 	font-size: 24px;
 	font-weight: 700;
-	margin: 0 0 8px;
-}
-
-.signup-sub {
-	font-size: 14px;
-	line-height: 1.55;
-	color: #6a6a6a;
 	margin: 0 0 22px;
+	text-align: center;
 }
 
-.signup-note {
-	font-size: 12.5px;
-	line-height: 1.5;
-	color: #8f8f8f;
-	margin: 16px 0 0;
-}
-
-/* Providers + divider */
 .signup-providers {
 	display: flex;
 	flex-direction: column;
 	gap: 10px;
-	margin-top: 20px;
 }
 .signup-provider {
 	width: 100%;
@@ -174,7 +124,6 @@
 	padding: 0 12px;
 }
 
-/* Form */
 .signup-form {
 	display: flex;
 	flex-direction: column;
@@ -211,15 +160,9 @@
 	color: #ef4444;
 }
 
-/* Buttons */
-.signup-actions {
-	display: flex;
-	align-items: center;
-	justify-content: flex-end;
-	gap: 12px;
-	margin-top: 24px;
-}
 .signup-primary {
+	width: 100%;
+	margin-top: 4px;
 	padding: 12px 22px;
 	border-radius: 10px;
 	background: #002d72;
@@ -238,164 +181,38 @@
 	opacity: 0.5;
 	cursor: not-allowed;
 }
-.signup-back {
-	padding: 12px 16px;
-	border-radius: 10px;
-	background: none;
-	border: 1px solid rgba(0, 0, 0, 0.12);
-	font-family: inherit;
-	font-size: 14px;
-	color: #6a6a6a;
-	cursor: pointer;
-	margin-right: auto;
-}
-.signup-back:hover {
-	color: #111111;
-	border-color: rgba(0, 0, 0, 0.28);
-}
 
-/* Account-type cards */
-.signup-choices {
-	display: grid;
-	grid-template-columns: repeat(2, minmax(0, 1fr));
-	gap: 12px;
+/* Consent by continuing, rather than a checkbox on a step of its own. */
+.signup-fineprint {
+	margin: 16px 0 0;
+	font-size: 11.5px;
+	line-height: 1.55;
+	color: #8f8f8f;
+	text-align: center;
 }
-.signup-choice {
-	display: flex;
-	flex-direction: column;
-	gap: 5px;
-	text-align: left;
-	padding: 16px;
-	border-radius: 12px;
-	border: 1px solid rgba(0, 0, 0, 0.12);
-	background: #ffffff;
-	font-family: inherit;
-	cursor: pointer;
-	transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
-}
-.signup-choice:hover {
-	border-color: rgba(0, 0, 0, 0.3);
-}
-.signup-choice--on {
-	border-color: #002d72;
-	background: rgba(0, 45, 114, 0.04);
-	box-shadow: 0 0 0 1px #002d72 inset;
-}
-.signup-choice-label {
-	font-size: 14.5px;
-	font-weight: 600;
-	color: #111111;
-}
-.signup-choice-blurb {
-	font-size: 12.5px;
-	line-height: 1.45;
+.signup-fineprint a {
 	color: #6a6a6a;
+	text-decoration: underline;
 }
-
-/* Plan cards */
-.signup-plans {
-	display: grid;
-	grid-template-columns: repeat(2, minmax(0, 1fr));
-	gap: 12px;
-}
-.signup-plan {
-	display: flex;
-	flex-direction: column;
-	gap: 6px;
-	text-align: left;
-	padding: 16px;
-	border-radius: 12px;
-	border: 1px solid rgba(0, 0, 0, 0.12);
-	background: #ffffff;
-	font-family: inherit;
-	cursor: pointer;
-	transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
-}
-.signup-plan:hover {
-	border-color: rgba(0, 0, 0, 0.3);
-}
-.signup-plan--on {
-	border-color: #002d72;
-	background: rgba(0, 45, 114, 0.04);
-	box-shadow: 0 0 0 1px #002d72 inset;
-}
-.signup-plan-name {
-	font-size: 15px;
-	font-weight: 700;
-	color: #111111;
-}
-.signup-plan-tagline {
-	font-size: 12.5px;
-	line-height: 1.45;
-	color: #6a6a6a;
-}
-.signup-plan-points {
-	list-style: none;
-	margin: 6px 0 0;
-	padding: 0;
-	display: flex;
-	flex-direction: column;
-	gap: 5px;
-}
-.signup-plan-points li {
-	display: flex;
-	align-items: flex-start;
-	gap: 6px;
-	font-size: 12.5px;
-	line-height: 1.4;
-	color: #4a4a4a;
-}
-.signup-plan-points svg {
-	flex-shrink: 0;
-	margin-top: 2px;
+.signup-fineprint a:hover {
 	color: #002d72;
 }
 
-/* Terms */
-.signup-agree {
-	display: flex;
-	align-items: flex-start;
-	gap: 10px;
-	padding: 16px;
-	border-radius: 12px;
-	border: 1px solid rgba(0, 0, 0, 0.12);
-	background: #fafafa;
-	font-size: 13.5px;
-	line-height: 1.5;
-	color: #4a4a4a;
-	cursor: pointer;
-}
-.signup-agree input {
-	margin-top: 2px;
-	width: 16px;
-	height: 16px;
-	accent-color: #002d72;
-	flex-shrink: 0;
-	cursor: pointer;
-}
-.signup-agree a {
-	color: #002d72;
-	font-weight: 600;
+.signup-alt {
+	margin-top: 22px;
+	padding-top: 18px;
+	border-top: 1px solid rgba(0, 0, 0, 0.07);
+	font-size: 13px;
+	color: #6a6a6a;
+	text-align: center;
 }
 
-@media (max-width: 560px) {
+@media (max-width: 480px) {
 	.signup-panel {
-		padding: 24px 20px 22px;
+		padding: 24px 20px 20px;
 		border-radius: 14px;
 	}
 	.signup-title {
 		font-size: 21px;
-	}
-	.signup-choices,
-	.signup-plans {
-		grid-template-columns: minmax(0, 1fr);
-	}
-	.signup-actions {
-		flex-wrap: wrap;
-	}
-	.signup-primary,
-	.signup-back {
-		flex: 1;
-		text-align: center;
 	}
 }

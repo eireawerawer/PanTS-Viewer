@@ -16,9 +16,14 @@
 // reversible for a grace period: the server keeps the row and signing back in
 // cancels it.
 //
+// The plan is real too: user_account.plan, changed through /me/plan, and its
+// limits are enforced server-side (see flask-server/services/plan_store.py).
+// There is no payment step — pricing hasn't been set — but the limits bite.
+//
 // Not wired yet: emailNotifications -> B3, still a client-only localStorage pref.
-// Also client-only: account type and plan (helpers/accountProfile.ts). The name
-// is NOT part of that mock — it has a real column and goes through updateName.
+// Also client-only: account type (helpers/accountProfile.ts), which is
+// self-reported and gates nothing. The name is NOT part of that — it has a real
+// column and goes through updateName.
 import {
 	createContext,
 	useCallback,
@@ -33,6 +38,7 @@ import {
 	loadProfile,
 	updateProfile as persistProfilePatch,
 	type AccountProfile,
+	type PlanId,
 } from "../helpers/accountProfile";
 import { API_BASE } from "../helpers/constants";
 
@@ -44,8 +50,17 @@ export type AuthUser = {
 	/** True when `name` is the user's own rather than derived from the email. */
 	hasCustomName: boolean;
 	emailNotifications: boolean; // client-only preference until B3
-	/** Account type + plan. Client-only mock until the backend grows the columns. */
+	/** Billing plan, from user_account.plan. Its limits are enforced server-side. */
+	plan: PlanId;
+	/** Self-reported account type. Client-only, and gates nothing. */
 	profile: AccountProfile;
+};
+
+/** What GET /me/usage returns: the plan's limits and what's been used of them. */
+export type PlanUsage = {
+	plan: PlanId;
+	scans: { used: number; limit: number | null; in_flight: number; resets_at: string | null };
+	ai_messages: { used: number; limit: number | null; resets_at: string | null };
 };
 
 export type AuthProvider2 = "google" | "github";
@@ -75,8 +90,13 @@ type AuthContextValue = {
 	 * in — resolves with the deadline and the grace period, so the UI can say so.
 	 */
 	deleteAccount: () => Promise<{ restoreBy: string; graceDays: number }>;
-	/** Patch the account-type / plan / onboarding mock. */
+	/** Patch the self-reported account type. */
 	updateAccountProfile: (patch: Partial<AccountProfile>) => void;
+	/** Move to another plan. No payment step — pricing isn't set. */
+	setPlan: (plan: PlanId) => Promise<void>;
+	/** Current plan usage, or null until loaded. Refreshed by refreshUsage(). */
+	usage: PlanUsage | null;
+	refreshUsage: () => Promise<void>;
 	// Global sign-in popup, opened from the header or any gated action. Signing
 	// up is a page (/signup), so this has no signup mode.
 	authPrompt: { open: boolean };
@@ -120,7 +140,7 @@ const savePref = (id: string, on: boolean) => {
 	}
 };
 
-type ApiUser = { id: string; email: string; name?: string | null };
+type ApiUser = { id: string; email: string; name?: string | null; plan?: string | null };
 const mapApiUser = (u: ApiUser): AuthUser => {
 	const custom = (u.name || "").trim();
 	return {
@@ -130,6 +150,7 @@ const mapApiUser = (u: ApiUser): AuthUser => {
 		name: custom || nameFromEmail(u.email),
 		hasCustomName: custom.length > 0,
 		emailNotifications: loadPref(u.id),
+		plan: (u.plan as PlanId) || "free",
 		profile: loadProfile(u.id) ?? DEFAULT_PROFILE,
 	};
 };
@@ -148,6 +169,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	const [loading, setLoading] = useState(true);
 	const [authPrompt, setAuthPrompt] = useState<{ open: boolean }>({ open: false });
 	const [oauthProviders, setOauthProviders] = useState<Record<AuthProvider2, boolean> | null>(null);
+	const [usage, setUsage] = useState<PlanUsage | null>(null);
 	// The OAuth callback redirects back with ?auth_error=... on failure (e.g. an
 	// unverified provider email colliding with an existing account). Read it once
 	// on mount, then strip it from the URL so a refresh doesn't resurface it.
@@ -339,6 +361,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		[user]
 	);
 
+	const refreshUsage = useCallback(async () => {
+		if (!user) {
+			setUsage(null);
+			return;
+		}
+		try {
+			const res = await authFetch("/api/me/usage");
+			setUsage(res.ok ? await res.json() : null);
+		} catch {
+			setUsage(null); // a usage read failing is not worth surfacing
+		}
+	}, [user]);
+
+	const setPlan = useCallback(async (plan: PlanId) => {
+		const res = await authFetch("/api/me/plan", {
+			method: "POST",
+			body: JSON.stringify({ plan }),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(data.error || "Couldn't change your plan. Try again.");
+		setUser(mapApiUser(data.user));
+	}, []);
+
+	// Keep usage in step with whoever is signed in — including after a plan
+	// change, since the limits it reports come from the plan.
+	useEffect(() => {
+		refreshUsage();
+	}, [refreshUsage]);
+
 	const clearOauthError = useCallback(() => setOauthError(null), []);
 
 	const value = useMemo<AuthContextValue>(
@@ -357,6 +408,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			deleteScanHistory,
 			deleteAccount,
 			updateAccountProfile,
+			setPlan,
+			usage,
+			refreshUsage,
 			authPrompt,
 			promptAuth,
 			closeAuthPrompt,
@@ -365,8 +419,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}),
 		[user, loading, signIn, signUp, signInWithProvider, oauthProviders, signOut,
 		 updatePreferences, updateName, exportData, deleteScanHistory, deleteAccount,
-		 updateAccountProfile, authPrompt, promptAuth, closeAuthPrompt, oauthError,
-		 clearOauthError]
+		 updateAccountProfile, setPlan, usage, refreshUsage, authPrompt, promptAuth,
+		 closeAuthPrompt, oauthError, clearOauthError]
 	);
 
 	return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

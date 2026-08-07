@@ -1,10 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import { useEffect, type ReactElement } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AuthModal from "../components/AuthModal";
 import { AuthProvider, useAuth } from "../contexts/authContext";
-import AccountPage from "../routes/AccountPage";
+import SettingsPage from "../routes/Settings";
+import NotificationSettings from "../routes/Settings/NotificationSettings";
 import LandingPage from "../routes/LandingPage";
 import Homepage from "../routes/Homepage";
 import UploadPage from "../routes/UploadPage";
@@ -91,7 +92,7 @@ describe("route smoke tests", () => {
     );
   });
 
-  it("AccountPage renders the email-notification setting when signed in", async () => {
+  it("Settings renders the email-notification setting when signed in", async () => {
     // The session lives in an httponly cookie, so "signed in" means /auth/me
     // answers with a user - not a localStorage key.
     global.fetch = vi.fn(async (url: RequestInfo | URL) => ({
@@ -104,9 +105,15 @@ describe("route smoke tests", () => {
       text: async () => "",
       headers: { get: () => "application/json" },
     })) as unknown as typeof fetch;
-    renderRoute(<AccountPage />);
+    renderRoute(
+      <Routes>
+        <Route path="/" element={<SettingsPage />}>
+          <Route index element={<NotificationSettings />} />
+        </Route>
+      </Routes>,
+    );
     expect(
-      await screen.findByText("Email me when inference finishes"),
+      await screen.findByText("Email me when a scan finishes"),
     ).toBeInTheDocument();
   });
 });
