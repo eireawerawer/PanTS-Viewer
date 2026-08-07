@@ -21,9 +21,8 @@ const SettingsPage = lazy(() => import("./routes/Settings"));
 const ProfileSettings = lazy(() => import("./routes/Settings/ProfileSettings"));
 const PlanSettings = lazy(() => import("./routes/Settings/PlanSettings"));
 const HistorySettings = lazy(() => import("./routes/Settings/HistorySettings"));
-const NotificationSettings = lazy(() => import("./routes/Settings/NotificationSettings"));
 const PrivacySettings = lazy(() => import("./routes/Settings/PrivacySettings"));
-const SignupPage = lazy(() => import("./routes/SignupPage"));
+const SignupRedirect = lazy(() => import("./routes/SignupRedirect"));
 const LegalPage = lazy(() => import("./routes/LegalPage"));
 const RotatingHeartLoader = lazy(() => import("./components/Loading"));
 
@@ -87,16 +86,16 @@ function App() {
                   />
                   <Route path="/test" element={<RotatingHeartLoader />} />
                   <Route path="/upload" element={<UploadPage />} />
-                  {/* Sign in is a popup; sign up is a page. Old /login links land on home. */}
+                  {/* Both sign in and sign up are the popup now. /login and
+                      /signup stay routable so old links don't 404. */}
                   <Route path="/login" element={<Navigate to="/" replace />} />
-                  <Route path="/signup" element={<SignupPage />} />
+                  <Route path="/signup" element={<SignupRedirect />} />
                   {/* Settings is a shell with a left nav; each section is its
                       own URL so a link can point straight at one. */}
                   <Route path="/account" element={<SettingsPage />}>
                     <Route index element={<ProfileSettings />} />
                     <Route path="plan" element={<PlanSettings />} />
                     <Route path="history" element={<HistorySettings />} />
-                    <Route path="notifications" element={<NotificationSettings />} />
                     <Route path="privacy" element={<PrivacySettings />} />
                   </Route>
                   <Route path="/terms" element={<LegalPage kind="terms" />} />
@@ -113,8 +112,8 @@ function App() {
                   />
                 </Routes>
               </Suspense>
-              {/* Global sign-in popup, above all routes. Inside the router so it
-                  can link out to /signup. */}
+              {/* Global auth popup, above all routes. Inside the router so it
+                  can link to the legal pages. */}
               <AuthModal />
             </BrowserRouter>
           </div>

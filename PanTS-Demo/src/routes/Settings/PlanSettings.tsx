@@ -19,10 +19,14 @@ const UsageBar: React.FC<{
 	used: number;
 	limit: number | null;
 	resetsAt: string | null;
-}> = ({ label, used, limit, resetsAt }) => {
+	/** What to say before the window has started (nothing used yet). */
+	idleNote: string;
+}> = ({ label, used, limit, resetsAt, idleNote }) => {
 	const pct = limit === null ? 0 : Math.min(100, Math.round((used / limit) * 100));
 	const spent = limit !== null && used >= limit;
-	const reset = untilLabel(resetsAt);
+	// resets_at is null until the first event lands, so an untouched allowance
+	// would otherwise show a bare label with no hint of how the window works.
+	const reset = untilLabel(resetsAt) ?? (limit === null ? null : idleNote);
 	return (
 		<div className="set-usage">
 			<span className="set-usage-label">
@@ -74,6 +78,15 @@ const PlanSettings: React.FC = () => {
 						<h2 className="set-plan-name">{planLabel(current)} plan</h2>
 						<p className="set-plan-blurb">{currentPlan?.blurb}</p>
 					</div>
+					<button
+						type="button"
+						className="set-btn"
+						onClick={() =>
+							document.getElementById("change-plan")?.scrollIntoView({ behavior: "smooth" })
+						}
+					>
+						Change plan
+					</button>
 				</div>
 			</div>
 
@@ -87,12 +100,14 @@ const PlanSettings: React.FC = () => {
 							used={usage.scans.used}
 							limit={usage.scans.limit}
 							resetsAt={usage.scans.resets_at}
+							idleNote="Resets 24h after your first scan"
 						/>
 						<UsageBar
 							label="Assistant messages"
 							used={usage.ai_messages.used}
 							limit={usage.ai_messages.limit}
 							resetsAt={usage.ai_messages.resets_at}
+							idleNote="Resets 24h after your first message"
 						/>
 					</>
 				) : (
@@ -100,11 +115,8 @@ const PlanSettings: React.FC = () => {
 				)}
 			</div>
 
-			<div className="set-group set-plan-picker">
-				<h2 className="set-heading" style={{ alignSelf: "flex-start" }}>Change plan</h2>
-				<p className="set-sub" style={{ alignSelf: "flex-start" }}>
-					Nothing is charged — pricing hasn't been set. Limits apply as listed.
-				</p>
+			<div className="set-group set-plan-picker" id="change-plan">
+				<h2 className="set-heading">Change plan</h2>
 
 				<div className="set-segmented" role="tablist" aria-label="Plan type">
 					{([
@@ -135,7 +147,10 @@ const PlanSettings: React.FC = () => {
 								{p.badge && <span className="set-plan-badge">{p.badge}</span>}
 								<h3 className="set-plan-card-name">{p.label}</h3>
 								<p className="set-plan-card-blurb">{p.blurb}</p>
-								<div className="set-plan-price">{p.price}</div>
+								<div className="set-plan-price">
+									{p.price}
+									{p.priceNote && <span className="set-plan-price-note">{p.priceNote}</span>}
+								</div>
 								<button
 									type="button"
 									className={`set-plan-cta${isCurrent ? " set-plan-cta--current" : ""}`}
@@ -145,11 +160,15 @@ const PlanSettings: React.FC = () => {
 									{isCurrent ? "Current plan" : p.cta}
 								</button>
 								<ul className="set-plan-points">
-									{p.inherits && (
-										<li className="set-plan-inherits">
-											Everything in {planLabel(p.inherits)}, plus:
-										</li>
-									)}
+									{/* Every card gets a lead line, including the one that
+									    inherits nothing, so the bullet lists start at the
+									    same height across the row. */}
+									<li className="set-plan-inherits">
+										{p.inherits
+											? `Everything in ${planLabel(p.inherits)}, plus:`
+											: p.pointsLead}
+									</li>
+
 									{p.points.map((pt) => (
 										<li key={pt}>
 											<IconCheck size={13} stroke={2.5} /> {pt}

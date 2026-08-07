@@ -84,10 +84,20 @@ describe("plan cards", () => {
 		}
 	});
 
-	it("quotes no prices — none have been set", () => {
-		const text = JSON.stringify(PLANS);
-		expect(text).not.toMatch(/[$£€]\s?\d/);
-		expect(text).not.toMatch(/per month|\/mo\b/i);
+	it("prices the individual plans and leaves Enterprise open", () => {
+		const byId = Object.fromEntries(PLANS.map((p) => [p.id, p]));
+		expect(byId.free.price).toBe("$0");
+		expect(byId.pro.price).toBe("$1.99");
+		expect(byId.team.price).toBe("$4.99");
+		expect(byId.enterprise.price).toBe("Custom");
+		// A bare figure means nothing without a period attached to it.
+		for (const plan of PLANS) expect(plan.priceNote).toBeTruthy();
+	});
+
+	it("gives every card a lead line so the bullet lists align", () => {
+		for (const plan of PLANS) {
+			expect(plan.inherits ?? plan.pointsLead).toBeTruthy();
+		}
 	});
 
 	it("has a limits entry for every card and vice versa", () => {

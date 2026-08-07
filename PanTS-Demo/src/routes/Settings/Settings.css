@@ -41,12 +41,22 @@
 	top: 24px;
 }
 .set-nav-item {
+	display: flex;
+	align-items: center;
+	gap: 10px;
 	padding: 9px 12px;
 	border-radius: 8px;
 	font-size: 14px;
 	color: #6a6a6a;
 	text-decoration: none;
 	transition: background 0.15s, color 0.15s;
+}
+.set-nav-item svg {
+	flex-shrink: 0;
+	opacity: 0.75;
+}
+.set-nav-item--on svg {
+	opacity: 1;
 }
 .set-nav-item:hover {
 	background: rgba(0, 0, 0, 0.04);
@@ -64,7 +74,6 @@
 	border: 1px solid rgba(0, 0, 0, 0.08);
 	border-radius: 16px;
 	padding: 26px 28px;
-	min-height: 340px;
 }
 
 .set-banner {
@@ -96,6 +105,17 @@
 	line-height: 1.55;
 	color: #8f8f8f;
 	margin: 0 0 12px;
+}
+
+/* A rule closing the heading block, the way ChatGPT's settings panel does it —
+   it's what makes a stack of rows read as a section rather than a list adrift.
+   Applied as a top border on the first row so the rule lands after the optional
+   sub-line, with no wrapper element needed. */
+.set-heading + .set-row,
+.set-heading + .set-usage,
+.set-sub + .set-row,
+.set-sub + .set-usage {
+	border-top: 1px solid rgba(0, 0, 0, 0.07);
 }
 
 /* ── The row: label left, control right, hairline between ── */
@@ -284,7 +304,9 @@
 /* Usage bar: label + reset time left, track, "n of m" right. */
 .set-usage {
 	display: grid;
-	grid-template-columns: minmax(120px, 1fr) minmax(0, 2fr) auto;
+	/* Wide enough for "Resets 24h after your first message" on one line, so the
+	   two usage rows keep the same height. */
+	grid-template-columns: minmax(215px, 1fr) minmax(0, 1.6fr) auto;
 	align-items: center;
 	gap: 16px;
 	padding: 16px 0;
@@ -351,16 +373,26 @@
 	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
+/* The whole block is centred — heading, caveat, toggle and cards — rather than
+   a left-aligned heading over a centred pill, which reads as a mistake.
+   Claude's upgrade page centres the lot. */
 .set-plan-picker {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
+	text-align: center;
+}
+.set-plan-picker .set-sub {
+	max-width: 46ch;
 }
 .set-plan-cards {
 	width: 100%;
 	display: grid;
 	grid-template-columns: repeat(2, minmax(0, 1fr));
 	gap: 14px;
+	/* Equal height regardless of how many bullets each plan has. */
+	align-items: stretch;
+	text-align: left;
 }
 .set-plan-card {
 	position: relative;
@@ -400,10 +432,20 @@
 	margin: 3px 0 16px;
 }
 .set-plan-price {
-	font-size: 15px;
-	font-weight: 600;
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	font-size: 26px;
+	font-weight: 700;
+	letter-spacing: -0.01em;
 	color: #111111;
 	margin-bottom: 16px;
+}
+.set-plan-price-note {
+	font-size: 12.5px;
+	font-weight: 400;
+	color: #8f8f8f;
+	letter-spacing: 0;
 }
 .set-plan-cta {
 	width: 100%;

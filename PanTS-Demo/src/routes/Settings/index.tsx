@@ -1,3 +1,6 @@
+import {
+	IconCreditCard, IconHistory, IconShieldLock, IconUser,
+} from "@tabler/icons-react";
 import React, { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import Header from "../../components/Header";
@@ -18,12 +21,14 @@ import "./Settings.css";
 // file owns the chrome, the signed-out redirect, and the shared busy/notice
 // state so every action reports success and failure the same way.
 
+// Notifications is deliberately not a section: it's one switch, and a whole
+// page for one switch is a mostly-empty panel. It lives on Profile, the way
+// Claude keeps small preferences inside General.
 const SECTIONS = [
-	{ to: "/account", label: "Profile", end: true },
-	{ to: "/account/plan", label: "Plan" },
-	{ to: "/account/history", label: "History" },
-	{ to: "/account/notifications", label: "Notifications" },
-	{ to: "/account/privacy", label: "Privacy" },
+	{ to: "/account", label: "Profile", icon: IconUser, end: true },
+	{ to: "/account/plan", label: "Plan", icon: IconCreditCard },
+	{ to: "/account/history", label: "History", icon: IconHistory },
+	{ to: "/account/privacy", label: "Privacy", icon: IconShieldLock },
 ];
 
 const SettingsPage: React.FC = () => {
@@ -84,6 +89,7 @@ const SettingsPage: React.FC = () => {
 									`set-nav-item${isActive ? " set-nav-item--on" : ""}`
 								}
 							>
+								<s.icon size={17} stroke={1.7} aria-hidden="true" />
 								{s.label}
 							</NavLink>
 						))}

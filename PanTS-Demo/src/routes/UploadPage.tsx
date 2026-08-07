@@ -118,9 +118,9 @@ type SelectedItem =
 const UploadPage: React.FC = () => {
   const navigate = useNavigate();
   // Running inference requires an account, so any upload action while signed
-  // out opens the sign-in popup instead of proceeding. Sign-in, not sign-up:
-  // most people hitting this already have an account, and the popup offers a
-  // "Sign up" link out to /signup for the ones who don't.
+  // out opens the auth popup instead of proceeding. It opens on sign-in: most
+  // people hitting this already have an account, and the popup switches to
+  // sign-up in one click for the ones who don't.
   const { isAuthenticated, promptAuth, user, refreshUsage } = useAuth();
   const ensureAccount = (): boolean => {
     if (isAuthenticated) return true;

@@ -1,11 +1,11 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { useEffect, type ReactElement } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AuthModal from "../components/AuthModal";
 import { AuthProvider, useAuth } from "../contexts/authContext";
 import SettingsPage from "../routes/Settings";
-import NotificationSettings from "../routes/Settings/NotificationSettings";
+import ProfileSettings from "../routes/Settings/ProfileSettings";
 import LandingPage from "../routes/LandingPage";
 import Homepage from "../routes/Homepage";
 import UploadPage from "../routes/UploadPage";
@@ -70,11 +70,11 @@ describe("route smoke tests", () => {
         <AuthModal />
       </>,
     );
-    expect(await screen.findByText("Sign in with Google")).toBeInTheDocument();
-    expect(screen.getByText("Sign in with GitHub")).toBeInTheDocument();
+    expect(await screen.findByText("Continue with Google")).toBeInTheDocument();
+    expect(screen.getByText("Continue with GitHub")).toBeInTheDocument();
   });
 
-  it("AuthModal offers sign up as a link to the /signup page, not a popup mode", async () => {
+  it("AuthModal switches to sign up in place, without navigating away", async () => {
     const Trigger = () => {
       const { promptAuth } = useAuth();
       useEffect(() => promptAuth(), [promptAuth]);
@@ -86,10 +86,14 @@ describe("route smoke tests", () => {
         <AuthModal />
       </>,
     );
-    expect(await screen.findByRole("link", { name: "Sign up" })).toHaveAttribute(
-      "href",
-      "/signup",
-    );
+    // A button, not a link out to a page.
+    const toggle = await screen.findByRole("button", { name: "Sign up" });
+    expect(screen.queryByRole("link", { name: "Sign up" })).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(
+      await screen.findByRole("dialog", { name: "Create your account" }),
+    ).toBeInTheDocument();
   });
 
   it("Settings renders the email-notification setting when signed in", async () => {
@@ -108,7 +112,7 @@ describe("route smoke tests", () => {
     renderRoute(
       <Routes>
         <Route path="/" element={<SettingsPage />}>
-          <Route index element={<NotificationSettings />} />
+          <Route index element={<ProfileSettings />} />
         </Route>
       </Routes>,
     );

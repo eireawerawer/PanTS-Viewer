@@ -4,19 +4,24 @@ import { Link } from "react-router-dom";
 import { useAuth } from "../contexts/authContext";
 import "./AuthModal.css";
 
-// Global sign-IN popup (light theme, World Labs layout). Opened via
-// authContext.promptAuth() from the header and from gated upload actions.
-// Email/password posts to the API; the provider buttons hand the browser to the
-// backend's OAuth redirect (and are disabled if that provider isn't configured).
+// The one auth popup: signing in and creating an account are the same card with
+// a different title, a different submit button, and terms fine print on the
+// signup side. Claude and ChatGPT both do exactly this — their log-in and
+// create-account screens are the same layout throughout.
 //
-// Signing UP is a full page (routes/SignupPage) — creating an account now
-// involves picking an account type and a plan, which doesn't belong in a popup.
-// This modal only links there.
+// Opened by authContext.promptAuth(mode) from the header, from gated upload
+// actions, and from /signup — which redirects here rather than 404ing, so old
+// links and bookmarks still land somewhere sensible.
+//
+// Providers come first with the email form behind "Continue with email", which
+// keeps the default card short.
 const AuthModal: React.FC = () => {
 	const {
-		authPrompt, closeAuthPrompt, signIn,
+		authPrompt, closeAuthPrompt, promptAuth, signIn, signUp,
 		signInWithProvider, oauthProviders, oauthError, clearOauthError,
 	} = useAuth();
+
+	const isSignup = authPrompt.mode === "signup";
 
 	// "email mode" reveals the email/password form (World Labs' "Continue with email").
 	const [emailMode, setEmailMode] = useState(false);
@@ -32,6 +37,12 @@ const AuthModal: React.FC = () => {
 			setEmail(""); setPassword(""); setError(""); setBusy(false);
 		}
 	}, [authPrompt.open]);
+
+	// Flipping between sign-in and sign-up clears the password and any error —
+	// a rejected sign-in shouldn't still be showing over the signup form.
+	useEffect(() => {
+		setPassword(""); setError("");
+	}, [authPrompt.mode]);
 
 	// Surface an error the OAuth callback redirected back with.
 	useEffect(() => {
@@ -60,11 +71,12 @@ const AuthModal: React.FC = () => {
 		if (!email.trim() || !password) { setError("Enter an email and password."); return; }
 		setBusy(true);
 		try {
-			await signIn(email, password);
+			if (isSignup) await signUp(email, password);
+			else await signIn(email, password);
 			// authContext auto-closes the popup once the user is set.
 		} catch (err) {
-			// Surface the API's message ("Invalid email or password", ...) rather
-			// than a generic string.
+			// Surface the API's message ("Invalid email or password", "An account
+			// with that email already exists", ...) rather than a generic string.
 			setError(err instanceof Error && err.message ? err.message : "Something went wrong. Try again.");
 		} finally {
 			setBusy(false);
@@ -73,11 +85,17 @@ const AuthModal: React.FC = () => {
 
 	return (
 		<div className="authm-backdrop" onClick={dismiss}>
-			<div className="authm-card" role="dialog" aria-modal="true" aria-label="Sign in" onClick={(e) => e.stopPropagation()}>
+			<div
+				className="authm-card"
+				role="dialog"
+				aria-modal="true"
+				aria-label={isSignup ? "Create your account" : "Sign in"}
+				onClick={(e) => e.stopPropagation()}
+			>
 				<button type="button" className="authm-close" aria-label="Close" onClick={dismiss}>×</button>
 
 				<img src="/bodymaps-logo.svg" alt="" className="authm-logo" />
-				<h2 className="authm-title">Sign in</h2>
+				<h2 className="authm-title">{isSignup ? "Create your account" : "Sign in"}</h2>
 
 				{!emailMode ? (
 					<>
@@ -90,7 +108,7 @@ const AuthModal: React.FC = () => {
 							onClick={() => signInWithProvider("google")}
 						>
 							<IconBrandGoogle size={18} />
-							Sign in with Google
+							Continue with Google
 						</button>
 						<button
 							type="button"
@@ -100,7 +118,7 @@ const AuthModal: React.FC = () => {
 							onClick={() => signInWithProvider("github")}
 						>
 							<IconBrandGithub size={18} />
-							Sign in with GitHub
+							Continue with GitHub
 						</button>
 
 						{/* Errors bounced back from the OAuth callback land here. */}
@@ -121,22 +139,51 @@ const AuthModal: React.FC = () => {
 						</label>
 						<label className="authm-field">
 							<span className="authm-label">Password</span>
-							<input type="password" autoComplete="current-password" className="authm-input"
-								value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+							<input
+								type="password"
+								autoComplete={isSignup ? "new-password" : "current-password"}
+								className="authm-input"
+								value={password}
+								onChange={(e) => setPassword(e.target.value)}
+								placeholder={isSignup ? "At least 8 characters" : "••••••••"}
+							/>
 						</label>
 						{error && <div className="authm-error">{error}</div>}
 						<button type="submit" className="authm-submit" disabled={busy}>
-							{busy ? "…" : "Sign in"}
+							{busy ? "…" : isSignup ? "Create account" : "Sign in"}
 						</button>
 						<button type="button" className="authm-back" onClick={() => setEmailMode(false)}>
-							← Other sign-in options
+							← Other options
 						</button>
 					</form>
 				)}
 
+				{/* Consent by continuing rather than a checkbox, on the signup side
+				    only — that's the moment the account is created. */}
+				{isSignup && (
+					<p className="authm-fineprint">
+						By continuing you agree to our{" "}
+						<Link to="/terms" target="_blank">Terms of Service</Link> and{" "}
+						<Link to="/privacy" target="_blank">Privacy Policy</Link>.
+					</p>
+				)}
+
 				<div className="authm-toggle">
-					Don't have an account?{" "}
-					<Link to="/signup" className="authm-link" onClick={dismiss}>Sign up</Link>
+					{isSignup ? (
+						<>
+							Already have an account?{" "}
+							<button type="button" className="authm-link" onClick={() => promptAuth("signin")}>
+								Sign in
+							</button>
+						</>
+					) : (
+						<>
+							Don't have an account?{" "}
+							<button type="button" className="authm-link" onClick={() => promptAuth("signup")}>
+								Sign up
+							</button>
+						</>
+					)}
 				</div>
 			</div>
 		</div>

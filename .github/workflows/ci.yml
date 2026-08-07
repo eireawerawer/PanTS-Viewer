@@ -100,6 +100,12 @@ jobs:
       - name: OAuth unit + endpoint tests
         run: python -m pytest tests/unit/test_oauth_linking.py tests/functional/test_oauth_endpoints.py -v
 
+      # Plan limits: which models a plan may run, the rolling daily quota, the
+      # concurrency slot, and the assistant allowance. These gate real work, so a
+      # regression here silently hands out free GPU time.
+      - name: Plan-limit unit tests
+        run: python -m pytest tests/unit/test_plan_store.py -v
+
       # All migrations must apply cleanly against a fresh SQLite DB and round-trip.
       - name: Alembic migration smoke
         env:

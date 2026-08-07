@@ -64,6 +64,7 @@ export type PlanUsage = {
 };
 
 export type AuthProvider2 = "google" | "github";
+export type AuthMode = "signin" | "signup";
 
 type AuthContextValue = {
 	user: AuthUser | null;
@@ -97,10 +98,12 @@ type AuthContextValue = {
 	/** Current plan usage, or null until loaded. Refreshed by refreshUsage(). */
 	usage: PlanUsage | null;
 	refreshUsage: () => Promise<void>;
-	// Global sign-in popup, opened from the header or any gated action. Signing
-	// up is a page (/signup), so this has no signup mode.
-	authPrompt: { open: boolean };
-	promptAuth: () => void;
+	// Global auth popup, opened from the header or any gated action. Signing up
+	// and signing in are the same card with a different title, the way both
+	// Claude and ChatGPT do it — `mode` picks which.
+	authPrompt: { open: boolean; mode: AuthMode };
+	/** Defaults to sign-in: most people reaching a gate already have an account. */
+	promptAuth: (mode?: AuthMode) => void;
 	closeAuthPrompt: () => void;
 	/** Error surfaced by the OAuth callback redirect (?auth_error=...), if any. */
 	oauthError: string | null;
@@ -167,7 +170,9 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
 	const [user, setUser] = useState<AuthUser | null>(null);
 	const [loading, setLoading] = useState(true);
-	const [authPrompt, setAuthPrompt] = useState<{ open: boolean }>({ open: false });
+	const [authPrompt, setAuthPrompt] = useState<{ open: boolean; mode: AuthMode }>({
+		open: false, mode: "signin",
+	});
 	const [oauthProviders, setOauthProviders] = useState<Record<AuthProvider2, boolean> | null>(null);
 	const [usage, setUsage] = useState<PlanUsage | null>(null);
 	// The OAuth callback redirects back with ?auth_error=... on failure (e.g. an
@@ -222,8 +227,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	// If we came back from a failed OAuth attempt, show the popup with the error.
+	// Sign-in mode: the failure message tells them what to do, and the signup
+	// side's terms fine print would be noise on top of an error.
 	useEffect(() => {
-		if (oauthError) setAuthPrompt({ open: true });
+		if (oauthError) setAuthPrompt({ open: true, mode: "signin" });
 	}, [oauthError]);
 
 	// Cross-tab: another tab signed in/out -> re-check.
@@ -289,12 +296,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 	}, []);
 
-	const promptAuth = useCallback(() => setAuthPrompt({ open: true }), []);
-	const closeAuthPrompt = useCallback(() => setAuthPrompt({ open: false }), []);
+	const promptAuth = useCallback(
+		(mode: AuthMode = "signin") => setAuthPrompt({ open: true, mode }),
+		[]
+	);
+	const closeAuthPrompt = useCallback(
+		() => setAuthPrompt((p) => ({ ...p, open: false })),
+		[]
+	);
 
 	// Auto-close the popup once a user is established.
 	useEffect(() => {
-		if (user) setAuthPrompt((p) => (p.open ? { open: false } : p));
+		if (user) setAuthPrompt((p) => (p.open ? { ...p, open: false } : p));
 	}, [user]);
 
 	const updatePreferences = useCallback(

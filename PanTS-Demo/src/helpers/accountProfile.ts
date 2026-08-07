@@ -84,12 +84,21 @@ export type Plan = {
 	group: PlanGroup;
 	/** One line under the name. Six words is the budget. */
 	blurb: string;
-	/** Shown where a price goes. No numbers: pricing hasn't been set. */
+	/**
+	 * The headline figure. Billing lands before launch; until it does, /me/plan
+	 * is a column write and switching plans grants the tier immediately. The
+	 * limits attached to a plan are enforced for real either way.
+	 */
 	price: string;
+	/** Small print under the price ("per month"). */
+	priceNote?: string;
 	/** Small pill in the card's top corner (member counts), if any. */
 	badge?: string;
 	/** Renders "Everything in <that plan>, plus:" above the bullets. */
 	inherits?: PlanId;
+	/** Lead line above the bullets on a plan that inherits nothing. Present so
+	 *  every card has one and the bullet lists line up across the row. */
+	pointsLead?: string;
 	/** Short noun phrases, not sentences. */
 	points: string[];
 	cta: string;
@@ -101,15 +110,14 @@ export const PLANS: Plan[] = [
 		label: "Free",
 		group: "individual",
 		blurb: "Try BodyMaps",
-		// Not "Free" — that's the plan's name, and repeating it in the price slot
-		// reads as a rendering bug.
-		price: "No cost",
+		price: "$0",
+		priceNote: "per month",
+		pointsLead: "Includes:",
 		points: [
 			"3 scans a day",
 			"LesionSegmenter model",
 			"Full viewer and 3D reconstruction",
 			"10 assistant messages a day",
-			"Results kept 7 days",
 		],
 		cta: "Start free",
 	},
@@ -118,7 +126,8 @@ export const PLANS: Plan[] = [
 		label: "Pro",
 		group: "individual",
 		blurb: "For everyday clinical and research work",
-		price: "Not priced yet",
+		price: "$1.99",
+		priceNote: "per month",
 		inherits: "free",
 		points: [
 			"50 scans a day",
@@ -126,7 +135,6 @@ export const PLANS: Plan[] = [
 			"5 scans at once",
 			"Priority in the queue",
 			"Create reports and annotations",
-			"Results kept a year",
 		],
 		cta: "Upgrade to Pro",
 	},
@@ -135,7 +143,8 @@ export const PLANS: Plan[] = [
 		label: "Team",
 		group: "team",
 		blurb: "For a practice or lab",
-		price: "Not priced yet",
+		price: "$4.99",
+		priceNote: "per month",
 		badge: "2–15 members",
 		inherits: "pro",
 		// No "everything in Pro per member" bullet: the inherits line above the
@@ -155,6 +164,7 @@ export const PLANS: Plan[] = [
 		blurb: "For a hospital or institution",
 		// "Talk to us" is the button; the price slot needs to say something else.
 		price: "Custom",
+		priceNote: "volume pricing",
 		badge: "15+ members",
 		inherits: "team",
 		points: [

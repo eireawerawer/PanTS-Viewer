@@ -7,7 +7,6 @@ import AuthModal from "../components/AuthModal";
 import { AuthProvider } from "../contexts/authContext";
 import SettingsPage from "../routes/Settings";
 import HistorySettings from "../routes/Settings/HistorySettings";
-import NotificationSettings from "../routes/Settings/NotificationSettings";
 import PlanSettings from "../routes/Settings/PlanSettings";
 import PrivacySettings from "../routes/Settings/PrivacySettings";
 import ProfileSettings from "../routes/Settings/ProfileSettings";
@@ -93,8 +92,7 @@ const renderAt = (path = "/account", signedOutElement: ReactElement = <div>Landi
 						<Route index element={<ProfileSettings />} />
 						<Route path="plan" element={<PlanSettings />} />
 						<Route path="history" element={<HistorySettings />} />
-						<Route path="notifications" element={<NotificationSettings />} />
-						<Route path="privacy" element={<PrivacySettings />} />
+							<Route path="privacy" element={<PrivacySettings />} />
 					</Route>
 					<Route path="/" element={signedOutElement} />
 				</Routes>
@@ -114,7 +112,6 @@ describe("navigation", () => {
 		for (const [link, heading] of [
 			["Plan", "Usage"],
 			["History", "History"],
-			["Notifications", "Notifications"],
 			["Privacy", "Your data"],
 		] as const) {
 			await user.click(screen.getByRole("link", { name: link }));
@@ -129,24 +126,34 @@ describe("navigation", () => {
 });
 
 describe("display name", () => {
-	it("falls back to the email when no name is set", async () => {
+	it("shows the email-derived name as a placeholder, not a value to delete", async () => {
 		renderAt();
-		expect(await screen.findByText("Test User")).toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Add" })).toBeInTheDocument();
+		const field = await screen.findByLabelText("Name");
+		expect(field).toHaveValue("");
+		expect(field).toHaveAttribute("placeholder", "Test User");
 	});
 
-	it("saves a new name", async () => {
+	it("saves on blur without an edit mode", async () => {
 		const user = userEvent.setup();
 		renderAt();
 
-		await user.click(await screen.findByRole("button", { name: "Add" }));
-		await user.type(screen.getByLabelText(/Display name/i), "Ada Lovelace");
-		await user.click(screen.getByRole("button", { name: "Save" }));
+		await user.type(await screen.findByLabelText("Name"), "Ada Lovelace");
+		await user.tab();
 
 		await waitFor(() =>
 			expect(lastCall("PATCH", "/api/auth/me")?.body).toEqual({ name: "Ada Lovelace" })
 		);
-		expect(await screen.findByText("Ada Lovelace")).toBeInTheDocument();
+		expect(await screen.findByText(/Your name has been updated/i)).toBeInTheDocument();
+	});
+
+	it("does not fire a request when the field is left unchanged", async () => {
+		const user = userEvent.setup();
+		renderAt();
+
+		await user.click(await screen.findByLabelText("Name"));
+		await user.tab();
+
+		expect(lastCall("PATCH", "/api/auth/me")).toBeUndefined();
 	});
 
 	it("surfaces a save failure instead of silently doing nothing", async () => {
@@ -161,11 +168,16 @@ describe("display name", () => {
 		}) as unknown as typeof fetch;
 
 		renderAt();
-		await user.click(await screen.findByRole("button", { name: "Add" }));
-		await user.type(screen.getByLabelText(/Display name/i), "x");
-		await user.click(screen.getByRole("button", { name: "Save" }));
+		await user.type(await screen.findByLabelText("Name"), "x");
+		await user.tab();
 
 		expect(await screen.findByText("Name must be text")).toBeInTheDocument();
+	});
+
+	it("keeps the notification switch on Profile rather than a page of its own", async () => {
+		renderAt();
+		expect(await screen.findByText("Email me when a scan finishes")).toBeInTheDocument();
+		expect(screen.queryByRole("link", { name: "Notifications" })).not.toBeInTheDocument();
 	});
 });
 
@@ -208,10 +220,12 @@ describe("plan", () => {
 		expect(await screen.findByText("You're on Pro.")).toBeInTheDocument();
 	});
 
-	it("quotes no prices", async () => {
+	it("shows each plan's price with the period it covers", async () => {
 		renderAt("/account/plan");
 		await screen.findByRole("heading", { name: "Change plan" });
-		expect(document.body.textContent).not.toMatch(/[$£€]\s?\d/);
+		expect(screen.getByText("$0")).toBeInTheDocument();
+		expect(screen.getByText("$1.99")).toBeInTheDocument();
+		expect(screen.getAllByText("per month").length).toBe(2);
 	});
 });
 
