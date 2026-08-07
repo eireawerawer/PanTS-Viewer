@@ -6,6 +6,36 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useNavigate } from "react-router-dom";
+import BatchDetailsModal from "../components/BatchDetailsModal";
+import Header from "../components/Header";
+import ProcessingSummaryBar from "../components/ProcessingSummaryBar";
+import { useAuth } from "../contexts/authContext";
+import { postWithRetry, resolveResumeStart } from "../helpers/chunkUpload";
+import { API_BASE } from "../helpers/constants";
+import { looksLikeDicom, setLocalDicomFiles } from "../helpers/dicomLocal";
+import { setLocalNiftiFile } from "../helpers/localNifti";
+import {
+  chunkSizeOf,
+  deletePendingUpload,
+  loadPendingUploads,
+  savePendingUpload,
+  setPendingNextChunk,
+  setPendingUploaded,
+  type PendingUpload,
+} from "../helpers/pendingUploads";
+import {
+  addRecentUpload,
+  formatRelativeTime,
+  groupUploads,
+  isGroupInFlight,
+  loadRecentUploads,
+  recentStatusColor,
+  removeRecentUpload,
+  updateRecentUploadStatus,
+  type RecentUpload,
+} from "../helpers/recentUploads";
+import "./UploadPage.css";
 
 const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
@@ -43,42 +73,102 @@ const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
     label: "LesionSegmenter",
     desc: "For fast pancreatic lesion detection",
   },
+  {
+    id: "cads551",
+    label: "CADS-551 (Abdominal Organs)",
+    desc: "Spleen, kidneys, liver, stomach, aorta, IVC, pancreas, adrenal glands, lung lobes",
+  },
+  {
+    id: "cads552",
+    label: "CADS-552 (Vertebrae)",
+    desc: "All 24 spinal vertebrae, C1-L5 — segmentation only, no viewer preview yet",
+  },
+  {
+    id: "cads553",
+    label: "CADS-553 (Thorax & Pelvis)",
+    desc: "Heart chambers, great vessels, brain, bowel, bladder, esophagus",
+  },
+  {
+    id: "cads554",
+    label: "CADS-554 (Pelvic & Limb Bones)",
+    desc: "Hip, femur, humerus, scapula, clavicle, pelvic/hip muscles",
+  },
+  {
+    id: "cads555",
+    label: "CADS-555 (Ribs)",
+    desc: "All 24 ribs, left and right — segmentation only, no viewer preview yet",
+  },
+  {
+    id: "cads556",
+    label: "CADS-556 (Pelvic Organs)",
+    desc: "Rectum, prostate, sigmoid, mammary glands, abdominal wall muscles",
+  },
+  {
+    id: "cads557",
+    label: "CADS-557 (Brain Tissue)",
+    desc: "White/gray matter, CSF, skull, scalp — segmentation only, no viewer preview yet",
+  },
+  {
+    id: "cads558",
+    label: "CADS-558 (Head & Neck OARs)",
+    desc: "Radiotherapy organs-at-risk: parotids, cochlea, optic nerves, mandible — segmentation only, no viewer preview yet",
+  },
+  {
+    id: "cads559",
+    label: "CADS-559 (Body Composition)",
+    desc: "Coarse tissue classes: fat, muscle, bone, cavities — segmentation only, no viewer preview yet",
+  },
+  {
+    id: "moose888",
+    label: "MOOSE-888 (Cardiac & Great Vessels)",
+    desc: "Heart chambers, aorta, iliac vessels, pulmonary artery, portal/splenic vein",
+  },
+  {
+    id: "moose666",
+    label: "MOOSE-666 (Skeleton)",
+    desc: "Full-body bones — only femurs land in the current viewer palette",
+  },
+  {
+    id: "airrc",
+    label: "AIRRC (Airway & Pulmonary Vessels)",
+    desc: "Airway tree, airway wall, pulmonary arteries/veins — segmentation only, no viewer preview yet",
+  },
+  {
+    id: "atm",
+    label: "ATM (Airway Tree)",
+    desc: "Tracheobronchial airway tree only — segmentation only, no viewer preview yet",
+  },
+  {
+    id: "lvp",
+    label: "LVP (Liver Vessels)",
+    desc: "Hepatic and portal vein trees — segmentation only, no viewer preview yet",
+  },
+  {
+    id: "vsmtrans",
+    label: "VSmTrans (Abdominal Organs)",
+    desc: "25-class abdominal transfer model — aorta, kidneys, liver, pancreas, and more",
+  },
+  {
+    id: "saros_nnunet",
+    label: "SAROS (Body Composition)",
+    desc: "Whole-body tissue composition (SAROS dataset) — segmentation only, no viewer preview yet",
+  },
+  {
+    id: "nnunet_private",
+    label: "nnU-Net Private (Abdominal + Liver Segments)",
+    desc: "34-class abdominal organs plus Couinaud liver segments",
+  },
+  {
+    id: "daps",
+    label: "DAPS (Detailed Anatomy)",
+    desc: "Fine-grained thoracic/pelvic structures — segmentation only, no viewer preview yet",
+  },
 ];
-import { useNavigate } from "react-router-dom";
-import "./UploadPage.css";
 
 // Lazy so NiiVue / Cornerstone aren't pulled into the upload bundle until a file
 // is actually previewed. CtPreview handles NIfTI, DicomPreview handles a DICOM series.
 const CtPreview = lazy(() => import("../components/CtPreview/CtPreview"));
 const DicomPreview = lazy(() => import("../components/CtPreview/DicomPreview"));
-import { API_BASE } from "../helpers/constants";
-import {
-  addRecentUpload,
-  formatRelativeTime,
-  groupUploads,
-  isGroupInFlight,
-  loadRecentUploads,
-  recentStatusColor,
-  removeRecentUpload,
-  updateRecentUploadStatus,
-  type RecentUpload,
-} from "../helpers/recentUploads";
-import Header from "../components/Header";
-import ProcessingSummaryBar from "../components/ProcessingSummaryBar";
-import BatchDetailsModal from "../components/BatchDetailsModal";
-import { useAuth } from "../contexts/authContext";
-import { looksLikeDicom, setLocalDicomFiles } from "../helpers/dicomLocal";
-import { setLocalNiftiFile } from "../helpers/localNifti";
-import {
-  chunkSizeOf,
-  deletePendingUpload,
-  loadPendingUploads,
-  savePendingUpload,
-  setPendingNextChunk,
-  setPendingUploaded,
-  type PendingUpload,
-} from "../helpers/pendingUploads";
-import { postWithRetry, resolveResumeStart } from "../helpers/chunkUpload";
 
 const parseApiResponse = async (res: Response): Promise<any> => {
   const contentType = res.headers.get("content-type") || "";
@@ -153,17 +243,7 @@ const UploadPage: React.FC = () => {
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [inferenceCompleted, setInferenceCompleted] = useState<boolean>(false);
-  const [selectedModel, setSelectedModel] = useState<
-    | "None"
-    | "ePAI"
-    | "SuPreM"
-    | "OpenVAE"
-    | "MedFormer"
-    | "R-Super"
-    | "Atlas-Net"
-    | "LesionSegmenter"
-    | ""
-  >("None");
+  const [selectedModel, setSelectedModel] = useState<string>("None");
   const [modelDropOpen, setModelDropOpen] = useState(false);
   // LesionSegmenter computes liver/pancreatic/kidney/colon lesions in one pass;
   // this selects which lesion to feature. Only pancreatic is GT-validated; the

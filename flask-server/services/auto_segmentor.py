@@ -4,13 +4,30 @@ import signal
 import subprocess
 import re
 import csv
+import json
 import shlex
 import shutil
 import threading
 from dotenv import load_dotenv
 
+from constants import Constants
+
 # Load environment variables
 load_dotenv()
+
+# media-agentic-ai checkpoint locations 
+# MEDIA_AGENTIC_AI_PATH: the HF export as cloned to disk (flat FP16 checkpoints,
+# see media-agentic-ai-fp16/README.md). Defaults to the sibling clone used in dev.
+# MEDIA_AGENTIC_PREPARED_DIR: writable cache the FP32 modelfolders get
+
+MEDIA_AGENTIC_AI_PATH = os.getenv(
+    "MEDIA_AGENTIC_AI_PATH",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "media-agentic-ai-fp16")),
+)
+MEDIA_AGENTIC_PREPARED_DIR = os.getenv(
+    "MEDIA_AGENTIC_PREPARED_DIR",
+    os.path.join(Constants.SESSIONS_DIR_NAME, "model_cache", "media_agentic"),
+)
 
 # Only one model inference runs at a time to avoid GPU OOM
 _gpu_lock = threading.Lock()
@@ -94,6 +111,21 @@ def cancel_all_inference():
         sids = list(_session_procs.keys())
     for sid in sids:
         cancel_session(sid)
+
+def _conda_env_bin_dir(conda_exe: str, env_name: str) -> str | None:
+    """`conda run -n atlasnet python` can silently execute the
+    venv's python (torch-less) instead of the conda python. Checks the two conventional env
+    locations; returns None if neither has it, so callers can fall back to
+    `conda run` (accepting that risk) rather than break outright."""
+    for base in (
+        os.path.expanduser("~/.conda/envs"),
+        os.path.join(os.path.dirname(os.path.dirname(conda_exe)), "envs"),
+    ):
+        candidate = os.path.join(base, env_name, "bin")
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
 
 def get_least_used_gpu(default_gpu=None):
     if default_gpu is None:
@@ -189,6 +221,8 @@ def run_auto_segmentation(input_path, session_dir, model, session_id=None, on_st
                 conda_path=conda_path,
                 lesionseg_env_name=os.getenv("CONDA_ENV_LESIONSEG", "epai"),
             )
+        elif model in _MEDIA_AGENTIC_NNUNET_MODELS:
+            return _run_media_agentic_inference(model_key=model, input_path=input_path, session_dir=session_dir)
         else:
             raise ValueError(f"Unknown model: {model}")
 
@@ -852,7 +886,7 @@ def _run_atlasnet_inference(input_path: str, session_dir: str, conda_path: str, 
         f"-o {shlex.quote(save_dir)} "
         f"-m {shlex.quote(ckpt_path)} "
         f"-f all "
-        f"-npp 2 -nps 2 "
+        f"-npp 1 -nps 1 "
         f"-chk checkpoint_final.pth"
     )
 
@@ -968,6 +1002,168 @@ def _run_lesionsegmenter_inference(input_path: str, session_dir: str, conda_path
     combined_label_path = os.path.join(output_ct_dir, "combined_labels.nii.gz")
     shutil.copy2(case_pred, combined_label_path)
     _remap_combined_labels(combined_label_path, _LESIONSEG_TO_VIEWER)
+
+    return output_ct_dir
+
+_MEDIA_AGENTIC_NNUNET_MODELS = {
+    "cads551", "cads552", "cads553", "cads554", "cads555",
+    "cads556", "cads557", "cads558", "cads559",
+    "moose888", "moose666", "airrc", "atm", "lvp", "vsmtrans",
+    "saros_nnunet", "nnunet_private", "daps",
+}
+
+# Normalize name variants
+_MEDIA_AGENTIC_NAME_ALIASES = {
+    "gallbladder": "gall_bladder",
+    "celiac_aa": "celiac_artery",
+    "celiac_trunk": "celiac_artery",
+    "urinary_bladder": "bladder",
+    "inferior_vena_cava": "postcava",
+    "small_intestine": "intestine",
+    "small_bowel": "intestine",
+    "portal_vein_and_splenic_vein": "veins",
+    "portal_splenic_vein": "veins",
+    "portal_splenic_veins": "veins",
+    "hepatic_vessel": "veins",
+    "lung_upper_lobe_left": "lung_left",
+    "lung_lower_lobe_left": "lung_left",
+    "lung_upper_lobe_right": "lung_right",
+    "lung_middle_lobe_right": "lung_right",
+    "lung_lower_lobe_right": "lung_right",
+}
+
+_media_agentic_label_map_cache: dict = {}
+
+
+def _parse_simple_inference_config(path: str) -> dict:
+    """Tiny parser for the flat 'key: value' inference_config.yaml files that
+    ship with each media-agentic-ai model folder (no lists/nesting) -- avoids
+    adding PyYAML as a dependency of the Flask app for a handful of scalars."""
+    config = {}
+    with open(path) as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if not line or ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            config[key.strip()] = value.strip().strip("'\"")
+    return config
+
+
+def _media_agentic_label_map(model_key: str, src_dir: str) -> dict:
+    """src label id -> viewer label id, built from <src_dir>/label_mapping.json."""
+    if model_key in _media_agentic_label_map_cache:
+        return _media_agentic_label_map_cache[model_key]
+
+    with open(os.path.join(src_dir, "label_mapping.json")) as f:
+        raw = json.load(f)
+
+    result = {}
+    for name, src_id in raw.items():
+        src_id = int(src_id)
+        if name == "background" or src_id == 0:
+            continue
+        normalized = re.sub(r"[\s-]+", "_", name.strip().lower())
+        viewer_name = _MEDIA_AGENTIC_NAME_ALIASES.get(normalized, normalized)
+        viewer_id = _VIEWER_LABELS.get(viewer_name)
+        if viewer_id is not None:
+            result[src_id] = viewer_id
+
+    _media_agentic_label_map_cache[model_key] = result
+    return result
+
+
+def _run_media_agentic_inference(model_key: str, input_path: str, session_dir: str) -> str:
+    src_dir = os.path.join(MEDIA_AGENTIC_AI_PATH, model_key)
+    config_path = os.path.join(src_dir, "inference_config.yaml")
+    if not os.path.isdir(src_dir) or not os.path.exists(config_path):
+        raise RuntimeError(f"Unknown media-agentic-ai model '{model_key}' (looked in {src_dir})")
+
+    config = _parse_simple_inference_config(config_path)
+    if config.get("backend") != "nnunetv2":
+        raise RuntimeError(
+            f"media-agentic-ai model '{model_key}' uses backend '{config.get('backend')}', "
+            "which has no runner in this deployment yet (only nnunetv2-backed models are supported)."
+        )
+    checkpoint_rel = config.get("checkpoint", "fold_all/checkpoint_final.pth")
+    checkpoint_filename = os.path.basename(checkpoint_rel)
+    fold_dir = checkpoint_rel.split("/")[0]
+    fold_name = fold_dir[len("fold_"):] if fold_dir.startswith("fold_") else "all"
+
+    case_id = _normalize_case_id(input_path)
+    workspace = os.path.join(session_dir, model_key)
+    input_dir = os.path.join(workspace, "eval")
+    save_dir = os.path.join(workspace, "out")
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
+
+    nnunet_input = os.path.join(input_dir, f"{case_id}_0000.nii.gz")
+    if os.path.lexists(nnunet_input):
+        os.remove(nnunet_input)
+    os.symlink(input_path, nnunet_input)
+
+    prepared_dir = os.path.join(MEDIA_AGENTIC_PREPARED_DIR, model_key)
+    conda_env = os.getenv("CONDA_ENV_MEDIA_AGENTIC", os.getenv("CONDA_ENV_ATLASNET", "epai"))
+    conda_exe = shutil.which("conda") or "/home/apps/anaconda3/condabin/conda"
+    selected_gpu = get_least_used_gpu()
+    materialize_script = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "scripts", "materialize_media_agentic_checkpoint.py"
+    )
+
+    env_bin_dir = _conda_env_bin_dir(conda_exe, conda_env)
+    python_bin = shlex.quote(os.path.join(env_bin_dir, "python")) if env_bin_dir else (
+        f"{shlex.quote(conda_exe)} run -n {shlex.quote(conda_env)} python"
+    )
+    predict_bin = shlex.quote(os.path.join(env_bin_dir, "nnUNetv2_predict_from_modelfolder")) if env_bin_dir else (
+        f"{shlex.quote(conda_exe)} run -n {shlex.quote(conda_env)} nnUNetv2_predict_from_modelfolder"
+    )
+
+    materialize_cmd = (
+        f"{python_bin} "
+        f"{shlex.quote(materialize_script)} "
+        f"--src-dir {shlex.quote(src_dir)} "
+        f"--dest-dir {shlex.quote(prepared_dir)} "
+        f"--checkpoint-rel {shlex.quote(checkpoint_rel)}"
+    )
+    print(f"[INFO] Preparing media-agentic-ai checkpoint for {model_key}")
+    print(materialize_cmd)
+    try:
+        _tracked_run(materialize_cmd, shell=True, executable="/bin/bash", check=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"Failed to prepare checkpoint for '{model_key}'\nCommand: {materialize_cmd}\nExit code: {e.returncode}"
+        ) from e
+
+    full_cmd = (
+        f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
+        f"{predict_bin} "
+        f"-i {shlex.quote(input_dir)} "
+        f"-o {shlex.quote(save_dir)} "
+        f"-m {shlex.quote(prepared_dir)} "
+        f"-f {shlex.quote(fold_name)} "
+        f"-npp 1 -nps 1 "
+        # ! remove not on device if enough vram
+        f"--not_on_device "
+        f"-chk {shlex.quote(checkpoint_filename)}"
+    )
+    print(f"[INFO] Running media-agentic-ai '{model_key}' command for case {case_id}")
+    print(full_cmd)
+    try:
+        _tracked_run(full_cmd, shell=True, executable="/bin/bash", check=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"media-agentic-ai '{model_key}' inference command failed\nCommand: {full_cmd}\nExit code: {e.returncode}"
+        ) from e
+
+    case_pred = os.path.join(save_dir, f"{case_id}.nii.gz")
+    if not os.path.exists(case_pred):
+        raise RuntimeError(f"Expected {model_key} output not found: {case_pred}")
+
+    output_ct_dir = os.path.join(session_dir, "outputs", "ct")
+    os.makedirs(output_ct_dir, exist_ok=True)
+    combined_label_path = os.path.join(output_ct_dir, "combined_labels.nii.gz")
+    shutil.copy2(case_pred, combined_label_path)
+    _remap_combined_labels(combined_label_path, _media_agentic_label_map(model_key, src_dir))
 
     return output_ct_dir
 
