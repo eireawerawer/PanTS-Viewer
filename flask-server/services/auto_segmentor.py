@@ -11,6 +11,7 @@ import threading
 from dotenv import load_dotenv
 
 from constants import Constants
+from services.viewer_labels import VIEWER_LABELS
 
 # Load environment variables
 load_dotenv()
@@ -227,22 +228,11 @@ def run_auto_segmentation(input_path, session_dir, model, session_id=None, on_st
             raise ValueError(f"Unknown model: {model}")
 
 
-# Viewer label scheme (constants.ts segmentation_categories, 1-indexed)
-_VIEWER_LABELS = {
-    "adrenal_gland_left": 1, "adrenal_gland_right": 2, "aorta": 3,
-    "bladder": 4, "celiac_artery": 5, "colon": 6, "common_bile_duct": 7,
-    "duodenum": 8, "femur_left": 9, "femur_right": 10, "gall_bladder": 11,
-    "kidney_left": 12, "kidney_right": 13, "liver": 14,
-    "lung_left": 15, "lung_right": 16, "pancreas": 17,
-    "pancreas_body": 18, "pancreas_head": 19, "pancreas_tail": 20,
-    "pancreatic_duct": 21, "pancreatic_lesion": 22, "postcava": 23,
-    "prostate": 24, "spleen": 25, "stomach": 26,
-    "superior_mesenteric_artery": 27, "veins": 28,
-    # extended labels for full ePAI output
-    "intestine": 29, "renal_vein_left": 30, "renal_vein_right": 31, "cbd_stent": 32,
-    # LesionSegmenter extra lesion classes (pancreatic_lesion already at 22)
-    "liver_lesion": 33, "kidney_lesion": 34, "colon_lesion": 35,
-}
+# Viewer label scheme (constants.ts segmentation_categories + EXTENDED_ORGAN_NAMES,
+# 1-indexed). Canonical id<->name source lives in services/viewer_labels.py -- imported,
+# not copied, so mesh_generation.py and the session organ-stats endpoint can't drift
+# out of sync with this the way the old inline copy did.
+_VIEWER_LABELS = VIEWER_LABELS
 
 # ePAI model label → viewer label (all 25 classes from dataset.json)
 _EPAI_TO_VIEWER = {
@@ -1030,6 +1020,84 @@ _MEDIA_AGENTIC_NAME_ALIASES = {
     "lung_upper_lobe_right": "lung_right",
     "lung_middle_lobe_right": "lung_right",
     "lung_lower_lobe_right": "lung_right",
+
+    **{f"vertebrae_l{i}": "vertebrae_lumbar" for i in range(1, 6)},
+    **{f"vertebrae_t{i}": "vertebrae_thoracic" for i in range(1, 13)},
+    **{f"vertebrae_c{i}": "vertebrae_cervical" for i in range(1, 8)},
+
+    # cads555: 24 ribs collapse onto left/right "rib" viewer classes
+    **{f"rib_left_{i}": "rib_left" for i in range(1, 13)},
+    **{f"rib_right_{i}": "rib_right" for i in range(1, 13)},
+
+    # cads553 / moose888 
+    "iliac_vena_left": "iliac_vein_left",
+    "iliac_vena_right": "iliac_vein_right",
+
+    # cads554 (pelvic/limb bones + muscle groups) 
+    "clavicula_left": "clavicle_left",
+    "clavicula_right": "clavicle_right",
+    "gluteus_maximus_left": "muscle", "gluteus_maximus_right": "muscle",
+    "gluteus_medius_left": "muscle", "gluteus_medius_right": "muscle",
+    "gluteus_minimus_left": "muscle", "gluteus_minimus_right": "muscle",
+    "autochthon_left": "muscle", "autochthon_right": "muscle",
+    "iliopsoas_left": "muscle", "iliopsoas_right": "muscle",
+
+    # cads556 (pelvic organs) 
+    "spinal_canal": "spinal_cord",
+    "bowel_bag": "intestine",
+    "left_mammary_gland": "mammary_gland_left",
+    "right_mammary_gland": "mammary_gland_right",
+    "right_psoas_major": "muscle", "left_psoas_major": "muscle",
+    "right_rectus_abdominis": "muscle", "left_rectus_abdominis": "muscle",
+
+    # cads557 (brain tissue) 
+    "eye_balls": "eyeball",
+    "compact_bone": "skull", "spongy_bone": "skull",
+    "head_muscles": "muscle",
+
+    # cads558 (head & neck OARs)
+    "oar_bone_mandible": "mandible",
+    "oar_parotid_l": "parotid_gland_left", "oar_parotid_r": "parotid_gland_right",
+    "oar_cochlea_l": "cochlea_left", "oar_cochlea_r": "cochlea_right",
+    "oar_opticnrv_l": "optic_nerve_left", "oar_opticnrv_r": "optic_nerve_right",
+    "oar_glnd_thyroid": "thyroid",
+    "oar_esophagus_s": "esophagus",
+    "oar_glottis": "larynx", "oar_larynx_sg": "larynx",
+
+    # cads559 / saros_nnunet (coarse body composition)
+    "subcutaneous_tissue": "fat",
+    "bones": "bone",
+    "thyroid_glands": "thyroid",
+
+    # moose666: fine hand/foot/limb bones collapse onto generic "bone" 
+    "carpal_left": "bone", "carpal_right": "bone",
+    "fingers_left": "bone", "fingers_right": "bone",
+    "metacarpal_left": "bone", "metacarpal_right": "bone",
+    "metatarsal_left": "bone", "metatarsal_right": "bone",
+    "patella_left": "bone", "patella_right": "bone",
+    "radius_left": "bone", "radius_right": "bone",
+    "tarsal_left": "bone", "tarsal_right": "bone",
+    "tibia_left": "bone", "tibia_right": "bone",
+    "toes_left": "bone", "toes_right": "bone",
+    "ulna_left": "bone", "ulna_right": "bone",
+    "fibula_left": "bone", "fibula_right": "bone",
+
+    # airrc / atm / lvp
+    "airway_tree": "airway", "airway_wall": "airway",
+    "lung_pulmonary_arteries": "pulmonary_artery",
+    "lung_pulmonary_veins": "pulmonary_vein",
+    "liver_hepatic_vein": "veins", "liver_portal_vein": "veins",
+
+    # nnunet_private: Couinaud liver segments collapse onto "liver"
+    **{f"liver_segment_{i}": "liver" for i in range(1, 9)},
+
+    # daps
+    "thyroid_left": "thyroid", "thyroid_right": "thyroid",
+    "breast_left": "mammary_gland_left", "breast_right": "mammary_gland_right",
+    "sternum_corpus": "sternum", "sternum_manubrium": "sternum",
+    "heart_tissue": "heart",
+    "bronchus": "airway",
+    "eyeball_left": "eyeball", "eyeball_right": "eyeball",
 }
 
 _media_agentic_label_map_cache: dict = {}

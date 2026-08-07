@@ -4,6 +4,7 @@ from services.nifti_processor import NiftiProcessor
 from services.session_manager import SessionManager, generate_uuid
 from services.auto_segmentor import run_auto_segmentation, cancel_session, cancel_all_inference
 from services.mesh_generation import generate_mesh_manifest, generate_organ_glb_bytes, LABELS as MESH_LABELS
+from services.viewer_labels import VIEWER_LABELS
 from services.inference_job_queue import InferenceJobQueue
 from services.intent_parser import parse_intent
 from services.ollama_client import (
@@ -394,20 +395,63 @@ def upload():
         print(f"❌ [Upload Error] {e}")
         return jsonify({"error": "Internal server error"}), 500
 
+def _get_session_mask_data(session_id):
+    """Organ stats for an upload/inference session -- the session-viewer counterpart
+    of get_mask_data_internal's dataset-case path. Reads the session's own CT +
+    combined_labels.nii.gz and scores every id in the full
+    viewer label scheme (services/viewer_labels.py), not just the dataset's main classes
+
+    Returns None when session_id isn't a recognized inference session at all (the
+    caller then falls back to the dataset-case path, e.g. for the "Local NIfTI" /
+    "Local DICOM" pseudo-ids used by the local-preview routes).
+    """
+    job = _get_inference_job(session_id)
+    if not job:
+        return None
+
+    ct_path = job.get("ct_path")
+    output_mask_dir = job.get("output_mask_dir")
+    seg_path = os.path.join(output_mask_dir, "combined_labels.nii.gz") if output_mask_dir else None
+    if not ct_path or not os.path.exists(ct_path) or not seg_path or not os.path.exists(seg_path):
+        return {"error": "Session results are not ready yet"}
+
+    try:
+        processor = NiftiProcessor(ct_path, seg_path, organ_intensities=VIEWER_LABELS)
+        result = processor.calculate_metrics()
+    except Exception as e:
+        return {"error": str(e)}
+
+    # Only the organs this session's model actually produced -- calculate_metrics()
+    # returns a zeroed entry (voxel_count 0) for every one of the ~90 scheme ids that
+    # isn't present, so the stats table doesn't fill up with organs the model never
+    # touches (same "only what the AI segments" rule as the checkbox panel/meshes).
+    result["organ_metrics"] = [
+        m for m in result.get("organ_metrics", []) if (m.get("voxel_count") or 0) > 0
+    ]
+    return result
+
+
 @api_blueprint.route('/mask-data', methods=['POST'])
 def get_mask_data():
     session_key = request.form.get('sessionKey')
     if not session_key:
         return jsonify({"error": "Missing sessionKey"}), 400
 
+    session_key = str(session_key).strip()
+
+    if not session_key.isdigit():
+        session_result = _get_session_mask_data(session_key)
+        if session_result is not None:
+            return jsonify(session_result)
+
     result = get_mask_data_internal(session_key)
 
     # For numeric PanTS cases, fall back to the robust label-based computation
     # (with HuggingFace download) when the local dataset path is unavailable,
     # so organ statistics resolve even without a full local PanTS install.
-    if str(session_key).strip().isdigit():
+    if session_key.isdigit():
         if not isinstance(result, dict) or result.get("error") or not result.get("organ_metrics"):
-            robust = _ai_compute_organ_metrics_from_labels(str(session_key).strip())
+            robust = _ai_compute_organ_metrics_from_labels(session_key)
             if robust and robust.get("organ_metrics"):
                 result = robust
 

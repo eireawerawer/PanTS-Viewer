@@ -81,7 +81,7 @@ const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "cads552",
     label: "CADS-552 (Vertebrae)",
-    desc: "All 24 spinal vertebrae, C1-L5 — segmentation only, no viewer preview yet",
+    desc: "All 24 spinal vertebrae, C1-L5 — shown in the viewer as cervical/thoracic/lumbar",
   },
   {
     id: "cads553",
@@ -96,7 +96,7 @@ const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "cads555",
     label: "CADS-555 (Ribs)",
-    desc: "All 24 ribs, left and right — segmentation only, no viewer preview yet",
+    desc: "All 24 ribs, left and right — shown in the viewer as one class per side",
   },
   {
     id: "cads556",
@@ -106,17 +106,17 @@ const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "cads557",
     label: "CADS-557 (Brain Tissue)",
-    desc: "White/gray matter, CSF, skull, scalp — segmentation only, no viewer preview yet",
+    desc: "White/gray matter, CSF, skull, scalp, eyeballs — all shown in the viewer",
   },
   {
     id: "cads558",
     label: "CADS-558 (Head & Neck OARs)",
-    desc: "Radiotherapy organs-at-risk: parotids, cochlea, optic nerves, mandible — segmentation only, no viewer preview yet",
+    desc: "Radiotherapy organs-at-risk: parotids, cochlea, optic nerves, mandible, thyroid shown in the viewer; other fine OARs segmentation-only",
   },
   {
     id: "cads559",
     label: "CADS-559 (Body Composition)",
-    desc: "Coarse tissue classes: fat, muscle, bone, cavities — segmentation only, no viewer preview yet",
+    desc: "Coarse tissue classes: fat, muscle, bone shown in the viewer; cavities segmentation-only",
   },
   {
     id: "moose888",
@@ -126,22 +126,22 @@ const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "moose666",
     label: "MOOSE-666 (Skeleton)",
-    desc: "Full-body bones — only femurs land in the current viewer palette",
+    desc: "Full-body bones — femurs, humerus, scapula, clavicle, and skull get their own colors; the rest share one generic bone class",
   },
   {
     id: "airrc",
     label: "AIRRC (Airway & Pulmonary Vessels)",
-    desc: "Airway tree, airway wall, pulmonary arteries/veins — segmentation only, no viewer preview yet",
+    desc: "Airway tree/wall and pulmonary arteries/veins — all shown in the viewer",
   },
   {
     id: "atm",
     label: "ATM (Airway Tree)",
-    desc: "Tracheobronchial airway tree only — segmentation only, no viewer preview yet",
+    desc: "Tracheobronchial airway tree only — shown in the viewer",
   },
   {
     id: "lvp",
     label: "LVP (Liver Vessels)",
-    desc: "Hepatic and portal vein trees — segmentation only, no viewer preview yet",
+    desc: "Hepatic and portal vein trees — shown in the viewer as veins",
   },
   {
     id: "vsmtrans",
@@ -151,7 +151,7 @@ const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "saros_nnunet",
     label: "SAROS (Body Composition)",
-    desc: "Whole-body tissue composition (SAROS dataset) — segmentation only, no viewer preview yet",
+    desc: "Whole-body tissue composition (SAROS dataset) — fat, muscle, bone, brain, spinal cord, thyroid shown in the viewer",
   },
   {
     id: "nnunet_private",
@@ -161,7 +161,7 @@ const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "daps",
     label: "DAPS (Detailed Anatomy)",
-    desc: "Fine-grained thoracic/pelvic structures — segmentation only, no viewer preview yet",
+    desc: "Fine-grained thoracic/pelvic structures — heart chambers, mammary glands, thyroid, sternum, eyeballs, airway shown in the viewer; remaining structures segmentation-only",
   },
 ];
 

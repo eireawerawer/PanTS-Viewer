@@ -100,6 +100,13 @@ jobs:
       - name: OAuth unit + endpoint tests
         run: python -m pytest tests/unit/test_oauth_linking.py tests/functional/test_oauth_endpoints.py -v
 
+      # Guards viewerLabels.json (the frontend/backend shared organ id<->name source
+      # of truth) against drifting: contiguous ids, unique names, and every
+      # media-agentic-ai alias resolving to a real organ. The mesh_generation.py
+      # cross-check skips itself here but still runs everything else.
+      - name: Viewer label consistency tests
+        run: python -m pytest tests/unit/test_viewer_labels.py -v
+
       # All migrations must apply cleanly against a fresh SQLite DB and round-trip.
       - name: Alembic migration smoke
         env:

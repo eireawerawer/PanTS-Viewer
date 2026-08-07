@@ -1,12 +1,13 @@
 import type { Color } from "@cornerstonejs/core/types";
 import type {
-    APP_CONSTANTS_TYPE,
-    cornerstoneCustomColorLUTType, MiscColorMapType,
-    OrganSystemsType,
-    SegmentationCategories,
-    SubSystems,
-    Systems
+	APP_CONSTANTS_TYPE,
+	cornerstoneCustomColorLUTType, MiscColorMapType,
+	OrganSystemsType,
+	SegmentationCategories,
+	SubSystems,
+	Systems
 } from "../types";
+import viewerLabelsJson from "./viewerLabels.json";
 
 const configuredApiBase = String(import.meta.env.VITE_API_BASE || "").trim();
 const hasWindow = typeof window !== "undefined";
@@ -82,7 +83,80 @@ export const segmentation_category_colors: { [key: number]: Color } = {
 	33: [255, 140, 0, 254],   // Liver lesion (dark orange)
 	34: [255, 215, 0, 254],   // Kidney lesion (gold)
 	35: [220, 20, 60, 254],   // Colon lesion (crimson)
+
+	// 36+: organs the media-agentic-ai teacher models (cads55x/moose*/airrc/atm/lvp/daps,
+	// see EXTENDED_ORGAN_NAMES below)
+	36: [217, 65, 65, 254],    // Heart atrium left
+	37: [217, 42, 11, 254],    // Heart atrium right
+	38: [178, 91, 54, 254],    // Heart ventricle left
+	39: [217, 115, 33, 254],   // Heart ventricle right
+	40: [217, 156, 65, 254],   // Heart myocardium
+	41: [242, 191, 36, 254],   // Heart (generic single-label)
+	42: [11, 155, 217, 254],   // Pulmonary artery
+	43: [27, 110, 178, 254],   // Pulmonary vein
+	44: [178, 90, 9, 254],     // Esophagus
+	45: [178, 145, 89, 254],   // Trachea
+	46: [152, 87, 217, 254],   // Brain
+	47: [11, 93, 217, 254],    // Iliac artery left
+	48: [9, 51, 178, 254],     // Iliac artery right
+	49: [33, 51, 217, 254],    // Iliac vein left
+	50: [11, 0, 217, 254],     // Iliac vein right
+	51: [128, 104, 19, 254],   // Vertebrae, cervical (C1-C7)
+	52: [255, 240, 38, 254],   // Humerus left
+	53: [233, 242, 121, 254],  // Humerus right
+	54: [167, 217, 0, 254],    // Scapula left
+	55: [159, 217, 65, 254],   // Scapula right
+	56: [119, 217, 33, 254],   // Clavicle left
+	57: [77, 217, 11, 254],    // Clavicle right
+	58: [109, 217, 87, 254],   // Hip left
+	59: [36, 217, 33, 254],    // Hip right
+	60: [121, 242, 137, 254],  // Sacrum
+	61: [0, 242, 10, 254],     // Muscle (generic)
+	62: [33, 217, 84, 254],    // Rib left (all 12 collapse to one class)
+	63: [0, 242, 104, 254],    // Rib right (all 12 collapse to one class)
+	64: [27, 178, 56, 254],    // Spinal cord
+	65: [202, 217, 33, 254],   // Larynx
+	66: [178, 145, 27, 254],   // Sigmoid
+	67: [217, 208, 87, 254],   // Rectum
+	68: [54, 178, 96, 254],    // Seminal vesicle
+	69: [89, 178, 133, 254],   // Mammary gland left
+	70: [9, 178, 117, 254],    // Mammary gland right
+	71: [19, 128, 105, 254],   // Sternum
+	72: [191, 97, 242, 254],   // White matter
+	73: [176, 11, 217, 254],   // Gray matter
+	74: [232, 36, 242, 254],   // CSF
+	75: [97, 242, 234, 254],   // Scalp
+	76: [217, 33, 198, 254],   // Eyeball (generic)
+	77: [121, 242, 191, 254],  // Skull
+	78: [11, 217, 161, 254],   // Mandible
+	79: [242, 73, 215, 254],   // Parotid gland left
+	80: [217, 11, 153, 254],   // Parotid gland right
+	81: [217, 65, 147, 254],   // Cochlea left
+	82: [217, 33, 104, 254],   // Cochlea right
+	83: [178, 71, 97, 254],    // Optic nerve left
+	84: [153, 0, 14, 254],     // Optic nerve right
+	85: [128, 44, 38, 254],    // Thyroid
+	86: [0, 139, 153, 254],    // Fat
+	87: [36, 242, 218, 254],   // Bone (generic)
+	88: [27, 178, 178, 254],   // Airway
+	89: [140, 153, 61, 254],   // Vertebrae, thoracic (T1-T12)
+	90: [124, 178, 9, 254],    // Vertebrae, lumbar (L1-L5)
 };
+
+// which ids count as "static" (dataset case viewer,
+// always shown) vs. "extended" (upload/inference session viewer only)
+const STATIC_ORGAN_COUNT = 35;
+
+const VIEWER_LABEL_ENTRIES: [number, string][] = Object.entries(
+	viewerLabelsJson as Record<string, string>
+)
+	.map(([id, name]) => [Number(id), name] as [number, string])
+	.sort((a, b) => a[0] - b[0]);
+
+// Organs beyond the static 35-class scheme.
+export const EXTENDED_ORGAN_NAMES: { [key: number]: string } = Object.fromEntries(
+	VIEWER_LABEL_ENTRIES.filter(([id]) => id > STATIC_ORGAN_COUNT)
+);
 
 // Rotating palette of colours to hand out to new classes.
 // No colour clash with existing organ palette above.
@@ -98,43 +172,9 @@ export const NEW_CLASS_PALETTE: Color[] = [
 	[231, 76, 60, 255],   // red
   ];
 
-export const segmentation_categories: SegmentationCategories[] = [
-	"adrenal_gland_left",
-	"adrenal_gland_right",
-	"aorta",
-	"bladder",
-	"celiac_artery",
-	"colon",
-	"common_bile_duct",
-	"duodenum",
-	"femur_left",
-	"femur_right",
-	"gall_bladder",
-	"kidney_left",
-	"kidney_right",
-	"liver",
-	"lung_left",
-	"lung_right",
-	"pancreas",
-	"pancreas_body",
-	"pancreas_head",
-	"pancreas_tail",
-	"pancreatic_duct",
-	"pancreatic_lesion",
-	"postcava",
-	"prostate",
-	"spleen",
-	"stomach",
-	"superior_mesenteric_artery",
-	"veins",
-	"intestine",
-	"renal_vein_left",
-	"renal_vein_right",
-	"cbd_stent",
-	"liver_lesion",
-	"kidney_lesion",
-	"colon_lesion",
-];
+export const segmentation_categories: SegmentationCategories[] = VIEWER_LABEL_ENTRIES
+	.filter(([id]) => id <= STATIC_ORGAN_COUNT)
+	.map(([, name]) => name as SegmentationCategories);
 
 export const OrganSystemsArray: Systems[] = [
 	"Vascular System",

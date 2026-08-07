@@ -11,9 +11,11 @@ import trimesh
 
 from constants import Constants
 from utils import *
+from services.viewer_labels import VIEWER_LABEL_NAMES, display_name
 
 dotenv.load_dotenv()
 
+# ids 1-35: hand-written display so must change by hand when needed.
 LABELS = {
 	1: {"key": "adrenal_gland_left", "name": "Left Adrenal Gland"},
 	2: {"key": "adrenal_gland_right", "name": "Right Adrenal Gland"},
@@ -51,6 +53,11 @@ LABELS = {
     34: {"key": "kidney_lesion", "name": "Kidney Lesion"},
     35: {"key": "colon_lesion", "name": "Colon Lesion"},
 }
+
+# ids 36+: the media-agentic-ai extended organs (heart chambers, brain tissue, ribs, etc.)
+for _id, _key in VIEWER_LABEL_NAMES.items():
+    if _id not in LABELS:
+        LABELS[_id] = {"key": _key, "name": display_name(_key)}
 
 
 def safe_filename(s: str) -> str:

@@ -3,178 +3,182 @@ import type { Color, ColorLUT } from "@cornerstonejs/core/types";
 import type { vtkVolumeProperty } from '@kitware/vtk.js/Rendering/Core/VolumeProperty';
 import { Niivue } from "@niivue/niivue";
 import {
-    IconAdjustmentsHorizontal,
-    IconAngle,
-    IconArrowBackUp,
-    IconArrowForwardUp,
-    IconArrowsCross,
-    IconArrowUpRight,
-    IconPencil,
+	IconAdjustmentsHorizontal,
+	IconAngle,
+	IconArrowBackUp,
+	IconArrowForwardUp,
+	IconArrowsCross,
+	IconArrowUpRight,
+	IconCamera,
+	IconChartBar,
+	IconCheck,
+	IconChevronDown,
+	IconCircle,
+	IconClick,
+	IconDownload,
+	IconEye,
+	IconFlipHorizontal,
+	IconGrid3x3,
+	IconHome,
+	IconId,
+	IconLasso,
+	IconLayoutSidebarRight,
+	IconListDetails, IconMicrophone,
+	IconPencil,
+	IconPlayerPause, IconPlayerPlay, IconPointer, IconReport,
+	IconRotateClockwise,
+	IconRuler2,
+	IconScanEye,
+	IconSettings,
+	IconShare,
+	IconSquareDashed,
 	IconStack2,
-    IconCamera,
-    IconChartBar,
-    IconCheck,
-    IconChevronDown,
-    IconCircle,
-    IconClick,
-    IconDownload,
-    IconEye,
-    IconFlipHorizontal,
-    IconGrid3x3,
-    IconHome,
-    IconId,
-    IconLasso,
-    IconLayoutSidebarRight,
-    IconListDetails, IconMicrophone, IconPlayerPause, IconPlayerPlay, IconPointer, IconReport,
-    IconRotateClockwise,
-    IconRuler2,
-    IconScanEye,
-    IconSettings,
-    IconShare,
-    IconSquareDashed,
-    IconTrash,
-    IconZoomIn
+	IconTrash,
+	IconZoomIn
 } from "@tabler/icons-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
-import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
 import { useLocation, useParams } from "react-router-dom";
 import AISidebar from "../components/AIAssistant/AISidebar";
 import { buildViewerActions } from "../components/AIAssistant/assistantActions";
 import MeasurementPanel from "../components/MeasurementPanel/MeasurementPanel";
-import { SegmentationMeshViewer } from "../components/viewer/MeshViewer";
 import OrganCheckbox from "../components/OrganCheckbox";
 import PercentileBar from "../components/PercentileBar";
 import SessionHUD from "../components/ReadingSession/SessionHUD";
 import SessionSummary from "../components/ReadingSession/SessionSummary";
 import ReportScreen from "../components/ReportScreen/ReportScreen";
 import SliceJumpInput from "../components/SliceJumpInput";
-import SegmentsPopup from "../components/segmentation/SegmentsPopup";
-import MarginPanel from "../components/segmentation/MarginPanel";
 import IslandsPanel from "../components/segmentation/IslandsPanel";
 import LogicalOperatorsPanel from "../components/segmentation/LogicalOperatorsPanel";
-import { setBrushMaskingScope } from "../helpers/CornerstoneNifti2";
+import MarginPanel from "../components/segmentation/MarginPanel";
+import SegmentsPopup from "../components/segmentation/SegmentsPopup";
+import { SegmentationMeshViewer } from "../components/viewer/MeshViewer";
+import { buildMaskFilter, setBrushMaskingScope } from "../helpers/CornerstoneNifti2";
 
-import SmoothingFlyout from "../components/segmentation/SmoothingFlyout";
-import GrowFromSeedsFlyout from "../components/segmentation/GrowFromSeedFlyout";
-import FillBetweenSlicesFlyout from "../components/segmentation/FillBetweenSlicesFlyout";
 import CopyAcrossSlicesFlyout from "../components/segmentation/CopyAcrossSlicesFlyout";
+import FillBetweenSlicesFlyout from "../components/segmentation/FillBetweenSlicesFlyout";
+import GrowFromSeedsFlyout from "../components/segmentation/GrowFromSeedFlyout";
 import HollowFlyout from "../components/segmentation/HollowFlyout";
 import LevelTracingFlyout from "../components/segmentation/LevelTracingFlyout";
-import { useScissorsTool } from "../helpers/viewer/useScissorsTool";
-import {
-  applyMargin, getActualMarginMm,
-  applyIslandsOperation, applyLogicalOperator, applySmoothing,
-  deleteSegmentEverywhere, getSegmentAtVoxel, getActiveEditSegment, type LogicalOperation,
-  type LevelTraceOperation
-} from "../helpers/CornerstoneNifti2";
-import {
-    API_BASE,
-    APP_CONSTANTS,
-    segmentation_categories,
-    segmentation_category_colors,
-} from "../helpers/constants";
-import {
-    ANGLE_TOOL,
-    applyVolume3DPreset,
-    ARROW_TOOL,
-    BIDIRECTIONAL_TOOL,
-    captureViewportImages,
-    centerOnCursor,
-    clearMeasurements,
-    createNewAnnotationClass,
-    disableVolume3D,
-    EDIT_BRUSH,
-    EDIT_ERASER,
-    ELLIPSE_TOOL,
-    enableVolume3D,
-    flipPaneHorizontal,
-    FREEHAND_ROI_TOOL,
-    getCrosshairMm,
-    getCurrentVolumeModality,
-    getCustomSegmentLabels,
-    getMeasurementSummaries,
-    getOrganCentroids,
-    getOrganLabelAtPoint,
-    getOrganLabelOnClick,
-    LENGTH_TOOL,
-    MAGNIFY_TOOL,
-    moveCornerstoneCrosshairToMm,
-    PROBE_TOOL,
-    redoMaskEdit,
-    renderVisualization,
-    resetMprOrientation,
-	releasePrimaryMouseTools,
-    ROI_TOOL,
-    rotatePane90Clockwise,
-    setActiveMaskEditTool,
-    setActiveMeasurementTool,
-    setFillOpacity,
-    setOutlineOpacity,
-    setPaneSliceIndex,
-    setReferenceLinesEnabled,
-    setVisibilities,
-    setZoom,
-    startCine,
-    stopCine,
-    subscribeToCrosshairChanges,
-    subscribeToMeasurementChanges,
-    subscribeToSliceChanges,
-    subscribeToVolumeProgress,
-    toggleCrosshairTool,
-    undoMaskEdit,
-    upgradeCtVolume,
-    VOLUME_3D_PRESETS,
-    VOLUME_3D_PRESETS_MR,
-    zoomToFit,
-	registerNewSegmentColor,
-	isSegmentPresent,
-    type CinePane,
-    type PrimaryMouseToolName,
-    type SliceInfo,
-	setActiveEditSegment,
-	beginBrushMaskGuard,
-	endBrushMaskGuard,
-} from "../helpers/CornerstoneNifti2";
-import { useSmartFill } from "../helpers/viewer/useSmartFill";
-import { hasSegmentationVolume } from "../helpers/CornerstoneNifti2"; 
-import { useLevelTracing } from "../helpers/viewer/useLevelTracing";
+import { type MaskingArea } from "../components/segmentation/MaskingSelect";
+import SmoothingFlyout from "../components/segmentation/SmoothingFlyout";
 import AnnotationToolbar, {
 	type PrimaryEditTool,
 	type ScissorsOptions,
 } from "../components/viewer/AnnotationToolbar";
-import { setMaskBrushSize } from "../helpers/CornerstoneNifti2";
-import { useMorphPicker } from "../helpers/viewer/useMorphPicker";
-import { useLassoTool } from "../helpers/viewer/useLassoTool";
-import { useFocusedPane } from "../helpers/viewer/useFocusedPane";
-import { useKeyboardShortcuts } from "../helpers/viewer/useKeyboardShortcuts";
-import { type MaskingArea } from "../components/segmentation/MaskingSelect";
+import LiveWireOverlay from "../components/viewer/LiveWireOverlay";
+import {
+	ANGLE_TOOL,
+	applyIslandsOperation, applyLogicalOperator,
+	applyMargin,
+	applySmoothing,
+	applyVolume3DPreset,
+	ARROW_TOOL,
+	beginBrushMaskGuard,
+	BIDIRECTIONAL_TOOL,
+	captureViewportImages,
+	centerOnCursor,
+	clearMeasurements,
+	createNewAnnotationClass,
+	deleteSegmentEverywhere,
+	disableVolume3D,
+	EDIT_BRUSH,
+	EDIT_ERASER,
+	ELLIPSE_TOOL,
+	enableVolume3D,
+	endBrushMaskGuard,
+	flipPaneHorizontal,
+	FREEHAND_ROI_TOOL,
+	getActiveEditSegment,
+	getActualMarginMm,
+	getCrosshairMm,
+	getCurrentVolumeModality,
+	getCustomSegmentLabels,
+	getMeasurementSummaries,
+	getOrganCentroids,
+	getOrganLabelAtPoint,
+	getOrganLabelOnClick,
+	getSegmentAtVoxel,
+	hasSegmentationVolume,
+	isSegmentPresent,
+	LENGTH_TOOL,
+	MAGNIFY_TOOL,
+	moveCornerstoneCrosshairToMm,
+	PROBE_TOOL,
+	redoMaskEdit,
+	registerNewSegmentColor,
+	releasePrimaryMouseTools,
+	renderVisualization,
+	resetMprOrientation,
+	ROI_TOOL,
+	rotatePane90Clockwise,
+	setActiveEditSegment,
+	setActiveMaskEditTool,
+	setActiveMeasurementTool,
+	setFillOpacity,
+	setMaskBrushSize,
+	setOutlineOpacity,
+	setPaneSliceIndex,
+	setReferenceLinesEnabled,
+	setVisibilities,
+	setZoom,
+	startCine,
+	stopCine,
+	subscribeToCrosshairChanges,
+	subscribeToMeasurementChanges,
+	subscribeToSliceChanges,
+	subscribeToVolumeProgress,
+	toggleCrosshairTool,
+	undoMaskEdit,
+	upgradeCtVolume,
+	VOLUME_3D_PRESETS,
+	VOLUME_3D_PRESETS_MR,
+	zoomToFit,
+	type CinePane,
+	type LevelTraceOperation,
+	type LogicalOperation,
+	type PrimaryMouseToolName,
+	type SliceInfo
+} from "../helpers/CornerstoneNifti2";
+import {
+	API_BASE,
+	APP_CONSTANTS,
+	EXTENDED_ORGAN_NAMES,
+	segmentation_categories,
+	segmentation_category_colors,
+} from "../helpers/constants";
 import { getLocalDicomFiles, loadLocalDicomSeries } from "../helpers/dicomLocal";
 import { downloadUrlAsFile } from "../helpers/downloadFile";
 import { loadLocalNiftiAsRawBlobUrl } from "../helpers/localNifti";
 import {
-    describeBasis,
-    loadOrganNorms,
-    type OrganNorms,
+	describeBasis,
+	loadOrganNorms,
+	type OrganNorms,
 } from "../helpers/organNorms";
 import {
-    computeStatRows,
-    downloadStats,
-    summarizeOutOfRange,
-    type OrganMetric,
+	computeStatRows,
+	downloadStats,
+	summarizeOutOfRange,
+	type OrganMetric,
 } from "../helpers/organStatsExport";
 import {
-    composeImagesSideBySide,
-    ReadingSession,
-    type SessionResult,
+	composeImagesSideBySide,
+	ReadingSession,
+	type SessionResult,
 } from "../helpers/readingSession";
 import { toolDisplayName, type ReportMeasurement } from "../helpers/sessionReport";
-import {getPanTSId } from "../helpers/utils";
+import { getPanTSId } from "../helpers/utils";
 import { filenameToName } from "../helpers/utils.name";
+import { useFocusedPane } from "../helpers/viewer/useFocusedPane";
+import { useKeyboardShortcuts } from "../helpers/viewer/useKeyboardShortcuts";
+import { useLassoTool } from "../helpers/viewer/useLassoTool";
+import { useLevelTracing } from "../helpers/viewer/useLevelTracing";
+import { useMorphPicker } from "../helpers/viewer/useMorphPicker";
+import { useScissorsTool } from "../helpers/viewer/useScissorsTool";
+import { useSmartFill } from "../helpers/viewer/useSmartFill";
 import { decodeViewerState, encodeViewerState } from "../helpers/viewerShareState";
 import { type CheckBoxData } from "../types";
 import "./VisualizationPage.css";
-import LiveWireOverlay from "../components/viewer/LiveWireOverlay";
 
 type ViewMode = "mpr" | "axial" | "sagittal" | "coronal" | "3d";
 
@@ -261,13 +265,15 @@ const fmtStat = (v: number | null, digits = 0): string => (v === null ? "—" : 
 const colorToCss = (c: Color | undefined): string =>
 	c ? `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${(c[3] ?? 255) / 255})` : "rgba(255, 255, 255, 0.4)";
 
-// Resolves a segment index to a display name for BOTH the static 32 organ
-// catalog and any runtime-created custom classes (segment indices beyond
-// segmentation_categories.length, eg., from "New class" in annotations tool).
-
+// Resolves a segment index to a display name for the static 35 organ catalog, the
+// media-agentic-ai extended organs (upload/inference sessions only -- ids > 35, see
+// EXTENDED_ORGAN_NAMES), and any runtime-created custom classes (segment indices
+// beyond that, eg., from "New class" in annotations tool).
 const resolveOrganLabel = (idx: number): string | undefined => {
     const staticName = segmentation_categories[idx - 1];
     if (staticName) return filenameToName(staticName);
+    const extendedName = EXTENDED_ORGAN_NAMES[idx];
+    if (extendedName) return filenameToName(extendedName);
     return getCustomSegmentLabels()[idx];
 };
 
@@ -384,6 +390,9 @@ function VisualizationPage() {
 	const pantsCase = params.caseId;
 	const isCvCase = String(pantsCase ?? "").toUpperCase().startsWith("CV");
 	const sessionId = params.sessionId;
+	// A real upload/inference run being viewed (as opposed to a dataset case, which also
+	// happens to carry a caseId route param on some paths)
+	const isInferenceSession = !!sessionId && !pantsCase;
 	// Local DICOM mode (/dicom): a folder of .dcm files picked on the Upload page,
 	// viewed entirely in-browser. No backend case, so no segmentation layer.
 	const routerLocation = useLocation();
@@ -1057,10 +1066,8 @@ function VisualizationPage() {
 	// the values captured when the stream started.
 	const windowRef = useRef({ w: windowWidth, c: windowCenter });
 	const checkStateRef = useRef(checkState);
-	const checkBoxDataRef = useRef(checkBoxData);
 	useEffect(() => { windowRef.current = { w: windowWidth, c: windowCenter }; }, [windowWidth, windowCenter]);
 	useEffect(() => { checkStateRef.current = checkState; }, [checkState]);
-	useEffect(() => { checkBoxDataRef.current = checkBoxData; }, [checkBoxData]);
 	// 3D pane rendering mode: organ meshes (dataset cases) or shaded GPU volume
 	// rendering of the CT itself (the only 3D option for local DICOM).
 	const [threeDMode, setThreeDMode] = useState<"mesh" | "volume">(isLocal ? "volume" : "mesh");
@@ -1427,10 +1434,9 @@ function VisualizationPage() {
 			// setVolumes resets the transfer function and rebuilds the labelmap actors —
 			// re-apply the *current* window and organ visibility (live refs, not closures).
 			handleWindowChange(windowRef.current.w, windowRef.current.c);
-			setVisibilities([
-				true,
-				...checkBoxDataRef.current.map((item) => !!checkStateRef.current[item.id]),
-			]);
+			const hdCheckStateArr = checkStateRef.current.map((v) => !!v);
+			hdCheckStateArr[0] = true;
+			setVisibilities(hdCheckStateArr);
 			setEnhance({ state: "done", pct: 100 });
 			sessionRef.current?.log("session", "Enhanced to full resolution");
 		} catch {
@@ -1514,7 +1520,8 @@ function VisualizationPage() {
 			// 32-organ catalog for them; checkBoxData should only ever contain segments
 			// the user actually creates (via createNewAnnotationClass), so hasAnySegments
 			// reflects reality instead of always being true.
-			if (!isLocal) {
+			// Inference sessions ALSO skip the static seed
+			if (!isLocal && !isInferenceSession) {
 				const checkBoxData = segmentation_categories.map((filename, i) => ({
 					label: filenameToName(filename),
 					id: i + 1,
@@ -2054,28 +2061,13 @@ function VisualizationPage() {
 		);
 	};
 
-	// Update segmentation visibility when state changes
+	// Update segmentation visibility when state changes.
 	useEffect(() => {
-		if (checkState) {
-			const checkStateArr = [
-				true, // ID=0 background 永远可见
-				...checkBoxData.map((item) => !!checkState[item.id]),
-			];
-			// const visible = checkStateArr.map((item, idx) => item === true ? idx - 1 : null).filter((item) => item !== null);
-			// if (visible.length !== checkBoxData.length+1 && visible.length !== 1) {
-			// 	visible.splice(0, 1);
-			// 	console.log(visible.map((item) => segmentation_categories[item]));
-			// 	create3DVolumeFew(render_ref, labelColorMap, getPanTSId(pantsCase ?? "1"), visible);
-			// }
-			// else {
-			// updateVisibilities(NV, checkStateArr, sessionKey, cmapRef.current);
-			// }
-			setVisibilities(checkStateArr);
-		}
-	}, [
-		checkState,
-		checkBoxData,
-	]);
+		if (!checkState) return;
+		const checkStateArr = checkState.map((v) => !!v);
+		checkStateArr[0] = true; // ID=0 background always visible
+		setVisibilities(checkStateArr);
+	}, [checkState]);
 
 	const handleOpacityOnSliderChange = (
 		event: React.ChangeEvent<HTMLInputElement>
@@ -2247,6 +2239,34 @@ const organCatalog = useMemo(() => {
 	}
 	return withPresence;
 }, [renderingEngine, viewportIds, volumeId, checkBoxData, loading]);
+
+// Upload/inference viewer only: seed checkBoxData from the same presence-filtered mesh
+// manifest the 3D mesh viewer already computes server-side (numpy np.unique() on
+// combined_labels.nii.gz, in generate_mesh_manifest) instead of scanning the
+// cornerstone-cached volume client-side organ-by-organ.
+useEffect(() => {
+	if (!isInferenceSession || !sessionId) return;
+	let cancelled = false;
+	(async () => {
+		try {
+			const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/mesh-manifest`);
+			if (!res.ok || cancelled) return;
+			const data = await res.json();
+			if (cancelled || !Array.isArray(data.organs)) return;
+			const present: CheckBoxData[] = data.organs.map((o: { id: number; key: string }) => ({
+				id: o.id,
+				label: filenameToName(o.key),
+			}));
+			setCheckBoxData(present);
+			const initialState: boolean[] = [true];
+			present.forEach((o) => { initialState[o.id] = true; });
+			setCheckState(initialState);
+		} catch {
+			// no server side segmentation
+		}
+	})();
+	return () => { cancelled = true; };
+}, [isInferenceSession, sessionId]);
 
 // Logical Operators' "With segment" dropdown should only offer organs that
 // actually exist in this scan (same presence check organCatalog already
@@ -3140,6 +3160,7 @@ const aiAvailableOrgans = useMemo(() => {
 						labelColorMap={labelColorMap}
 						onJumpToOrgan={handleJumpToOrgan}
 						customOrgans={customOrgans}
+						customOrgansLabel={isInferenceSession ? "Segmented Classes" : "Custom Classes"}
 					/>
 				)}
 
@@ -3445,7 +3466,7 @@ const aiAvailableOrgans = useMemo(() => {
 									<span>(switch to Volume rendering above)</span>
 								</div>
 							) : (
-								<SegmentationMeshViewer caseId={caseId} isSession={!!sessionId && !pantsCase} crosshairMm={crosshairMm} checkState={checkState} loading={loading} opacity={opacityValue} customOrgans={customOrgans} labelColorMap={labelColorMap} />
+								<SegmentationMeshViewer caseId={caseId} isSession={isInferenceSession} crosshairMm={crosshairMm} checkState={checkState} loading={loading} opacity={opacityValue} customOrgans={customOrgans} labelColorMap={labelColorMap} />
 							)}
 						</div>
 						{!loading && (

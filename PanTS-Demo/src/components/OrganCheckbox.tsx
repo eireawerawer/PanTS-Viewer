@@ -9,10 +9,10 @@ import {
 import { deepIsEqual } from "../helpers/utils";
 import {
 	type AllSystems,
+	type CheckBoxData,
 	type OrganSystemsAllType,
 	type SubSystems,
-	type Systems,
-	type CheckBoxData
+	type Systems
 } from "../types";
 
 type ChipBoxProps = {
@@ -34,6 +34,7 @@ type Props = {
 	showOrganDetails: boolean;
 	onJumpToOrgan?: (label: number) => void;
 	customOrgans?: CheckBoxData[];
+	customOrgansLabel?: string;
 };
 
 const getOrganIdx = (organ: string) => {
@@ -242,6 +243,7 @@ function OrganCheckbox({
 	showOrganDetails,
 	onJumpToOrgan,
 	customOrgans = [],
+	customOrgansLabel = "Custom Classes",
 }: Props) {
 	const toggleAll = () => {
 		setCheckState((prev) => {
@@ -294,7 +296,7 @@ function OrganCheckbox({
 			</div>
 			{customOrgans.length > 0 && (
 				<div className="flex gap-2 flex-col">
-					<div className="text-white text-lg">Custom Classes</div>
+					<div className="text-white text-lg">{customOrgansLabel}</div>
 					<div className="flex flex-col gap-2">
 						{customOrgans.map((organ) => {
 							const color = labelColorMap[organ.id];
