@@ -206,6 +206,8 @@ _VIEWER_LABELS = {
     "superior_mesenteric_artery": 27, "veins": 28,
     # extended labels for full ePAI output
     "intestine": 29, "renal_vein_left": 30, "renal_vein_right": 31, "cbd_stent": 32,
+    # LesionSegmenter extra lesion classes (pancreatic_lesion already at 22)
+    "liver_lesion": 33, "kidney_lesion": 34, "colon_lesion": 35,
 }
 
 # ePAI model label → viewer label (all 25 classes from dataset.json)
@@ -295,9 +297,12 @@ _SUPREM_TO_VIEWER = {
 # NOT mapped (no viewer category exists yet, left as background rather than
 # guessing at a slot and risking a mislabeled structure): esophagus, rectum,
 # vertebrae_* (10 classes), trachea, heart, hip_left, hip_right, sacrum,
-# uterus, liver_lesion, kidney_lesion, colon_lesion. pancreatic_lesion is the
-# one this model exists to add and maps onto the same viewer slot ePAI and
-# Atlas-Net already use for their own PDAC/cyst/PNET subtypes.
+# uterus. pancreatic_lesion maps onto the same viewer slot ePAI and Atlas-Net
+# use for their PDAC/cyst/PNET subtypes. liver_lesion/kidney_lesion/colon_lesion
+# get their own viewer slots (33/34/35) -- this single model already computes all
+# four lesions in one forward pass, so surfacing the other three is free at
+# runtime. NOTE: only pancreatic_lesion has ground-truth validation on PanTS;
+# the other three are surfaced but flagged experimental in the UI.
 _LESIONSEG_TO_VIEWER = {
     1: _VIEWER_LABELS["aorta"],
     2: _VIEWER_LABELS["gall_bladder"],
@@ -319,7 +324,10 @@ _LESIONSEG_TO_VIEWER = {
     19: _VIEWER_LABELS["prostate"],
     21: _VIEWER_LABELS["lung_left"],
     22: _VIEWER_LABELS["lung_right"],
+    39: _VIEWER_LABELS["liver_lesion"],
     40: _VIEWER_LABELS["pancreatic_lesion"],
+    41: _VIEWER_LABELS["kidney_lesion"],
+    42: _VIEWER_LABELS["colon_lesion"],
 }
 
 

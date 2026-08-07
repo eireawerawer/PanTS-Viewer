@@ -35,6 +35,14 @@ class Constants:
     DATASET_PREFIXES = {'PanTS': 'PanTS', 'CancerVerse': 'CV'}
     PERMISSIONS_DIR = os.environ.get('PERMISSIONS_DIR', "/home/visitor/data")
     MESH_PATH = PERMISSIONS_DIR + "/render_only"
+    CASE_QUALITY_MANIFEST = os.environ.get('BODYMAPS_CASE_QUALITY_MANIFEST')
+    THUMBNAIL_VISION_MODEL = os.environ.get(
+        'BODYMAPS_THUMBNAIL_VISION_MODEL',
+        'qwen3-vl:4b',
+    )
+    THUMBNAIL_VISION_TIMEOUT_SECONDS = float(
+        os.environ.get('BODYMAPS_THUMBNAIL_VISION_TIMEOUT_SECONDS', '120')
+    )
     MAIN_NIFTI_FORM_NAME = 'MAIN_NIFTI'
     MAIN_NPZ_FILENAME = 'ct.npz'
     MAIN_NIFTI_FILENAME = 'ct.nii.gz'

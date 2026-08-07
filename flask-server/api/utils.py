@@ -3,6 +3,7 @@ from flask import Blueprint, send_file, make_response, request, jsonify
 from services.nifti_processor import NiftiProcessor
 from services.session_manager import SessionManager, generate_uuid
 from services.auto_segmentor import run_auto_segmentation
+from services.case_quality import load_case_quality_manifest, merge_case_quality
 from services.manufacturer_normalization import canonicalize_manufacturer
 from services.site_normalization import split_site_codes
 from models.application_session import ApplicationSession
@@ -47,7 +48,7 @@ def combine_label_npz(index: int):
     npz_processor.combine_labels(index)
     return
 def get_panTS_id(index):
-    index_str = str(index).strip()
+    index_str = re.sub(r"^PanTS_?", "", str(index).strip(), flags=re.IGNORECASE)
     if not re.fullmatch(r"\d+", index_str):
         raise ValueError("Invalid case id: numeric value expected")
 
@@ -1289,8 +1290,9 @@ else:
           "Set PANTS_PATH in flask-server/.env to your dataset to enable it.")
     DF_RAW = pd.DataFrame()
 
+_CASE_QUALITY = load_case_quality_manifest(Constants.CASE_QUALITY_MANIFEST)
 try:
-    DF = _norm_cols(DF_RAW)
+    DF = merge_case_quality(_norm_cols(DF_RAW), _CASE_QUALITY)
 except Exception as _norm_err:
     print(f"[WARN] metadata normalization failed: {_norm_err} — using empty catalog.")
     DF = pd.DataFrame()
@@ -1308,7 +1310,10 @@ CANCERVERSE_META_FILE = (
 DF_CV = None
 if CANCERVERSE_META_FILE and os.path.exists(CANCERVERSE_META_FILE):
     try:
-        DF_CV = _norm_cols(pd.read_csv(CANCERVERSE_META_FILE))
+        DF_CV = merge_case_quality(
+            _norm_cols(pd.read_csv(CANCERVERSE_META_FILE)),
+            _CASE_QUALITY,
+        )
     except Exception as _cv_err:
         print(f"[WARN] Could not load CancerVerse metadata: {_cv_err}")
         DF_CV = None

@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   buildSearchParams,
   type CaseId,
+  caseIdToApiId,
   countActiveFilters,
   EMPTY_FILTERS,
   itemToId,
@@ -37,6 +38,7 @@ export function useDashboard() {
   const [page, setPage] = useState(1);
   const [pageInput, setPageInput] = useState("");
   const [resultCount, setResultCount] = useState<number | null>(null);
+  const [recentShuffleIds, setRecentShuffleIds] = useState<CaseId[]>([]);
 
   const [savedCases, setSavedCases] = useState<SavedCase[]>(loadSavedCases);
   const [showSaved, setShowSaved] = useState(false);
@@ -55,7 +57,7 @@ export function useDashboard() {
 
   const handleToggleSave = (id: CaseId, meta?: PreviewType) => {
     const m = meta ?? previewMetadata[id];
-    toggleSavedCase({ id, sex: m?.sex ?? "", age: m?.age ?? 0, tumor: m?.tumor ?? 0 });
+    toggleSavedCase({ id, sex: m?.sex ?? "", age: m?.age ?? 0, tumor: m?.tumor ?? null });
   };
 
   // Cases picked for side-by-side comparison (max 2). Adding a third drops the oldest.
@@ -92,11 +94,16 @@ export function useDashboard() {
       const id = itemToId(it);
       if (!id) continue;
       ids.push(id);
-      meta[id] = { sex: it.sex ?? "", age: Number(it.age) || 0, tumor: it.tumor === 1 ? 1 : 0 };
+      meta[id] = {
+        sex: it.sex ?? "",
+        age: Number(it.age) || 0,
+        tumor: it.tumor === 1 ? 1 : it.tumor === 0 ? 0 : null,
+      };
     }
     setPreviewMetadata(meta);
     setPreviewIds(ids);
     setLoading(false);
+    return ids;
   };
 
   // Curated cases: fullest-body scans split half tumor / half no-tumor, interleaved.
@@ -110,8 +117,8 @@ export function useDashboard() {
         return r.json();
       };
       const [tumorRes, noTumorRes] = await Promise.all([
-        fetch(`${API_BASE}/api/search?tumor=1&sort_by=shape_desc&per_page=${half}`).then(okJson),
-        fetch(`${API_BASE}/api/search?tumor=0&sort_by=shape_desc&per_page=${half}`).then(okJson),
+        fetch(`${API_BASE}/api/search?tumor=1&sort_by=quality&per_page=${half}`).then(okJson),
+        fetch(`${API_BASE}/api/search?tumor=0&sort_by=quality&per_page=${half}`).then(okJson),
       ]);
       const tumorItems: SearchItem[] = tumorRes.items ?? [];
       const noTumorItems: SearchItem[] = noTumorRes.items ?? [];
@@ -229,10 +236,27 @@ export function useDashboard() {
     setFilters(EMPTY_FILTERS);
     setSearchParams({});
     try {
-      const res = await fetch(`${API_BASE}/api/random?n=${CARD_COUNT}&k=120&scope=all`);
+      const params = new URLSearchParams({
+        n: String(CARD_COUNT),
+        k: "120",
+        scope: "all",
+      });
+      if (recentShuffleIds.length) {
+        params.set("recent", recentShuffleIds.map(caseIdToApiId).join(","));
+      }
+      const res = await fetch(`${API_BASE}/api/random?${params.toString()}`);
       if (!res.ok) throw new Error(`Shuffle failed (${res.status})`);
       const data = await res.json();
-      ingestItems(data.items ?? []);
+      const ids = ingestItems(data.items ?? []);
+      setRecentShuffleIds((previous) => {
+        const deduped: CaseId[] = [];
+        for (const id of [...previous, ...ids]) {
+          const existing = deduped.findIndex((candidate) => candidate === id);
+          if (existing >= 0) deduped.splice(existing, 1);
+          deduped.push(id);
+        }
+        return deduped.slice(-32);
+      });
     } catch (e) {
       console.error(e);
       setLoading(false);

@@ -55,6 +55,12 @@ export const itemToId = (it: SearchItem): CaseId => {
 	return m ? Number(m[0]) : 0;
 };
 
+// Canonical id sent back to backend exclusion filters.
+export const caseIdToApiId = (id: CaseId): string =>
+	typeof id === "string" && id.toUpperCase().startsWith("CV")
+		? id
+		: `PanTS_${String(id).padStart(8, "0")}`;
+
 // Build the /api/search (and /api/facets, and URL) query string from the active
 // filters. Mirrors the backend params accepted by apply_filters: sex[]/age_bin[]/
 // manufacturer[]/ct_phase[]/site_nat[]/year[] (multi), tumor (1/0, omitted for "any"),

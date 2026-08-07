@@ -33,6 +33,33 @@ CANCERVERSE_LOWRES_PATH=/home/visitor/cancerverse_lowres
 ```
 `CANCERVERSE_PATH` holds the `CV_########/ct.nii.gz` cases; the metadata CSV `CancerVerse_dataset_metadata.csv` sits **next to** that folder (in its parent). When set, `/api/search?dataset=cancerverse` (or `dataset=all`) searches it; CancerVerse has no masks yet, so mask endpoints return `{"masks_available": false}`.
 
+#### Build the search/shuffle quality index
+
+Search and shuffle can rank cases by CT file size and thumbnail display quality without
+adding filesystem or vision-model work to API requests. Generate the index offline on
+the host that has the dataset mounted:
+
+```
+ollama pull qwen3-vl:4b
+python scripts/compute_case_quality.py \
+  --out /home/visitor/data/bodymaps_case_quality.v1.json \
+  --datasets all \
+  --vision required \
+  --overwrite
+```
+
+Then set the same path in `flask-server/.env` before starting the backend:
+
+```
+BODYMAPS_CASE_QUALITY_MANIFEST=/home/visitor/data/bodymaps_case_quality.v1.json
+BODYMAPS_THUMBNAIL_VISION_MODEL=qwen3-vl:4b
+```
+
+Use `--resume` instead of `--overwrite` to reuse unchanged CT and thumbnail records.
+`--vision required` fails rather than silently producing an index without vision
+classification. If the manifest is unset or unavailable, ranking falls back to scan
+shape and voxel-spacing metadata.
+
 Run backend:
 
 ```
