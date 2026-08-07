@@ -487,6 +487,10 @@
   top: calc(100% + 4px);
   left: 0;
   right: 0;
+  /* Wider than the trigger: the pipeline steps are narrow columns, and at that
+     width a model description wraps to five lines — worse still once an
+     "Upgrade" pill is sharing the row. */
+  min-width: 300px;
   background: #ffffff;
   border: 1px solid rgba(0,0,0,.10);
   border-radius: 10px;
@@ -512,6 +516,9 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
+  /* Take the slack, so the pill sits at the edge rather than squeezing the text. */
+  flex: 1;
+  min-width: 0;
 }
 .model-dropdown-item-name {
   font-family: 'Space Grotesk', sans-serif;
@@ -537,6 +544,24 @@
   gap: 8px;
   flex-shrink: 0;
   margin-left: 10px;
+}
+
+/* A model the plan doesn't include. Dimmed but still readable and still
+   clickable — the click opens the upgrade dialog instead of selecting it. */
+.model-dropdown-item.locked .model-dropdown-item-name,
+.model-dropdown-item.locked .model-dropdown-item-desc {
+  color: #b0b0b0;
+}
+.model-dropdown-lock {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(0, 45, 114, 0.08);
+  color: #002d72;
+  white-space: nowrap;
 }
 
 /* ── Cancel button on Active cards ── */
@@ -1070,6 +1095,21 @@
   color: #002d72;
   cursor: pointer;
   text-decoration: underline;
+}
+
+/* Way out to the History page for anything older than a day. */
+.upload-history-link {
+  margin-top: 12px;
+  background: none;
+  border: none;
+  padding: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  color: #6a6a6a;
+  cursor: pointer;
+}
+.upload-history-link:hover {
+  color: #002d72;
 }
 
 /* ── Processing summary bar (all in-flight scans in one row) ── */

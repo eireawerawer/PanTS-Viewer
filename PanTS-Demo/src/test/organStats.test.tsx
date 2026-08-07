@@ -1,5 +1,6 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { AuthProvider } from "../contexts/authContext";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Same WebGL/three.js mocks as the viewer smoke test — jsdom has no GPU, so the
@@ -146,11 +147,13 @@ afterEach(() => {
 
 const renderViewer = () =>
 	render(
-		<MemoryRouter initialEntries={["/case/1"]}>
-			<Routes>
-				<Route path="/case/:caseId" element={<VisualizationPage />} />
-			</Routes>
-		</MemoryRouter>
+		<AuthProvider>
+			<MemoryRouter initialEntries={["/case/1"]}>
+				<Routes>
+					<Route path="/case/:caseId" element={<VisualizationPage />} />
+				</Routes>
+			</MemoryRouter>
+		</AuthProvider>
 	);
 
 describe("Organ Statistics — population percentiles", () => {

@@ -19,9 +19,12 @@ def client(tmp_path, monkeypatch):
     importlib.reload(engine)
     import models.user  # noqa: F401
     import models.auth_session  # noqa: F401
+    import models.usage_event  # noqa: F401
     import services.auth_store as auth_store
     importlib.reload(auth_store)
     import services.job_store  # noqa: F401
+    import services.plan_store as plan_store
+    importlib.reload(plan_store)
     import api.auth as auth_mod
     importlib.reload(auth_mod)
     import api.auth_blueprint as bp_mod
@@ -165,3 +168,37 @@ def test_signing_back_in_restores_a_deleted_account(client):
     back = client.post("/api/auth/login", json={"email": "z@a.com", "password": "password1"})
     assert back.status_code == 200
     assert client.get("/api/auth/me").status_code == 200
+
+
+def test_new_account_reports_the_free_plan(client):
+    r = client.post("/api/auth/register", json={"email": "p@q.com", "password": "password1"})
+    assert r.get_json()["user"]["plan"] == "free"
+
+
+def test_plan_and_usage_require_auth(client):
+    assert client.get("/api/me/usage").status_code == 401
+    assert client.post("/api/me/plan", json={"plan": "pro"}).status_code == 401
+
+
+def test_changing_plan_changes_the_reported_limits(client):
+    client.post("/api/auth/register", json={"email": "p@q.com", "password": "password1"})
+
+    before = client.get("/api/me/usage").get_json()
+    assert before["plan"] == "free"
+    assert before["limits"]["daily_scans"] == 3
+    assert before["limits"]["models"] == ["LesionSegmenter"]
+
+    r = client.post("/api/me/plan", json={"plan": "pro"})
+    assert r.status_code == 200
+    assert r.get_json()["user"]["plan"] == "pro"
+
+    after = client.get("/api/me/usage").get_json()
+    assert after["plan"] == "pro"
+    assert after["limits"]["models"] is None  # every model
+    assert client.get("/api/auth/me").get_json()["user"]["plan"] == "pro"
+
+
+def test_unknown_plan_is_rejected(client):
+    client.post("/api/auth/register", json={"email": "p@q.com", "password": "password1"})
+    assert client.post("/api/me/plan", json={"plan": "platinum"}).status_code == 400
+    assert client.post("/api/me/plan", json={}).status_code == 400
