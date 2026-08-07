@@ -9,7 +9,8 @@ import {
     IconArrowForwardUp,
     IconArrowsCross,
     IconArrowUpRight,
-    IconBrush,
+    IconPencil,
+	IconStack2,
     IconCamera,
     IconChartBar,
     IconCheck,
@@ -31,18 +32,17 @@ import {
     IconSettings,
     IconShare,
     IconSquareDashed,
-    IconStack2,
     IconTrash,
     IconZoomIn
 } from "@tabler/icons-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
+import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
 import { useLocation, useParams } from "react-router-dom";
 import AISidebar from "../components/AIAssistant/AISidebar";
 import { buildViewerActions } from "../components/AIAssistant/assistantActions";
-import MaskEditPanel, { type MaskEditMode } from "../components/MaskEditPanel/MaskEditPanel";
 import MeasurementPanel from "../components/MeasurementPanel/MeasurementPanel";
-import { SegmentationMeshViewer } from "../components/MeshViewer";
+import { SegmentationMeshViewer } from "../components/viewer/MeshViewer";
 import { cache as reportDataCache } from '../components/ReportScreen/ReportScreen';
 import OrganCheckbox from "../components/OrganCheckbox";
 import PercentileBar from "../components/PercentileBar";
@@ -50,6 +50,25 @@ import SessionHUD from "../components/ReadingSession/SessionHUD";
 import SessionSummary from "../components/ReadingSession/SessionSummary";
 import ReportScreen from "../components/ReportScreen/ReportScreen";
 import SliceJumpInput from "../components/SliceJumpInput";
+import SegmentsPopup from "../components/segmentation/SegmentsPopup";
+import MarginPanel from "../components/segmentation/MarginPanel";
+import IslandsPanel from "../components/segmentation/IslandsPanel";
+import LogicalOperatorsPanel from "../components/segmentation/LogicalOperatorsPanel";
+import { setBrushMaskingScope } from "../helpers/CornerstoneNifti2";
+
+import SmoothingFlyout from "../components/segmentation/SmoothingFlyout";
+import GrowFromSeedsFlyout from "../components/segmentation/GrowFromSeedFlyout";
+import FillBetweenSlicesFlyout from "../components/segmentation/FillBetweenSlicesFlyout";
+import CopyAcrossSlicesFlyout from "../components/segmentation/CopyAcrossSlicesFlyout";
+import HollowFlyout from "../components/segmentation/HollowFlyout";
+import LevelTracingFlyout from "../components/segmentation/LevelTracingFlyout";
+import { useScissorsTool } from "../helpers/viewer/useScissorsTool";
+import {
+  applyMargin, getActualMarginMm,
+  applyIslandsOperation, applyLogicalOperator, applySmoothing,
+  deleteSegmentEverywhere, getSegmentAtVoxel, getActiveEditSegment, type LogicalOperation,
+  type LevelTraceOperation
+} from "../helpers/CornerstoneNifti2";
 import {
     API_BASE,
     APP_CONSTANTS,
@@ -109,15 +128,28 @@ import {
     VOLUME_3D_PRESETS,
     VOLUME_3D_PRESETS_MR,
     zoomToFit,
+	registerNewSegmentColor,
+	isSegmentPresent,
     type CinePane,
     type PrimaryMouseToolName,
-    type SliceInfo
+    type SliceInfo,
+	setActiveEditSegment,
+	beginBrushMaskGuard,
+	endBrushMaskGuard,
 } from "../helpers/CornerstoneNifti2";
 import { useSmartFill } from "../helpers/viewer/useSmartFill";
+import { hasSegmentationVolume } from "../helpers/CornerstoneNifti2"; 
+import { useLevelTracing } from "../helpers/viewer/useLevelTracing";
+import AnnotationToolbar, {
+	type PrimaryEditTool,
+	type ScissorsOptions,
+} from "../components/viewer/AnnotationToolbar";
+import { setMaskBrushSize } from "../helpers/CornerstoneNifti2";
 import { useMorphPicker } from "../helpers/viewer/useMorphPicker";
 import { useLassoTool } from "../helpers/viewer/useLassoTool";
 import { useFocusedPane } from "../helpers/viewer/useFocusedPane";
 import { useKeyboardShortcuts } from "../helpers/viewer/useKeyboardShortcuts";
+import { type MaskingArea } from "../components/segmentation/MaskingSelect";
 import { getLocalDicomFiles, loadLocalDicomSeries } from "../helpers/dicomLocal";
 import { downloadUrlAsFile } from "../helpers/downloadFile";
 import { loadLocalNiftiAsRawBlobUrl } from "../helpers/localNifti";
@@ -129,7 +161,6 @@ import {
 import {
     computeStatRows,
     downloadStats,
-    KURTOSIS_TOOLTIP,
     summarizeOutOfRange,
     type OrganMetric,
 } from "../helpers/organStatsExport";
@@ -144,7 +175,7 @@ import { filenameToName } from "../helpers/utils.name";
 import { decodeViewerState, encodeViewerState } from "../helpers/viewerShareState";
 import { type CheckBoxData } from "../types";
 import "./VisualizationPage.css";
-import LiveWireOverlay from "../components/LiveWireOverlay";
+import LiveWireOverlay from "../components/viewer/LiveWireOverlay";
 
 type ViewMode = "mpr" | "axial" | "sagittal" | "coronal" | "3d";
 
@@ -190,6 +221,8 @@ const VIEW_MODE_SHORT_LABEL: Record<ViewMode, string> = {
 	coronal: "Coronal",
 	"3d": "3D",
 };
+
+export type MaskEditMode = "brush" | "eraser" | "smartfill" | "lasso" | null;
 
 // Case metadata fields pulled from PanTS/metadata.xlsx (via /api/search), in display
 // order — a curated subset of row_to_item's fields; spacing_sum/shape_sum/complete are
@@ -239,6 +272,37 @@ const resolveOrganLabel = (idx: number): string | undefined => {
     return getCustomSegmentLabels()[idx];
 };
 
+// Map an RGB triple to a plain color name so the AI can identify each
+// segmentation-mask color by name (paired with the mask legend it receives).
+const _COLOR_NAMES: { name: string; rgb: [number, number, number] }[] = [
+	{ name: "red", rgb: [220, 30, 30] },
+	{ name: "brownish red", rgb: [150, 40, 30] },
+	{ name: "orange", rgb: [255, 140, 0] },
+	{ name: "yellow", rgb: [230, 210, 60] },
+	{ name: "green", rgb: [40, 170, 70] },
+	{ name: "teal", rgb: [40, 180, 170] },
+	{ name: "light blue", rgb: [120, 190, 235] },
+	{ name: "blue", rgb: [50, 110, 220] },
+	{ name: "purple", rgb: [140, 60, 200] },
+	{ name: "pink", rgb: [235, 110, 175] },
+	{ name: "magenta", rgb: [220, 60, 180] },
+	{ name: "gray", rgb: [200, 200, 200] },
+	{ name: "white", rgb: [245, 245, 245] },
+];
+
+function rgbToColorName(r: number, g: number, b: number): string {
+	let best = _COLOR_NAMES[0];
+	let bestDist = Infinity;
+	for (const c of _COLOR_NAMES) {
+		const d = (c.rgb[0] - r) ** 2 + (c.rgb[1] - g) ** 2 + (c.rgb[2] - b) ** 2;
+		if (d < bestDist) {
+			bestDist = d;
+			best = c;
+		}
+	}
+	return best.name;
+}
+
 const CT_PRESETS = [
 	{ name: "Soft Tissue", width: 400, center: 40 },
 	{ name: "Bone", width: 1800, center: 400 },
@@ -248,6 +312,10 @@ const CT_PRESETS = [
 	{ name: "Angio", width: 600, center: 150 }, // contrast-enhanced vessels (CTA)
 ] as const;
 
+// Rough px/mm scale — Cornerstone panes don't expose a fixed px-per-mm ratio without
+// reading viewport spacing per pane, so this is a visual approximation, not a
+// pixel-exact brush footprint. Good enough for "see roughly how big this is."
+const PX_PER_MM_APPROX = 2.2;
 // Measurement tools (+ the magnify loupe, which shares the same primary-mouse-tool slot)
 // shown inside the collapsible "Measure" flyout, so the toolbar isn't crowded with one
 // button per tool (matches the split-button pattern OHIF uses). `key` is the keyboard
@@ -330,6 +398,7 @@ function VisualizationPage() {
 	const isLocal = isDicom || isLocalNifti;
 	const [dicomError, setDicomError] = useState<string | null>(null);
 
+
 	// Where to load the volumes from. Per the maintainer's rule, dataset cases load
 	// from the lab's LOCAL endpoints (served off disk on the JHU server — much faster
 	// for big full-body scans than streaming the .nii.gz from HuggingFace). We probe
@@ -353,6 +422,23 @@ function VisualizationPage() {
 				.catch(() => {});
 		}
 	}, [caseId, isDicom]);
+
+	const [showAnnotationToolbar, setShowAnnotationToolbar] = useState(false);
+	const [isEditRendering, setIsEditRendering] = useState(false);
+	useEffect(() => {
+		if (!showAnnotationToolbar) setEditMode((m) => (m === "brush" || m === "eraser" || m === "lasso" ? null : m));
+	}, [showAnnotationToolbar]);
+
+	// Refs into UI that lives outside AnnotationToolbar (the segments popup,
+	// the slice-jump overlay) so its Overview walkthrough can spotlight them
+	// anyway. The popup itself attaches these to its outer panel / drag
+	// header; SliceJumpInput is wrapped below since it doesn't take a ref
+	// prop of its own. See AnnotationToolbar's own doc-comment for details —
+	// the first-run "seen it once" logic now lives there too.
+	const annotationPopupRef = useRef<HTMLDivElement>(null);
+	const annotationPopupDragRef = useRef<HTMLDivElement>(null);
+	const annotationPopupMinRef = useRef<HTMLButtonElement>(null);
+	const sliceJumpWrapRef = useRef<HTMLDivElement>(null);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -402,6 +488,7 @@ function VisualizationPage() {
 		const qs = params.toString();
 		window.location.href = `${window.location.pathname}${qs ? `?${qs}` : ""}`;
 	};
+	
 
 	const axial_ref = useRef<HTMLDivElement>(null);
 	const sagittal_ref = useRef<HTMLDivElement>(null);
@@ -424,6 +511,7 @@ function VisualizationPage() {
 	const [opacityValue, setOpacityValue] = useState(
 		APP_CONSTANTS.DEFAULT_SEGMENTATION_OPACITY * 100
 	);
+	
 	const [outlineOpacityValue, setOutlineOpacityValue] = useState(0);
 	// Current/total slice per MPR pane, for the "245/519" caption + drag scrollbar.
 	// Populated by subscribeToSliceChanges once the volume is ready; null until then.
@@ -439,6 +527,32 @@ function VisualizationPage() {
 	// should agree on first load instead of showing a level the preset never set.
 	const [windowWidth, setWindowWidth] = useState(400);
 	const [windowCenter, setWindowCenter] = useState(40);
+	const [maskingArea, setMaskingArea] = useState<MaskingArea>("everywhere");
+	// Resolves the global masking selection into the concrete inputs the existing
+	// helper functions expect: which segment ids an "all/visible segments" operation
+	// should run over, and whether the current pick means "restrict to inside" a set
+	// of segments vs "restrict to outside" them.
+	const resolveMaskingTargets = (): { applyToVisible: boolean; ids: number[]; inside: boolean; invalid?: boolean } => {
+		const allIds = checkBoxData.map((o) => o.id);
+		switch (maskingArea) {
+			case "insideAllSegments":
+			case "outsideAllSegments":
+				return { applyToVisible: true, ids: allIds, inside: maskingArea.startsWith("inside") };
+			case "insideVisibleSegments":
+			case "outsideVisibleSegments":
+				return { applyToVisible: true, ids: visibleSegmentIndices, inside: maskingArea.startsWith("inside") };
+			case "insideSegment":
+			case "outsideSegment":
+				if (activeSegment == null) {
+					return { applyToVisible: false, ids: [], inside: true, invalid: true };
+				}
+				return { applyToVisible: false, ids: [activeSegment], inside: maskingArea.startsWith("inside") };
+			case "everywhere":
+			default:
+				return { applyToVisible: false, ids: [], inside: true };
+		}
+	};
+	
 	// Brief W/L readout: shown only while the user is actively dragging the brightness/
 	// contrast sliders or picking a preset — not on the initial/deep-link window apply, and
 	// not left on screen indefinitely. windowReadoutTimerRef holds the fade-out timeout so
@@ -452,6 +566,11 @@ function VisualizationPage() {
 	const [showReportScreen, setShowReportScreen] = useState(false);
 	const [showStats, setShowStats] = useState(false);
 	const [showAISidebar, setShowAISidebar] = useState(false);
+	// Width (px) of the AI sidebar; drag-resizable from its left edge. Both the
+	// sidebar and the content shift read this via the --vp-ai-width CSS var.
+	const [aiWidth, setAiWidth] = useState(400);
+	const aiWidthRef = useRef(400);
+	const vpRootRef = useRef<HTMLDivElement>(null);
 	const [organStats, setOrganStats] = useState<OrganStat[] | null>(null);
 	const [statsLoading, setStatsLoading] = useState(false);
 	const [statsError, setStatsError] = useState(false);
@@ -508,24 +627,440 @@ function VisualizationPage() {
 	const [cinePlaying, setCinePlaying] = useState(false);
 	const [cineFps, setCineFps] = useState(12);
 	// Mask editing: right-side panel + which brush (paint/erase) owns the mouse.
-	const [showEditPanel, setShowEditPanel] = useState(false);
 	const [editMode, setEditMode] = useState<MaskEditMode>(null);
+	const [brushPreviewActive, setBrushPreviewActive] = useState(false);
+	const [activeToolbarTool, setActiveToolbarTool] = useState<PrimaryEditTool>(null);
+	
+	
+	// Only paint/erase/scissors/growFromSeeds need the pane to behave differently
+	// (brush cursor, lasso clicks, smartfill scribbles). Everything else (margin,
+	// islands, logical ops, smoothing, slice tools, level tracing) just needs its
+	// flyout open — no separate pane interaction mode.
+	const TOOLBAR_TO_EDIT_MODE: Partial<Record<Exclude<PrimaryEditTool, null>, MaskEditMode>> = {
+	  paint: "brush",
+	  erase: "eraser",
+	  scissors: "lasso",
+	  growFromSeeds: "smartfill",
+	};
+
+	
+
+	
+	const handleToolbarToolChange = (tool: PrimaryEditTool) => {
+		if (tool && !hasActiveTarget) return; // no target picked — refuse to activate anything
+		setActiveToolbarTool(tool);
+		setEditMode(tool ? TOOLBAR_TO_EDIT_MODE[tool] ?? null : null);
+	  };
+
+	
+	const handleDiameterChange = (mm: number) => {
+	  setDiameterMm(mm);
+	  setMaskBrushSize(mm);
+	};
+	const [diameterMm, setDiameterMm] = useState(10);
+	const [scissorsOptions, setScissorsOptions] = useState<ScissorsOptions>({
+		operation: "eraseInside",
+	});
+
+	const [activeSegment, setActiveSegmentState] = useState<number | null>(null);
+	const [levelTraceTolerance, setLevelTraceTolerance] = useState(50);
+	const [levelTraceOperation, setLevelTraceOperation] = useState<LevelTraceOperation>("fillInside");
+	const [segmentColorsHex, setSegmentColorsHex] = useState<Record<number, string>>({});
+	const [segmentVisibility, setSegmentVisibility] = useState<Record<number, boolean>>({});
+	// Existing-organ dropdown in SegmentsPopup — lets the brush target one of the
+	// 32 static catalog organs without listing them all as rows.
+	const [activeCatalogOrganId, setActiveCatalogOrganId] = useState<number | null>(null);
+	const hasSegments = checkBoxData.length > 0;
+	// Static catalog organs (the 32-organ PanTS set) live entirely in the local nifti's
+	// ground-truth labelmap. They're included in checkBoxData at load, so masking scope
+	// (inside/outside this/all/visible segments) resolves for them the same way it does
+	// for runtime-created custom classes — no special-casing needed.
+	
+
+	// keep MaskBrush target in sync with the popup's active segment
+	useEffect(() => {
+		if (activeSegment != null) setActiveEditSegment(activeSegment);
+	  }, [activeSegment]);
+
+	// map paint/erase/scissors toolbar selection onto the existing Cornerstone tool wiring
+	useEffect(() => {
+	if (activeToolbarTool === "paint" || activeToolbarTool === "erase") {
+		setActiveMeasurementTool(null);
+		setActiveMaskEditTool(activeToolbarTool === "paint" ? EDIT_BRUSH : EDIT_ERASER);
+	} else if (activeToolbarTool === "growFromSeeds") {
+		setActiveMeasurementTool(null);
+		setActiveMaskEditTool(null);
+		releasePrimaryMouseTools();
+	} else if (!activeMeasureTool) {
+		setActiveMaskEditTool(null);
+		toggleCrosshairTool(crosshairToolActive);
+	}
+	}, [activeToolbarTool]);
+
+	const setActiveSegment = (id: number) => setActiveSegmentState(id);
+
+	// Selecting an existing organ from the dropdown targets the brush at it
+	// exactly like clicking a custom-segment row does.
+	const handleSelectCatalogOrgan = (id: number | null) => {
+		setActiveCatalogOrganId(id);
+		if (id != null) setActiveSegmentState(id);
+	};
+	const handleRenameSegment = (id: number, name: string): boolean => {
+		const dup = checkBoxData.some((s) => s.id !== id && s.label.toLowerCase() === name.toLowerCase());
+		if (dup) return false;
+		setCheckBoxData((prev) => prev.map((s) => (s.id === id ? { ...s, label: name } : s)));
+		return true;
+	};
+
+	const handleSegmentColorChange = (id: number, hex: string) => {
+	setSegmentColorsHex((prev) => ({ ...prev, [id]: hex }));
+	registerNewSegmentColor(id, hexToColor(hex));
+	};
+
+	const handleToggleSegmentVisibility = (id: number) => {
+	setSegmentVisibility((prev) => {
+		const next = { ...prev, [id]: prev[id] === false ? true : false };
+		setCheckState((cs) => {
+		const arr = [...cs];
+		arr[id] = next[id] !== false;
+		return arr;
+		});
+		return next;
+	});
+	};
+	const hasAnySegments = checkBoxData.length > 0;
+	useEffect(() => {
+		// Catalog organs are already part of checkBoxData at load, so every
+		// scope option (insideSegment, insideAllSegments, insideVisibleSegments,
+		// and their outside equivalents) resolves for them exactly the way it
+		// does for custom classes — no special-casing needed here anymore.
+		const needsAnySegments =
+			maskingArea === "insideAllSegments" ||
+			maskingArea === "outsideAllSegments" ||
+			maskingArea === "insideVisibleSegments" ||
+			maskingArea === "outsideVisibleSegments";
+		const needsActiveSegment = maskingArea === "insideSegment" || maskingArea === "outsideSegment";
+		if ((needsAnySegments && !hasAnySegments) || (needsActiveSegment && activeSegment == null)) {
+			setMaskingArea("everywhere");
+		}
+	}, [hasAnySegments, activeSegment, maskingArea]);
+
+	const handleDeleteSegment = (id: number) => {
+	// Clear every voxel belonging to this segment in the actual segmentation
+	// volume first — otherwise the label data survives (still paintable, still
+	// present in the 3D render, masking scopes, islands, etc) even though the
+	// row disappears from the popup.
+	const r = deleteSegmentEverywhere(id);
+	if (r) sessionRef.current?.log("edit", `Deleted segment (${r.changedVoxels.toLocaleString()} vox)`, 2000);
+	setCheckBoxData((prev) => prev.filter((s) => s.id !== id));
+	setCheckState((prev) => { const n = [...prev]; n[id] = false; return n; });
+	setSegmentColorsHex((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
+	setSegmentVisibility((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
+	if (activeCatalogOrganId === id) setActiveCatalogOrganId(null);
+	if (activeSegment === id) setActiveSegmentState(checkBoxData.find((s) => s.id !== id)?.id ?? null);
+	};
+
+	const renderAnnotationFlyout = (tool: Exclude<PrimaryEditTool, null>) => {
+	switch (tool) {
+		case "margin": {
+			const marginInfo = activeSegment ? getActualMarginMm(3) : null;
+			return (
+			  <MarginPanel
+			  onApply={(op, mm) => {
+				const { applyToVisible, ids } = resolveMaskingTargets();
+				const r = applyMargin(op, mm, applyToVisible, ids, maskFilter);
+				if (r) sessionRef.current?.log("edit", `Margin ${op} ${mm}mm (${r.changedVoxels.toLocaleString()} vox)`, 2000);
+			}}			
+				actualMm={marginInfo?.mm ?? null}
+				actualVoxels={marginInfo?.voxels ?? null}
+			  />
+			);
+		  }
+		  case "islands":
+			return (
+			  <IslandsPanel
+				onApply={(op, min) => {
+					const r = applyIslandsOperation(op, min, islandSeedVoxel ?? undefined, maskFilter);
+				  if (r) {
+					sessionRef.current?.log("edit", `Islands: ${op} (${r.changedVoxels.toLocaleString()} vox)`, 2000);
+					// "Split islands to segments" creates brand-new segment indices on
+					// the backend (with their own color already registered) — fold
+					// them into the same UI state a manually-created class would use,
+					// so they show up in the segments popup as real, functioning
+					// custom classes rather than invisible/unlabeled data.
+					if (r.createdSegments?.length) {
+						setCheckBoxData((prev) => [
+							...prev,
+							...r.createdSegments!.map((s) => ({ id: s.id, label: s.label })),
+						]);
+						setCheckState((prev) => {
+							const next = [...prev];
+							for (const s of r.createdSegments!) next[s.id] = true;
+							return next;
+						});
+						setLabelColorMap((prev) => {
+							const next = { ...prev };
+							for (const s of r.createdSegments!) next[s.id] = s.color;
+							return next;
+						});
+						setSegmentColorsHex((prev) => {
+							const next = { ...prev };
+							for (const s of r.createdSegments!) next[s.id] = colorToHex(s.color);
+							return next;
+						});
+					}
+				  }
+				}}
+				pickingSelectedIsland={morphPicker.picking}
+				onPickSelectedIsland={morphPicker.startPicking}
+				onResetPick={resetIslandPick}
+				hasSelectedIsland={islandSeedVoxel != null && !islandPickInvalid}
+				pickedInvalid={islandPickInvalid}
+				targetKey={activeCatalogOrganId ?? activeSegment}
+			  />
+			);
+			case "logicalOperators":
+				return (
+				  <LogicalOperatorsPanel
+					segments={logicalOpSegments}
+					targetSegmentId={activeSegment ?? checkBoxData[0]?.id ?? 1}
+					operation={logicalOp}
+					onOperationChange={setLogicalOp}
+					sourceId={logicalOpSourceId}
+					onSourceIdChange={setLogicalOpSourceId}
+					bypassMasking={logicalOpBypassMasking}
+					onBypassMaskingChange={setLogicalOpBypassMasking}
+					onApply={(op, src, bypass) => {
+					  const target = activeSegment ?? checkBoxData[0]?.id ?? 1;
+					  const r = applyLogicalOperator(op, target, src, bypass, maskFilter);
+					  if (r) sessionRef.current?.log("edit", `Logical op ${op} (${r.changedVoxels.toLocaleString()} vox)`, 2000);
+					}}
+				  />
+				);
+		case "growFromSeeds":
+		return (
+			<GrowFromSeedsFlyout
+			markMode={smartFill.markMode}
+			setMarkMode={smartFill.setMarkMode}
+			scope={smartFill.scope}
+			setScope={smartFill.setScope}
+			apply={smartFill.apply}
+			clearScribbles={smartFill.clearScribbles}
+			hasForegroundMarks={smartFill.hasForegroundMarks}
+			hasBackgroundMarks={smartFill.hasBackgroundMarks}
+			/>
+		);
+		case "fillBetweenSlices":
+		return (
+			<FillBetweenSlicesFlyout
+			pane={focusedPane.getFocusedPane()}
+			totalSlices={sliceInfo[focusedPane.getFocusedPane()]?.total ?? 0}
+			segmentIndex={activeSegment ?? 1}
+			maskFilter={maskFilter}
+			onLog={(d) => sessionRef.current?.log("edit", d, 2000)}
+			/>
+		);
+		case "copyAcrossSlices":
+		return (
+			<CopyAcrossSlicesFlyout
+			pane={focusedPane.getFocusedPane()}
+			totalSlices={sliceInfo[focusedPane.getFocusedPane()]?.total ?? 0}
+			segmentIndex={activeSegment ?? 1}
+			maskFilter={maskFilter}
+			onLog={(d) => sessionRef.current?.log("edit", d, 2000)}
+			/>
+		);
+		case "hollow":
+		return (
+			<HollowFlyout
+			segmentIndex={activeSegment ?? 1}
+			maskFilter={maskFilter}
+			onLog={(d) => sessionRef.current?.log("edit", d, 2000)}
+			/>
+		);
+		case "smoothing":
+		return (
+			<SmoothingFlyout
+			onApply={(method, kernelMm) => {
+				const { applyToVisible, ids } = resolveMaskingTargets();
+				const r = applySmoothing(kernelMm, applyToVisible, ids, maskFilter);
+				if (r) sessionRef.current?.log("edit", `Smoothing ${method} (${r.changedVoxels.toLocaleString()} vox)`, 2000);
+			}}
+			/>
+		);
+		case "levelTracing":
+			return (
+				<LevelTracingFlyout
+					operation={levelTraceOperation}
+					onOperationChange={setLevelTraceOperation}
+					toleranceHu={levelTraceTolerance}
+					onToleranceChange={setLevelTraceTolerance}
+				/>
+			);
+	}
+	};
+	
+
+
+	
+	const morphPicker = useMorphPicker({
+		panelOpen: showAnnotationToolbar,
+		onLog: (detail) => sessionRef.current?.log("edit", detail, 1500),
+	  });
+
+	// The islands "keep/remove selected" picker shares morphPicker.seedVoxel with
+	// the other morphology tools, which has no concept of "this pick is stale."
+	// We track a "cleared" marker instead of needing the hook itself to forget the
+	// voxel: once cleared, the same seedVoxel value keeps reading as "nothing
+	// picked" until the user actually clicks a new voxel (which changes the
+	// value and naturally clears the marker again).
+	// NOTE: this has to be React state, not a ref — a ref mutation doesn't
+	// trigger a re-render, so the "picked" UI (and the Apply button's reset)
+	// wouldn't actually update on screen until some unrelated state change
+	// happened to force a re-render.
+	const [clearedIslandSeed, setClearedIslandSeed] = useState<[number, number, number] | null>(null);
+	const resetIslandPick = () => {
+		setClearedIslandSeed(morphPicker.seedVoxel ?? null);
+		// Switching operation (or target segment), or pressing Apply, should
+		// also cancel an in-progress pick — otherwise morphPicker.picking stays
+		// true and the viewport is left silently armed/waiting for a click for
+		// an operation that may no longer need one.
+		// If useMorphPicker doesn't expose a cancel method yet, add one there —
+		// this call is a no-op until it does.
+		(morphPicker as unknown as { stopPicking?: () => void; cancelPicking?: () => void }).stopPicking?.();
+		(morphPicker as unknown as { stopPicking?: () => void; cancelPicking?: () => void }).cancelPicking?.();
+	};
+	const islandSeedVoxel =
+		morphPicker.seedVoxel && morphPicker.seedVoxel !== clearedIslandSeed
+			? morphPicker.seedVoxel
+			: null;
+	// A pick only counts if the clicked voxel actually belongs to the segment
+	// the islands operation is about to run on — islands are just connected
+	// components *within* the active segment, so a click anywhere else can't
+	// be applied.
+	const islandPickInvalid =
+		islandSeedVoxel != null && getSegmentAtVoxel(islandSeedVoxel) !== getActiveEditSegment();
+
+	
+	const visibleSegmentIndices = useMemo(
+		() => checkBoxData.filter((o) => checkState[o.id]).map((o) => o.id),
+		[checkBoxData, checkState]
+	);
+
+
+
+	// Single source of truth for "what does the current masking selection
+	// actually resolve to" — shared by the live maskFilter (used by every
+	// non-brush tool) and by the brush's pointerup guard below, so the two
+	// can never disagree about which area/ids are in effect.
+	const resolvedMasking = useMemo(() => {
+		const { ids, invalid } = resolveMaskingTargets();
+		const effectiveArea = invalid || (maskingArea !== "everywhere" && ids.length === 0)
+			? "everywhere"
+			: maskingArea;
+		return { effectiveArea, ids };
+	}, [maskingArea, checkBoxData, visibleSegmentIndices, activeSegment, renderingEngine, viewportIds, volumeId]);
+
+	const maskFilter = useMemo(
+		() => buildMaskFilter(resolvedMasking.effectiveArea, resolvedMasking.ids),
+		[resolvedMasking]
+	);
+
+
+	// Resolves what the BRUSH is allowed to overwrite, given the same maskingArea/ids
+	// every other tool's maskFilter already encodes. Brush locking is per-segment (not
+	// per-voxel), so "outside X" unlocks every segment except X; "inside X" unlocks
+	useEffect(() => {
+		const isLiveCommitTool =
+			editMode === "brush" ||
+			editMode === "eraser" ||
+			(editMode === "lasso" && activeToolbarTool === "scissors") ||
+			activeToolbarTool === "levelTracing";
+		if (!isLiveCommitTool) return;
+	
+		const isOnPane = (e: Event) => (e.target as HTMLElement)?.closest?.(".vp-pane");
+	
+		const onDown = (e: Event) => {
+			if (!isOnPane(e)) return;
+			if (editMode === "brush" || editMode === "eraser") beginBrushMaskGuard();
+			setIsEditRendering(true);
+		};
+		const onUp = () => {
+			if (editMode === "brush" || editMode === "eraser") {
+				endBrushMaskGuard(resolvedMasking.effectiveArea, resolvedMasking.ids);
+			}
+			requestAnimationFrame(() => requestAnimationFrame(() => setIsEditRendering(false)));
+		};
+	
+		window.addEventListener("pointerdown", onDown, true);
+		window.addEventListener("pointerup", onUp, true);
+		return () => {
+			window.removeEventListener("pointerdown", onDown, true);
+			window.removeEventListener("pointerup", onUp, true);
+		};
+	}, [editMode, activeToolbarTool, resolvedMasking]);
+	// Resolves what the BRUSH is allowed to overwrite, given the same maskingArea/ids
+	// every other tool's maskFilter already encodes. Brush locking is per-segment (not
+	// per-voxel), so "outside X" unlocks every segment except X; "inside X" unlocks
+	// just X; "everywhere" unlocks all. The eraser additionally needs background (0)
+	// unlocked even under "inside" scopes, since ERASE_INSIDE_CIRCLE always writes 0
+	// as its destination — if 0 stays locked the eraser silently does nothing.
+	useEffect(() => {
+		if (maskingArea === "everywhere") {
+			setBrushMaskingScope("all");
+			return;
+		}
+		const { ids } = resolveMaskingTargets();
+		const inside = maskingArea.startsWith("inside");
+		const erasing = editMode === "eraser";
+
+		if (inside) {
+			setBrushMaskingScope(erasing ? [...ids, 0] : ids);
+		} else {
+			const allIds = checkBoxData.map((o) => o.id);
+			const complement = allIds.filter((id) => !ids.includes(id));
+			setBrushMaskingScope([...complement, 0]); // "outside" already includes background
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [maskingArea, checkBoxData, visibleSegmentIndices, activeSegment, editMode, renderingEngine, viewportIds, volumeId]);
 
 	const smartFill = useSmartFill({
 		enabled: editMode === "smartfill",
 		sliceInfoRef,
+		maskFilter,
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
 	});
 	
-	const morphPicker = useMorphPicker({
-		panelOpen: showEditPanel,
+	const lasso = useLassoTool({
+		enabled: editMode === "lasso" && activeToolbarTool !== "scissors",
+		maskFilter,
+		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
+	});
+	
+	const { applyToVisible, ids } = resolveMaskingTargets();
+	const scissors = useScissorsTool({
+		enabled: editMode === "lasso" && activeToolbarTool === "scissors",
+		operation: scissorsOptions.operation,
+		applyToVisibleSegments: applyToVisible,
+		visibleSegmentIndices: ids,
+		activeSegmentIndex: activeSegment,
+		maskFilter, // <-- add this
+		magnetEnabled: scissorsOptions.magnetEnabled,
+		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
+	});
+	const levelTracing = useLevelTracing({
+		enabled: activeToolbarTool === "levelTracing",
+		toleranceHu: levelTraceTolerance,
+		operation: levelTraceOperation,
+		activeSegmentIndex: activeSegment,
+		maskFilter,
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 1500),
 	});
-	const lasso = useLassoTool({
-		enabled: editMode === "lasso",
-		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
-	});
-	
+
+
+	// The active drawing tool for the pane handlers below — whichever one is
+	// actually armed right now (they're mutually exclusive via `enabled`).
+	const activeDrawTool = activeToolbarTool === "scissors" ? scissors : lasso;
 	// Progressive resolution: after the fast low-res load, the full-res CT streams in
 	// the background and hot-swaps in place (no reload). idle → streaming → done/failed.
 	const [enhance, setEnhance] = useState<{ state: "idle" | "streaming" | "done" | "failed"; pct: number | null }>({ state: "idle", pct: null });
@@ -592,7 +1127,14 @@ function VisualizationPage() {
 		text: "",
 		color: "transparent",
 	});
+	const hasActiveTarget = activeSegment != null;
 
+	useEffect(() => {
+		if (!hasActiveTarget && activeToolbarTool) {
+			setActiveToolbarTool(null);
+			setEditMode(null);
+		}
+	}, [hasActiveTarget]);
 	// const location = useLocation();
 	// Load and render visualization on first render
 
@@ -615,6 +1157,8 @@ function VisualizationPage() {
 			toggleCrosshairTool(crosshairToolActive);
 		}
 	}, [editMode, activeMeasureTool, crosshairToolActive]);
+
+
 
 	useEffect(() => {
 		if (editMode !== "lasso") lasso.reset();
@@ -660,6 +1204,75 @@ function VisualizationPage() {
 			document.body.removeChild(link);
 		}
 	}, [caseId]);
+
+	// Downscale a screenshot so the vision model gets a small, fast-to-process
+	// image (full-res panes make local vision models slow and prone to timeout).
+	const downscaleDataUrl = (dataUrl: string, maxDim = 768): Promise<string> =>
+		new Promise((resolve) => {
+			const img = new Image();
+			img.onload = () => {
+				const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+				if (scale >= 1) return resolve(dataUrl);
+				const c = document.createElement("canvas");
+				c.width = Math.round(img.width * scale);
+				c.height = Math.round(img.height * scale);
+				const ctx = c.getContext("2d");
+				if (!ctx) return resolve(dataUrl);
+				ctx.drawImage(img, 0, 0, c.width, c.height);
+				resolve(c.toDataURL("image/jpeg", 0.85));
+			};
+			img.onerror = () => resolve(dataUrl);
+			img.src = dataUrl;
+		});
+
+	// Capture for the AI assistant: the three MPR panes (via the shared helper)
+	// plus the 3D pane's WebGL canvas — the four views the user sees in the 2×2
+	// grid. The segmentation masks are left VISIBLE so the model can identify
+	// each organ by its color (paired with the mask legend). Images are
+	// downscaled before returning so the vision model responds quickly.
+	const captureAllViews = useCallback(async () => {
+		const shots: { name: string; dataUrl: string }[] = await captureViewportImages();
+		try {
+			const pane = document.querySelector<HTMLElement>(".render");
+			const canvas = pane?.querySelector<HTMLCanvasElement>("canvas");
+			if (canvas && canvas.width && pane && pane.offsetParent !== null) {
+				const url = canvas.toDataURL("image/png");
+				if (url && url.length > 128) shots.push({ name: "3d", dataUrl: url });
+			}
+		} catch (error) {
+			console.warn("[BodyMaps AI] 3D capture skipped", error);
+		}
+		// Downscale all shots for fast vision inference.
+		return Promise.all(
+			shots.map(async (s) => ({ name: s.name, dataUrl: await downscaleDataUrl(s.dataUrl) }))
+		);
+	}, []);
+
+	// Color → organ legend for the currently visible masks, so the vision model
+	// can name each colored region correctly instead of guessing.
+	const getMaskLegend = useCallback((): { organ: string; color: string }[] => {
+		const legend: { organ: string; color: string }[] = [];
+		for (const item of checkBoxData) {
+			if (!checkState[item.id]) continue;
+			const rgb = labelColorMap[item.id] ?? segmentation_category_colors[item.id];
+			if (!rgb) continue;
+			legend.push({ organ: item.label, color: rgbToColorName(rgb[0], rgb[1], rgb[2]) });
+		}
+		return legend;
+	}, [checkBoxData, checkState, labelColorMap]);
+
+	// Live drag-resize of the AI panel. During the drag we set the CSS var
+	// directly on the page root (cheap, no React re-render) so the sidebar and
+	// the CT views resize smoothly; on release we persist the width to state.
+	const applyAiWidth = useCallback((clientX: number) => {
+		const w = Math.min(760, Math.max(320, window.innerWidth - clientX));
+		aiWidthRef.current = w;
+		vpRootRef.current?.style.setProperty("--vp-ai-width", `${w}px`);
+	}, []);
+
+	const commitAiWidth = useCallback(() => {
+		setAiWidth(aiWidthRef.current);
+	}, []);
 
 	const startReadingSession = async () => {
 		if (sessionRef.current || sessionStarting) return;
@@ -763,14 +1376,13 @@ function VisualizationPage() {
 		setCrosshairToolActive,
 		setShowStats,
 		setShowMetadata,
-		setShowEditPanel,
+		setShowAnnotationToolbar, // was setShowEditPanel
 		setShowMeasurePanel,
 		getFocusedPane: focusedPane.getFocusedPane,
 		sliceInfoRef,
 		editMode,
 		setZoomLevel,
 	});
-
 	// Live-adjust the frame rate: if a clip is already running, restart it immediately at
 	// the new speed rather than waiting for the next stop/start.
 	const handleCineFpsChange = (fps: number) => {
@@ -910,34 +1522,30 @@ function VisualizationPage() {
 		// resolve after the second and clobber state with the wrong case's result.
 		let cancelled = false;
 		const setup = async () => {
-			// const state = location.state;
-			// if (!state) {
-			// alert('No Nifti Files Uploaded!');
-			// navigate('/');
-			// return;
-			// }
-
-			const checkBoxData = segmentation_categories.map((filename, i) => ({
-				label: filenameToName(filename),
-				id: i + 1,
-			}));
-			setCheckBoxData(checkBoxData);
-			const initialState = [true]; // background 永远可见
-			checkBoxData.forEach((item) => {
-				initialState[item.id] = true;
-			});
-			setCheckState(initialState);
-			const max = Math.max(
-				...Object.keys(labelColorMap).map((key) => parseInt(key))
-			);
-
-			const cmap: ColorLUT = Array.from({ length: max + 1 }, () => [
-				0, 0, 0, 0,
-			]);
+			// Local DICOM/NIfTI have no server-side segmentation — don't seed the static
+			// 32-organ catalog for them; checkBoxData should only ever contain segments
+			// the user actually creates (via createNewAnnotationClass), so hasAnySegments
+			// reflects reality instead of always being true.
+			if (!isLocal) {
+				const checkBoxData = segmentation_categories.map((filename, i) => ({
+					label: filenameToName(filename),
+					id: i + 1,
+				}));
+				setCheckBoxData(checkBoxData);
+				const initialState = [true];
+				checkBoxData.forEach((item) => { initialState[item.id] = true; });
+				setCheckState(initialState);
+			} else {
+				setCheckBoxData([]);
+				setCheckState([true]);
+			}
+		
+			const max = Math.max(...Object.keys(labelColorMap).map((key) => parseInt(key)));
+			const cmap: ColorLUT = Array.from({ length: max + 1 }, () => [0, 0, 0, 0]);
 			for (const key in labelColorMap) {
 				cmap[parseInt(key)] = labelColorMap[parseInt(key)];
 			}
-
+		
 			// Local DICOM: build imageIds from the picked files instead of NIfTI URLs.
 			// No segmentation layer exists for these scans.
 			if (isDicom) {
@@ -1460,7 +2068,7 @@ function VisualizationPage() {
 							onChange={(e) => setPaneSliceIndex(pane, Number(e.target.value))}
 							aria-label={`${pane} slice`}
 						/>
-						<SliceJumpInput pane={pane} info={info} />
+						<SliceJumpInput ref={sliceJumpWrapRef} pane={pane} info={info} />
 					</>
 				)}
 				<div className={`vp-window-readout${windowReadoutVisible ? " vp-window-readout--visible" : ""}`}>
@@ -1582,8 +2190,9 @@ function VisualizationPage() {
 		// The right-side slot is shared by stats / metadata / measurements / mask editing.
 		setShowMetadata(false);
 		setShowMeasurePanel(false);
-		setShowEditPanel(false);
+		setShowAnnotationToolbar(false);
 		setEditMode(null);
+		setActiveToolbarTool(null);
 		setShowStats((v) => !v);
 		loadOrganStats();
 		loadPercentileContext();
@@ -1592,8 +2201,9 @@ function VisualizationPage() {
 	const handleToggleMetadata = () => {
 		setShowStats(false);
 		setShowMeasurePanel(false);
-		setShowEditPanel(false);
+		setShowAnnotationToolbar(false);
 		setEditMode(null);
+		setActiveToolbarTool(null);
 		setShowMetadata((v) => !v);
 		loadPercentileContext();
 	};
@@ -1607,9 +2217,9 @@ function VisualizationPage() {
 			setShowStats(false);
 			setShowMetadata(false);
 			setShowMeasurePanel(false);
-			setShowEditPanel(false);
+			setShowAnnotationToolbar(false);
 			setEditMode(null);
-
+			setActiveToolbarTool(null);
 			void loadOrganStats();
 			void loadPercentileContext();
 		}
@@ -1639,15 +2249,42 @@ demographics?.age ?? null
 [organStats, organNorms, demographics]
 );
 const flaggedOrgans = useMemo(() => summarizeOutOfRange(statRows), [statRows]);
-
-// Classes created at runtime via "New class" — anything in checkBoxData whose id
-// falls outside the static 32-organ catalog. Fed to OrganCheckbox as a separate
-// section, since the fixed OrganSystems map has no slot for them.
 const customOrgans = useMemo(
     () => checkBoxData.filter((o) => o.id > segmentation_categories.length),
     [checkBoxData]
 );
 
+
+const organCatalog = useMemo(() => {
+	if (!hasSegmentationVolume()) {
+		// Segmentation not cached yet — show the full static list rather than
+		// spamming isSegmentPresent before there's anything to check.
+		return segmentation_categories.map((filename, i) => ({ id: i + 1, label: filenameToName(filename) }));
+	}
+
+	const withPresence = segmentation_categories
+		.map((filename, i) => ({ id: i + 1, label: filenameToName(filename) }))
+		.filter((o) => isSegmentPresent(o.id));
+
+	if (withPresence.length === 0) {
+		return segmentation_categories.map((filename, i) => ({ id: i + 1, label: filenameToName(filename) }));
+	}
+	return withPresence;
+}, [renderingEngine, viewportIds, volumeId, checkBoxData, loading]);
+
+// Logical Operators' "With segment" dropdown should only offer organs that
+// actually exist in this scan (same presence check organCatalog already
+// does), plus any custom classes the user created themselves (those are
+// real by definition — no presence check needed). checkBoxData on its own
+// is the raw 32-organ catalog seeded at load, not filtered by presence.
+const logicalOpSegments = useMemo(() => {
+	const presentIds = new Set(organCatalog.map((o) => o.id));
+	return checkBoxData.filter((s) => s.id > segmentation_categories.length || presentIds.has(s.id));
+}, [checkBoxData, organCatalog]);
+
+const [logicalOp, setLogicalOp] = useState<LogicalOperation>("copy");
+const [logicalOpSourceId, setLogicalOpSourceId] = useState<number | null>(null);
+const [logicalOpBypassMasking, setLogicalOpBypassMasking] = useState(true);
 const aiAvailableOrgans = useMemo(() => {
 	const measuredOrgans = (organStats ?? [])
 		.filter((metric) =>
@@ -1681,11 +2318,23 @@ const aiAvailableOrgans = useMemo(() => {
 		return [(n >> 16) & 255, (n >> 8) & 255, n & 255, 255]; // Isolate red, blue, green, all values
 	};
 
+	// [r,g,b,a] Color back to "#rrggbb" hex — needed when a segment gets a
+	// color assigned on the backend (e.g. islands split creating new classes)
+	// and the UI's color state, which is keyed by hex, needs to pick it up.
+	const colorToHex = (color: Color): string => {
+		const [r, g, b] = color;
+		return `#${[r, g, b].map((c) => Math.max(0, Math.min(255, Math.round(c))).toString(16).padStart(2, "0")).join("")}`;
+	};
+
 	const handleCreateClass = (name: string, colorHex: string): CheckBoxData | null => {
-		const result = createNewAnnotationClass(name, hexToColor(colorHex));
+		const trimmed = name.trim();
+		const dup = checkBoxData.some((s) => s.label.toLowerCase() === trimmed.toLowerCase());
+		if (dup) return null; // name collides with an existing organ (catalog or custom)
+	
+		const result = createNewAnnotationClass(trimmed, hexToColor(colorHex));
 		if (!result) return null;
 	
-		const newOrgan: CheckBoxData = { id: result.segmentIndex, label: name };
+		const newOrgan: CheckBoxData = { id: result.segmentIndex, label: trimmed };
 		setCheckBoxData((prev) => [...prev, newOrgan]);
 		setCheckState((prev) => {
 			const next = [...prev];
@@ -1693,11 +2342,11 @@ const aiAvailableOrgans = useMemo(() => {
 			return next;
 		});
 		setLabelColorMap((prev) => ({ ...prev, [result.segmentIndex]: result.color }));
+		setSegmentColorsHex((prev) => ({ ...prev, [result.segmentIndex]: colorHex }));
 	
-		sessionRef.current?.log("edit", `Created new class "${name}"`, 2000);
+		sessionRef.current?.log("edit", `Created new class "${trimmed}"`, 2000);
 		return newOrgan;
 	};
-
 	const handleMouseClick = async (e: MouseEvent) => {
 		const idx = getOrganLabelOnClick();
 		if (idx === undefined || typeof idx !== "number") {
@@ -1717,6 +2366,7 @@ const aiAvailableOrgans = useMemo(() => {
 			text: label
 		});
 	};
+
 
 	// Mousemove handler for the "hover to identify" tool — resolves the organ under the
 	// cursor for one specific pane (via canvasToWorld, not the crosshair) and floats a
@@ -1756,14 +2406,21 @@ const aiAvailableOrgans = useMemo(() => {
 
 	return (
 		<div
+			ref={vpRootRef}
 			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}`}
 			style={{
 				display: "flex",
 				overflow: "hidden",
 				flexDirection: "column",
 				height: "100vh",
-				width: "100vw",
-			}}>
+				["--vp-ai-width" as string]: `${aiWidth}px`,
+				// When the AI sidebar opens, shrink the app to the left of it so the
+				// CT views reflow beside the panel instead of being covered by it
+				// (the fixed sidebar occupies --vp-ai-width on the right). The
+				// showAISidebar resize effect re-fits the viewports to the new width.
+				width: showAISidebar ? "calc(100vw - var(--vp-ai-width, 400px))" : "100vw",
+				transition: "width 180ms ease",
+			} as React.CSSProperties}>
 		
 			{/* ---- Top toolbar (PYCAD-style). Lives in normal flow, so it sits ABOVE the
 			     viewports and never overlays them. Shown/hidden by the gear button. ---- */}
@@ -2219,23 +2876,16 @@ const aiAvailableOrgans = useMemo(() => {
 												<IconArrowForwardUp size={20} color="white" />
 												<span className="vp-tool__tip">Redo (⇧⌘Z)</span>
 											</button>
+											
 											{!isLocal && (
 												<button
-													className={`vp-tool ${showEditPanel || editMode ? "vp-tool--active" : ""}`}
-													onClick={() => {
-														setShowStats(false);
-														setShowMetadata(false);
-														setShowMeasurePanel(false);
-														setShowEditPanel((v) => {
-															const next = !v;
-															if (!next) setEditMode(null);
-															return next;
-														});
-													}}
-													aria-label="Edit masks"
+													className={`vp-tool ${showAnnotationToolbar ? "vp-tool--active" : ""}`}
+													onClick={() => setShowAnnotationToolbar((v) => !v)}
+													aria-label="Annotate"
+													aria-pressed={showAnnotationToolbar}
 												>
-													<IconBrush size={20} color={showEditPanel || editMode ? "#08090b" : "white"} />
-													<span className="vp-tool__tip">Edit masks</span>
+													<IconPencil size={20} color={showAnnotationToolbar ? "#08090b" : "white"} />
+													<span className="vp-tool__tip">Annotate</span>
 												</button>
 											)}
 
@@ -2387,8 +3037,9 @@ const aiAvailableOrgans = useMemo(() => {
 																onClick={() => {
 																	setShowStats(false);
 																	setShowMetadata(false);
-																	setShowEditPanel(false);
+																	setShowAnnotationToolbar(false);
 																	setEditMode(null);
+																	setActiveToolbarTool(null);										
 																	setShowMeasurePanel((v) => !v);
 																	panelsFlyout.close();
 																}}
@@ -2567,20 +3218,23 @@ const aiAvailableOrgans = useMemo(() => {
 						style={{ ...panelStyle("axial"), ...paneGridStyle("axial") }}
 						onMouseUp={smartFill.handleMouseUp}>
 						<div
-							className={`axial ${loading ? "" : "vp-pane vp-pane--axial"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" ? " vp-pane--edit-cursor" : ""}`}
+							className={`axial ${loading ? "" : "vp-pane vp-pane--axial"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 							data-label="Axial"
 							ref={axial_ref}
 							onClick={(e) => { handleMouseClick(e); }}
+							onDoubleClick={activeDrawTool.handleDoubleClick("axial")}
 							onMouseDown={(e) => {
 								focusedPane.handleMouseDown("axial")();
 								smartFill.handleMouseDown("axial")(e);
 								morphPicker.handlePaneClick("axial")(e);
-								lasso.handleClick("axial")(e);
+								activeDrawTool.handleClick("axial")(e);
+								levelTracing.handleClick("axial")(e);
 							}}
 							onMouseMove={(e) => {
 								handlePaneHover("axial")(e);
 								smartFill.handleMouseMove("axial")(e);
-								lasso.handleMouseMove("axial")(e);
+								activeDrawTool.handleMouseMove("axial")(e);
+								levelTracing.handleMouseMove("axial")(e);
 							}}
 							onMouseLeave={handlePaneHoverLeave}
 							onWheel={focusedPane.handleWheel("axial")}
@@ -2603,38 +3257,62 @@ const aiAvailableOrgans = useMemo(() => {
 									))}
 							</svg>
 						)}
-						{editMode === "lasso" && lasso.pane === "axial" && (
+						{editMode === "lasso" && activeDrawTool.pane === "axial" && (
 							<LiveWireOverlay
-								pane="axial"
-								anchorPointsCanvas={lasso.anchorsCanvas}
-								cornerPointsCanvas={lasso.anchorsCanvas}
-								livePreviewPath={
-									lasso.livePreview && lasso.anchorsCanvas.length
-										? [lasso.anchorsCanvas[lasso.anchorsCanvas.length - 1], lasso.livePreview]
-										: null
-								}
+							pane="axial"
+							anchorPointsCanvas={activeDrawTool.anchorsCanvas}
+							cornerPointsCanvas={activeDrawTool.cornersCanvas}
+							nearClose={activeDrawTool.nearClose}
+							livePreviewPath={activeDrawTool.livePreviewPath}
+						/>
+						)}
+						{activeToolbarTool === "levelTracing" && levelTracing.previewPane === "axial" && levelTracing.previewPath && (
+						<svg
+							className="vp-leveltrace-overlay"
+							style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 30 }}
+						>
+							<polygon
+								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
+								fill="rgba(234, 179, 8, 0.22)"
+								stroke="#eab308"
+								strokeWidth={2}
+							/>
+						</svg>
+					)}
+					{brushPreviewActive &&
+						(activeToolbarTool === "paint" || activeToolbarTool === "erase") &&
+						focusedPane.getFocusedPane() === "axial" && (
+							<div
+								className="vp-brush-preview"
+								style={{
+									width: diameterMm * PX_PER_MM_APPROX * zoomLevel,
+									height: diameterMm * PX_PER_MM_APPROX * zoomLevel,
+								}}
 							/>
 						)}
-					</div>
+				</div>
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("sagittal"), ...paneGridStyle("sagittal") }}
 						onMouseUp={smartFill.handleMouseUp}>
 					<div
-						className={`sagittal ${loading ? "" : "vp-pane vp-pane--sagittal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" ? " vp-pane--edit-cursor" : ""}`}
+						className={`sagittal ${loading ? "" : "vp-pane vp-pane--sagittal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Sagittal"
 						ref={sagittal_ref}
 						onClick={(e) => { handleMouseClick(e); }}
+						onDoubleClick={activeDrawTool.handleDoubleClick("sagittal")}
 						onMouseDown={(e) => {
 							focusedPane.handleMouseDown("sagittal")();
 							smartFill.handleMouseDown("sagittal")(e);
 							morphPicker.handlePaneClick("sagittal")(e);
-							lasso.handleClick("sagittal")(e);
+							activeDrawTool.handleClick("sagittal")(e);
+							levelTracing.handleClick("sagittal")(e);
 						}}
 						onMouseMove={(e) => {
 							handlePaneHover("sagittal")(e);
 							smartFill.handleMouseMove("sagittal")(e);
-							lasso.handleMouseMove("sagittal")(e);
+							activeDrawTool.handleMouseMove("sagittal")(e);
+							levelTracing.handleMouseMove("sagittal")(e);
 						}}
 						onMouseLeave={handlePaneHoverLeave}
 						onWheel={focusedPane.handleWheel("sagittal")}
@@ -2657,16 +3335,37 @@ const aiAvailableOrgans = useMemo(() => {
 									))}
 							</svg>
 						)}
-						{editMode === "lasso" && lasso.pane === "sagittal" && (
+						{editMode === "lasso" && activeDrawTool.pane === "sagittal" && (
 							<LiveWireOverlay
 								pane="sagittal"
-								anchorPointsCanvas={lasso.anchorsCanvas}
-								cornerPointsCanvas={lasso.anchorsCanvas}
-								livePreviewPath={
-									lasso.livePreview && lasso.anchorsCanvas.length
-										? [lasso.anchorsCanvas[lasso.anchorsCanvas.length - 1], lasso.livePreview]
-										: null
-								}
+								anchorPointsCanvas={activeDrawTool.anchorsCanvas}
+								cornerPointsCanvas={activeDrawTool.cornersCanvas}
+								nearClose={activeDrawTool.nearClose}
+								livePreviewPath={activeDrawTool.livePreviewPath}
+							/>
+						)}
+						{activeToolbarTool === "levelTracing" && levelTracing.previewPane === "sagittal" && levelTracing.previewPath && (
+						<svg
+							className="vp-leveltrace-overlay"
+							style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 30 }}
+						>
+							<polygon
+								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
+								fill="rgba(234, 179, 8, 0.22)"
+								stroke="#eab308"
+								strokeWidth={2}
+							/>
+						</svg>
+					)}
+					{brushPreviewActive &&
+						(activeToolbarTool === "paint" || activeToolbarTool === "erase") &&
+						focusedPane.getFocusedPane() === "sagittal" && (
+							<div
+								className="vp-brush-preview"
+								style={{
+									width: diameterMm * PX_PER_MM_APPROX * zoomLevel,
+									height: diameterMm * PX_PER_MM_APPROX * zoomLevel,
+								}}
 							/>
 						)}
 					</div>
@@ -2676,20 +3375,25 @@ const aiAvailableOrgans = useMemo(() => {
 						style={{ ...panelStyle("coronal"), ...paneGridStyle("coronal") }}
 						onMouseUp={smartFill.handleMouseUp}>
 					<div
-						className={`coronal ${loading ? "" : "vp-pane vp-pane--coronal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" ? " vp-pane--edit-cursor" : ""}`}
+						className={`coronal ${loading ? "" : "vp-pane vp-pane--coronal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Coronal"
 						ref={coronal_ref}
-						onClick={(e) => { handleMouseClick(e);  }}
+						onClick={(e) => { handleMouseClick(e); }}
+						onDoubleClick={activeDrawTool.handleDoubleClick("coronal")}
 						onMouseDown={(e) => {
 							focusedPane.handleMouseDown("coronal")();
 							smartFill.handleMouseDown("coronal")(e);
 							morphPicker.handlePaneClick("coronal")(e);
-							lasso.handleClick("coronal")(e);
+							activeDrawTool.handleClick("coronal")(e);
+							levelTracing.handleClick("coronal")(e);
+
+
 						}}
 						onMouseMove={(e) => {
 							handlePaneHover("coronal")(e);
 							smartFill.handleMouseMove("coronal")(e);
-							lasso.handleMouseMove("coronal")(e);
+							activeDrawTool.handleMouseMove("coronal")(e);
+							levelTracing.handleMouseMove("coronal")(e);
 						}}
 						onMouseLeave={handlePaneHoverLeave}
 						onWheel={focusedPane.handleWheel("coronal")}
@@ -2712,16 +3416,38 @@ const aiAvailableOrgans = useMemo(() => {
 									))}
 							</svg>
 						)}
-						{editMode === "lasso" && lasso.pane === "coronal" && (
+						{editMode === "lasso" && activeDrawTool.pane === "coronal" && (
 							<LiveWireOverlay
 								pane="coronal"
-								anchorPointsCanvas={lasso.anchorsCanvas}
-								cornerPointsCanvas={lasso.anchorsCanvas}
-								livePreviewPath={
-									lasso.livePreview && lasso.anchorsCanvas.length
-										? [lasso.anchorsCanvas[lasso.anchorsCanvas.length - 1], lasso.livePreview]
-										: null
-								}
+								anchorPointsCanvas={activeDrawTool.anchorsCanvas}
+								cornerPointsCanvas={activeDrawTool.cornersCanvas}
+								nearClose={activeDrawTool.nearClose}
+								livePreviewPath={activeDrawTool.livePreviewPath}
+							/>
+						)}
+
+						{activeToolbarTool === "levelTracing" && levelTracing.previewPane === "coronal" && levelTracing.previewPath && (
+						<svg
+							className="vp-leveltrace-overlay"
+							style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 30 }}
+						>
+							<polygon
+								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
+								fill="rgba(234, 179, 8, 0.22)"
+								stroke="#eab308"
+								strokeWidth={2}
+							/>
+						</svg>
+					)}
+					{brushPreviewActive &&
+						(activeToolbarTool === "paint" || activeToolbarTool === "erase") &&
+						focusedPane.getFocusedPane() === "coronal" && (
+							<div
+								className="vp-brush-preview"
+								style={{
+									width: diameterMm * PX_PER_MM_APPROX * zoomLevel,
+									height: diameterMm * PX_PER_MM_APPROX * zoomLevel,
+								}}
 							/>
 						)}
 					</div>
@@ -2786,7 +3512,7 @@ const aiAvailableOrgans = useMemo(() => {
 					</div>
 				</div>
 			</div>
-
+			</div>
 			{hoverOrganTip.visible && (
 				<div
 					className="vp-organ-tip"
@@ -2931,9 +3657,7 @@ const aiAvailableOrgans = useMemo(() => {
 														<span>{fmtStat(r.skewness, 2)}</span>
 													</div>
 													<div className="vp-stats__detail-item">
-														<span className="vp-stats__tooltip-label" title={KURTOSIS_TOOLTIP}>
-														Kurtosis
-													</span>
+														<span>Kurtosis</span>
 														<span>{fmtStat(r.kurtosis, 2)}</span>
 													</div>
 													<div className="vp-stats__detail-item">
@@ -3001,39 +3725,6 @@ const aiAvailableOrgans = useMemo(() => {
 				/>
 			)}
 
-			{showEditPanel && (
-				<MaskEditPanel
-					organs={checkBoxData}
-					caseId={String(caseId)}
-					serverCaseId={pantsCase}
-					mode={editMode}
-					onModeChange={setEditMode}
-					onClose={() => {
-						setShowEditPanel(false);
-						setEditMode(null);
-					}}
-					onEdit={(detail) => sessionRef.current?.log("edit", detail, 2000)}
-					onCreateClass={handleCreateClass}
-					smartFillMarkMode={smartFill.markMode}
-					onSmartFillMarkModeChange={smartFill.setMarkMode}
-					smartFillScope={smartFill.scope}
-					onSmartFillScopeChange={smartFill.setScope}
-					onApplySmartFill={smartFill.apply}
-					onClearSmartFillScribbles={smartFill.clearScribbles}
-					lassoAnchorCount={lasso.anchorsCanvas.length}
-					onLassoUndo={lasso.undo}
-					onLassoClose={lasso.close}
-					onLassoCancel={lasso.cancel}
-					morphScope={morphPicker.scope}
-					onMorphScopeChange={morphPicker.setScope}
-					pickingMorphTarget={morphPicker.picking}
-					onPickIsland={morphPicker.startPicking}
-					morphSeedVoxel={morphPicker.seedVoxel}
-					focusedPane={focusedPane.getFocusedPane()}
-					totalSlices={sliceInfo[focusedPane.getFocusedPane()]?.total ?? 0}
-				/>
-
-			)}
 
 			{/* Kept mounted (display toggles) so the chat history survives open/close. */}
 			<AISidebar
@@ -3052,8 +3743,54 @@ const aiAvailableOrgans = useMemo(() => {
 				organMetrics={organStats ?? []}
 				demographics={demographics}
 				actions={aiActions}
+				captureViewport={captureAllViews}
+				getMaskLegend={getMaskLegend}
+				onResize={applyAiWidth}
+				onResizeEnd={commitAiWidth}
 			/>
-			</div>
+			<AnnotationToolbar
+				open={showAnnotationToolbar}
+				hasSegments={hasSegments}
+				hasActiveTarget={hasActiveTarget}
+				activeTool={activeToolbarTool}
+				onToolChange={handleToolbarToolChange}
+				diameterMm={diameterMm}
+				onDiameterChange={handleDiameterChange}
+				onDiameterPreviewChange={setBrushPreviewActive}
+				scissorsOptions={scissorsOptions}
+				onScissorsOptionsChange={setScissorsOptions}
+				renderFlyout={renderAnnotationFlyout}
+				scissorsPointCount={scissors.anchorsCanvas.length}
+				onScissorsCancel={scissors.cancel}
+				maskingArea={maskingArea}
+				onMaskingAreaChange={setMaskingArea}
+				hasAnySegments={hasAnySegments}
+				scopeLocked={false}
+				isRendering={isEditRendering}
+				popupRef={annotationPopupRef}
+				popupDragRef={annotationPopupDragRef}
+				popupMinRef={annotationPopupMinRef}
+				sliceJumpRef={sliceJumpWrapRef}
+			/>
+			<SegmentsPopup
+				open={showAnnotationToolbar}
+				segments={customOrgans}
+				colors={segmentColorsHex}
+				visibility={segmentVisibility}
+				activeSegmentId={activeSegment}
+				onSelect={(id) => { setActiveSegment(id); setActiveCatalogOrganId(null); }}
+				onRename={handleRenameSegment}
+				onColorChange={handleSegmentColorChange}
+				onToggleVisibility={handleToggleSegmentVisibility}
+				onDelete={handleDeleteSegment}
+				onCreate={handleCreateClass}
+				organCatalog={organCatalog}
+				activeCatalogOrganId={activeCatalogOrganId}
+				onSelectCatalogOrgan={handleSelectCatalogOrgan}
+				containerRef={annotationPopupRef}
+				dragHandleRef={annotationPopupDragRef}
+				minButtonRef={annotationPopupMinRef}
+			/>
 
 			{/* Local-DICOM load failure: explain and offer the way back. */}
 			{dicomError && (

@@ -69,7 +69,13 @@ After pushing changes, SSH into the server and run the following.
 ssh visitor@bdmap1.wse.jhu.edu
 ```
 
-#### 1. Pull latest changes
+#### 1. Back up the database
+Accounts, sessions and job state live in SQLite, so take a copy before any deploy that might run migrations.
+```
+cd /home/visitor/PanTS-Viewer/flask-server && cp *.db ~/db-backup-$(date +%F-%H%M).db 2>/dev/null && echo "backed up" || echo "no db found"
+```
+
+#### 2. Pull latest changes
 Production must always deploy from `main`. Confirm the branch first, then pull.
 ```
 cd /home/visitor/PanTS-Viewer
@@ -79,14 +85,20 @@ git pull
 ```
 If `git pull` (or the checkout) refuses because of "local changes would be overwritten," someone edited files directly on the server. Do **not** force past it. Run `git status` to see what changed, then discard each file with `git checkout -- <file>` (or ask the maintainer) before pulling again. The server should never carry local edits.
 
-#### 2. Rebuild the frontend and refresh backend dependencies
+#### 3. Rebuild the frontend and refresh backend dependencies
 ```
 cd /home/visitor/PanTS-Viewer/PanTS-Demo && npm ci && npm run build
 /home/visitor/.conda/envs/PanTS_backend/bin/pip install -r /home/visitor/PanTS-Viewer/flask-server/requirements.txt
 ```
 The `pip install` is a fast no-op when nothing changed, but it is required whenever a PR adds or bumps a Python dependency — otherwise the restarted backend crashes on a missing import and the site goes empty. If `npm run build` errors out, **stop here**: nginx keeps serving the old site until a build succeeds, so fix the error before restarting the backend.
 
-#### 3. Restart the backend
+#### 4. Apply database migrations
+Required whenever a PR adds an Alembic revision; a fast no-op otherwise. Skipping it after a schema change leaves the backend querying tables that do not exist.
+```
+cd /home/visitor/PanTS-Viewer/flask-server && /home/visitor/.conda/envs/PanTS_backend/bin/alembic upgrade head
+```
+
+#### 5. Restart the backend
 ```
 # Stop the old gunicorn process and wait for the port to free
 pkill -f "gunicorn.*app:app"; sleep 2
@@ -101,7 +113,7 @@ nohup /home/visitor/.conda/envs/PanTS_backend/bin/gunicorn \
 echo "PID: $!"
 ```
 
-#### 4. Verify the backend is running
+#### 6. Verify the backend is running
 Give it a few seconds to load, then check the backend booted, the dataset loads, and masks serve (all three must succeed).
 ```
 sleep 8
@@ -110,5 +122,14 @@ curl -s "http://127.0.0.1:8000/api/search?limit=1" | head -c 120; echo
 curl -s -o /dev/null -w "segmentations: %{http_code}\n" "http://127.0.0.1:8000/api/get-segmentations/17.nii.gz"
 ```
 Expect `{"message":"pong"}`, a JSON object with `items`, and `segmentations: 200`. If the backend fails to boot, check the log for the traceback.
+
+Then check sign-in is wired up.
+```
+curl -s http://127.0.0.1:8000/api/auth/oauth/providers
+curl -sS -i https://bodymaps.wse.jhu.edu/api/auth/oauth/google | grep -i "^location:" | tr '&' '\n' | grep redirect_uri
+```
+Expect `{"github":true,"google":true}`, then a `redirect_uri` beginning `https%3A%2F%2Fbodymaps.wse.jhu.edu`. A `http://` scheme there means `PUBLIC_BASE_URL` is unset or stale, and every sign-in fails `redirect_uri_mismatch` — the provider matches that string exactly. Note `providers` only reports whether credentials are non-empty, so it still returns `true` for rotated-but-not-updated secrets; those surface as `invalid_client` at sign-in.
+
+Finally, load `https://bodymaps.wse.jhu.edu/upload` in a browser and confirm a signed-out visitor can still start a run.
 
 Logs are written to `/tmp/gunicorn.log`.

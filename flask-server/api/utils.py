@@ -1274,11 +1274,26 @@ def ensure_sort_cols(df: pd.DataFrame) -> pd.DataFrame:
     df["__complete"] = complete
     return df
 
-# load meta
-if not os.path.exists(META_FILE):
-    raise FileNotFoundError(f"metadata not found: {META_FILE}")
-DF_RAW = pd.read_excel(META_FILE)
-DF = _norm_cols(DF_RAW)
+# load meta — OPTIONAL in local dev. metadata.xlsx powers the case library and
+# search; without it those simply return nothing. The viewer (loads a case by
+# id) and the AI assistant (organ volumes come straight from the NIfTI masks /
+# HuggingFace) both still work, so a missing file must NOT crash the backend.
+if os.path.exists(META_FILE):
+    try:
+        DF_RAW = pd.read_excel(META_FILE)
+    except Exception as _meta_err:
+        print(f"[WARN] Could not read metadata {META_FILE}: {_meta_err} — case library will be empty.")
+        DF_RAW = pd.DataFrame()
+else:
+    print(f"[WARN] metadata not found: {META_FILE} — case library/search will be empty. "
+          "Set PANTS_PATH in flask-server/.env to your dataset to enable it.")
+    DF_RAW = pd.DataFrame()
+
+try:
+    DF = _norm_cols(DF_RAW)
+except Exception as _norm_err:
+    print(f"[WARN] metadata normalization failed: {_norm_err} — using empty catalog.")
+    DF = pd.DataFrame()
 
 # CancerVerse metadata (CT-only second dataset). Loaded through the SAME _norm_cols
 # so search/sort/row_to_item work unchanged. Optional: if the path/CSV is absent
