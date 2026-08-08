@@ -576,6 +576,12 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
   const [pLoad, setPLoad] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  // De-identified share link, minted on demand (see mintShareLink below) —
+  // this used to be a raw `${API_ORIGIN}/api/report/${id}` string built
+  // straight from the real case id. That exposed the real id in the URL and
+  // skipped the token system the rest of the app now uses for sharing.
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [shareLoading, setShareLoading] = useState(false);
   const startRef = useRef(Date.now());
 
   useEffect(() => {
@@ -592,8 +598,30 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
       .catch(() => setLoading(false));
   }, [id]);
 
+  // Reset any previously-minted link when the case changes, so a stale
+  // token for a different case can never be shown/copied.
+  useEffect(() => {
+    setShareUrl(null);
+  }, [id]);
 
-  const shareUrl = `${APP_CONSTANTS.API_ORIGIN}/api/report/${id}`;
+  // Mints (or re-derives — the backend token is deterministic per case id)
+  // an opaque share token and builds the link to the new de-identified
+  // /share/:token card. Safe to call repeatedly; no-ops if already minted
+  // or in flight.
+  const mintShareLink = useCallback(async () => {
+    if (shareUrl || shareLoading) return;
+    setShareLoading(true);
+    try {
+      const r = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/share/${id}/token`, { method: 'POST' });
+      const j = await r.json();
+      const token = typeof j.url === 'string' ? j.url.split('/').pop() : null;
+      if (token) setShareUrl(`${window.location.origin}/share/${token}`);
+    } catch (e) {
+      console.error('Failed to create share link:', e);
+    } finally {
+      setShareLoading(false);
+    }
+  }, [id, shareUrl, shareLoading]);
 
   useEffect(() => {
     if (!shareOpen) return;
@@ -610,6 +638,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
   }, [shareOpen]);
 
   const handleCopyShareLink = async () => {
+    if (!shareUrl) return;
     try {
       await navigator.clipboard.writeText(shareUrl);
       setCopied(true);
@@ -841,7 +870,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
               )}
               <div style={{ position: 'relative' }}>
                 <button
-                  onClick={() => setShareOpen((v) => !v)}
+                  onClick={() => { setShareOpen((v) => !v); mintShareLink(); }}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -870,7 +899,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
                   }}>
                     <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.86)', lineHeight: 1.5, marginBottom: 12 }}>
                       Share this link with anyone — a family member, your doctor, whoever needs it. It opens a
-                      readable summary of this scan, with plain-language and clinical views built in.
+                      de-identified, readable summary of this scan.
                     </div>
                     <div style={{ display: 'flex', gap: 8 }}>
                       <div style={{
@@ -878,14 +907,18 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
                         borderRadius: 10, padding: '8px 10px', fontSize: 12, color: 'rgba(255,255,255,0.65)',
                         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                       }}>
-                        {shareUrl}
+                        {shareLoading ? 'Generating link…' : (shareUrl || 'Link unavailable')}
                       </div>
                       <button
                         onClick={handleCopyShareLink}
+                        disabled={!shareUrl}
                         style={{
-                          flexShrink: 0, background: copied ? 'rgba(52,199,89,0.18)' : 'rgba(255,255,255,0.10)',
+                          flexShrink: 0,
+                          background: copied ? 'rgba(52,199,89,0.18)' : 'rgba(255,255,255,0.10)',
                           border: `1px solid ${copied ? 'rgba(52,199,89,0.4)' : 'rgba(255,255,255,0.16)'}`,
-                          borderRadius: 10, padding: '8px 12px', cursor: 'pointer', fontFamily: 'inherit',
+                          borderRadius: 10, padding: '8px 12px', cursor: shareUrl ? 'pointer' : 'not-allowed',
+                          opacity: shareUrl ? 1 : 0.5,
+                          fontFamily: 'inherit',
                           fontSize: 12, fontWeight: 700, color: copied ? '#34c759' : 'rgba(255,255,255,0.86)',
                           transition: 'all 0.2s',
                         }}

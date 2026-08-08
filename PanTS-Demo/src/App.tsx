@@ -18,6 +18,7 @@ const VisualizationPage = lazy(() => import("./routes/VisualizationPage"));
 const CompareViewerPage = lazy(() => import("./routes/CompareViewerPage"));
 const UploadPage = lazy(() => import("./routes/UploadPage"));
 const AccountPage = lazy(() => import("./routes/AccountPage"));
+const SharePatientCard = lazy(() => import("./routes/SharePatientCard"));
 const RotatingHeartLoader = lazy(() => import("./components/Loading"));
 
 const BASENAME = import.meta.env.VITE_BASENAME;
@@ -66,6 +67,7 @@ function App() {
                   />
                   <Route path="/dashboard" element={<Homepage />} />
                   <Route path="/case/:caseId" element={<VisualizationPage />} />
+                  <Route path="/share/:shareId" element={<SharePatientCard />} />
                   <Route
                     path="/session/:sessionId"
                     element={<VisualizationPage />}
