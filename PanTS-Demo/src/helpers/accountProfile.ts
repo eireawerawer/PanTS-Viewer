@@ -111,7 +111,7 @@ export const PLANS: Plan[] = [
 		group: "individual",
 		blurb: "Try BodyMaps",
 		price: "$0",
-		priceNote: "per month",
+		priceNote: "no donation needed",
 		pointsLead: "Includes:",
 		points: [
 			"3 scans a day",
@@ -127,7 +127,7 @@ export const PLANS: Plan[] = [
 		group: "individual",
 		blurb: "For everyday clinical and research work",
 		price: "$1.99",
-		priceNote: "per month",
+		priceNote: "monthly donation",
 		inherits: "free",
 		points: [
 			"50 scans a day",
@@ -136,7 +136,7 @@ export const PLANS: Plan[] = [
 			"Priority in the queue",
 			"Create reports and annotations",
 		],
-		cta: "Upgrade to Pro",
+		cta: "Donate for Pro",
 	},
 	{
 		id: "team",
@@ -144,7 +144,7 @@ export const PLANS: Plan[] = [
 		group: "team",
 		blurb: "For a practice or lab",
 		price: "$4.99",
-		priceNote: "per month",
+		priceNote: "monthly donation",
 		badge: "2–15 members",
 		inherits: "pro",
 		// No "everything in Pro per member" bullet: the inherits line above the
@@ -153,7 +153,7 @@ export const PLANS: Plan[] = [
 			"Shared case library",
 			"Shared annotations and reports",
 			"Usage pooled across the team",
-			"Central billing",
+			"One donation for the whole team",
 		],
 		cta: "Choose Team",
 	},
@@ -164,7 +164,7 @@ export const PLANS: Plan[] = [
 		blurb: "For a hospital or institution",
 		// "Talk to us" is the button; the price slot needs to say something else.
 		price: "Custom",
-		priceNote: "volume pricing",
+		priceNote: "donation by agreement",
 		badge: "15+ members",
 		inherits: "team",
 		points: [

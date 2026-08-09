@@ -214,7 +214,7 @@ describe("plan", () => {
 		const user = userEvent.setup();
 		renderAt("/account/plan");
 
-		await user.click(await screen.findByRole("button", { name: "Upgrade to Pro" }));
+		await user.click(await screen.findByRole("button", { name: "Donate for Pro" }));
 
 		await waitFor(() => expect(lastCall("POST", "/api/me/plan")?.body).toEqual({ plan: "pro" }));
 		expect(await screen.findByText("You're on Pro.")).toBeInTheDocument();
@@ -225,7 +225,8 @@ describe("plan", () => {
 		await screen.findByRole("heading", { name: "Change plan" });
 		expect(screen.getByText("$0")).toBeInTheDocument();
 		expect(screen.getByText("$1.99")).toBeInTheDocument();
-		expect(screen.getAllByText("per month").length).toBe(2);
+		expect(screen.getByText("no donation needed")).toBeInTheDocument();
+		expect(screen.getByText("monthly donation")).toBeInTheDocument();
 	});
 });
 

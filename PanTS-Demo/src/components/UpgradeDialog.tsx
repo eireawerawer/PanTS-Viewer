@@ -75,7 +75,7 @@ const detail = (b: UpgradeBlock): string => {
 				? `The ${planLabel(b.plan)} plan includes ${b.limit} messages a day. More ${reset}.`
 				: `The ${planLabel(b.plan)} plan includes ${b.limit} messages a day.`;
 		case "concurrent_scans":
-			return "Wait for the current scan to finish, or upgrade to run several at once.";
+			return "Wait for the current scan to finish, or donate to run several at once.";
 		case "model_locked":
 			return `${planLabel(b.plan)} includes LesionSegmenter. Every other model is on Pro.`;
 		case "postprocessing":
@@ -135,7 +135,7 @@ const UpgradeDialog: React.FC<{ block: UpgradeBlock | null; onClose: () => void 
 							className="upg-primary"
 							onClick={() => { onClose(); navigate("/account/plan"); }}
 						>
-							See plans
+							See donation options
 						</button>
 					)}
 					<button type="button" className="upg-secondary" onClick={onClose}>
