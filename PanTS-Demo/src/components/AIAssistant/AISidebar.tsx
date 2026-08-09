@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useAuth } from "../../contexts/authContext";
+import { track } from "../../helpers/analytics";
 import { API_BASE } from "../../helpers/constants";
 import type {
   AIAction,
@@ -785,6 +786,7 @@ export default function AISidebar({
         .slice(-12)
         .map((message) => ({ role: message.role, content: message.content }));
 
+      track("assistant_send_message");
       setInput("");
       setAttachments([]);
       if (textareaRef.current) textareaRef.current.style.height = "auto";

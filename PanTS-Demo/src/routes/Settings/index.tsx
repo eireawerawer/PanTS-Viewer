@@ -5,6 +5,7 @@ import React, { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import Header from "../../components/Header";
 import { useAuth } from "../../contexts/authContext";
+import { track } from "../../helpers/analytics";
 import { SettingsContext } from "./context";
 import "./Settings.css";
 
@@ -33,6 +34,10 @@ const SECTIONS = [
 
 const SettingsPage: React.FC = () => {
 	const navigate = useNavigate();
+	// Once per visit to the settings area, not once per section.
+	useEffect(() => {
+		track("account_open_settings");
+	}, []);
 	const { isAuthenticated, loading, promptAuth } = useAuth();
 
 	const [busy, setBusy] = useState(false);

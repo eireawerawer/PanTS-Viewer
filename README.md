@@ -87,6 +87,16 @@ npm install
 npm run dev
 ```
 
+# Usage dashboard (internal, local only)
+
+`analytics/` is a separate Vite app showing which features get used and how long
+people spend on them, sliceable by plan and account type. It is **not part of
+any deploy**: the endpoints it reads are refused unless the backend is started
+with `ANALYTICS_DASHBOARD=true`, which is off by default. See
+[analytics/README.md](analytics/README.md) for how to run it.
+
+The main site records the events either way — that half is always on.
+
 # Deploying Updates to the Server
 ---
 

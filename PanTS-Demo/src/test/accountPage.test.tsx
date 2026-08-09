@@ -21,6 +21,7 @@ const USER = {
 	email: "test.user@example.com",
 	name: null as string | null,
 	plan: "free",
+	account_type: null as string | null,
 };
 
 const USAGE = {
@@ -46,6 +47,7 @@ beforeEach(() => {
 	localStorage.clear();
 	USER.name = null;
 	USER.plan = "free";
+	USER.account_type = null;
 	URL.createObjectURL = vi.fn(() => "blob:stub");
 	URL.revokeObjectURL = vi.fn();
 
@@ -55,7 +57,11 @@ beforeEach(() => {
 		calls.push({ method, url: u, body: init?.body ? JSON.parse(String(init.body)) : undefined });
 
 		if (u.includes("/api/auth/me") && method === "PATCH") {
-			USER.name = (JSON.parse(String(init?.body)) as { name: string }).name || null;
+			const patch = JSON.parse(String(init?.body)) as {
+				name?: string; account_type?: string;
+			};
+			if ("name" in patch) USER.name = patch.name || null;
+			if ("account_type" in patch) USER.account_type = patch.account_type || null;
 			return json({ user: { ...USER } });
 		}
 		if (u.includes("/api/auth/me")) return json({ user: { ...USER } });
@@ -144,6 +150,30 @@ describe("display name", () => {
 			expect(lastCall("PATCH", "/api/auth/me")?.body).toEqual({ name: "Ada Lovelace" })
 		);
 		expect(await screen.findByText(/Your name has been updated/i)).toBeInTheDocument();
+	});
+
+	it("saves the role to the account rather than to this browser", async () => {
+		const user = userEvent.setup();
+		renderAt();
+
+		await user.selectOptions(await screen.findByLabelText(/Role/), "clinician");
+
+		await waitFor(() =>
+			expect(lastCall("PATCH", "/api/auth/me")?.body).toEqual({ account_type: "clinician" })
+		);
+		expect(await screen.findByText(/role is set to Clinician/i)).toBeInTheDocument();
+	});
+
+	it("clears the role with an empty value", async () => {
+		const user = userEvent.setup();
+		USER.account_type = "student";
+		renderAt();
+
+		await user.selectOptions(await screen.findByLabelText(/Role/), "");
+
+		await waitFor(() =>
+			expect(lastCall("PATCH", "/api/auth/me")?.body).toEqual({ account_type: "" })
+		);
 	});
 
 	it("does not fire a request when the field is left unchanged", async () => {

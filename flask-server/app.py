@@ -13,6 +13,7 @@ from flask_cors import CORS
 from constants import Constants
 #print("DEBUG_CONSTANT:", Constants.SESSIONS_DIR_NAME)
 
+from api.analytics_blueprint import analytics_blueprint
 from api.api_blueprint import api_blueprint
 from api.auth_blueprint import auth_blueprint
 from api.oauth_blueprint import init_oauth, oauth_blueprint
@@ -41,6 +42,9 @@ def create_app():
     app.register_blueprint(api_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(auth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(oauth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
+    # /analytics/collect is always live; the dashboard's read endpoints inside
+    # this blueprint 404 unless ANALYTICS_DASHBOARD=true.
+    app.register_blueprint(analytics_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
 
     app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB, for overcoming size limits in file uploads
 
@@ -101,7 +105,12 @@ def create_app():
     # and would let any site make authenticated requests as a logged-in user).
     # Set ALLOWED_ORIGINS on the server (comma-separated); defaults to local dev.
     allowed_origins = [
-        o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+        # 5174 is the local analytics dashboard (analytics/), which is a
+        # dev-only tool — it is never part of a deploy, where ALLOWED_ORIGINS is
+        # set explicitly anyway.
+        o.strip() for o in os.environ.get(
+            "ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174"
+        ).split(",")
         if o.strip()
     ]
     CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True)

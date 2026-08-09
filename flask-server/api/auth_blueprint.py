@@ -6,7 +6,7 @@ Routes (registered under <BASE_PATH>/api):
   POST   /auth/login      {email, password}         -> logs in
   POST   /auth/logout                               -> revokes session
   GET    /auth/me                                   -> current user (401 if none)
-  PATCH  /auth/me         {name}                    -> update the display name
+  PATCH  /auth/me         {name?, account_type?}    -> update name / account type
   POST   /me/plan         {plan}                    -> change plan (no payment)
   GET    /me/usage                                  -> plan limits + usage so far
   GET    /me/jobs                                   -> the current user's jobs
@@ -81,15 +81,31 @@ def me():
 @auth_blueprint.route("/auth/me", methods=["PATCH"])
 @require_auth
 def update_me():
-    """Update the display name. An empty string clears it, and the client falls
-    back to deriving one from the email."""
+    """Update the display name and/or the self-reported account type. Either
+    may be sent alone. An empty name clears it and the client falls back to
+    deriving one from the email; an empty account_type clears it to "not set"."""
     data = _json()
-    if "name" not in data:
+    if "name" not in data and "account_type" not in data:
         return jsonify({"error": "Nothing to update"}), 400
-    name = data.get("name")
-    if name is not None and not isinstance(name, str):
-        return jsonify({"error": "Name must be text"}), 400
-    user = auth_store.update_name(current_user()["id"], name)
+
+    user_id = current_user()["id"]
+    user = None
+
+    if "name" in data:
+        name = data.get("name")
+        if name is not None and not isinstance(name, str):
+            return jsonify({"error": "Name must be text"}), 400
+        user = auth_store.update_name(user_id, name)
+
+    if "account_type" in data:
+        account_type = data.get("account_type")
+        if account_type is not None and not isinstance(account_type, str):
+            return jsonify({"error": "Account type must be text"}), 400
+        try:
+            user = auth_store.update_account_type(user_id, account_type)
+        except ValueError:
+            return jsonify({"error": "Unknown account type"}), 400
+
     if user is None:
         return jsonify({"error": "Account not found"}), 404
     return jsonify({"user": user}), 200

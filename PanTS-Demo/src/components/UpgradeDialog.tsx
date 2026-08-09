@@ -1,6 +1,7 @@
 import React, { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { nextPlanUp, planLabel, PLANS, type PlanId } from "../helpers/accountProfile";
+import { track } from "../helpers/analytics";
 import "./UpgradeDialog.css";
 
 // The one place a plan limit is explained. Every blocker — a locked model, a
@@ -93,6 +94,7 @@ const UpgradeDialog: React.FC<{ block: UpgradeBlock | null; onClose: () => void 
 
 	useEffect(() => {
 		if (!block) return;
+		track("plan_limit_hit");
 		const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
 		document.addEventListener("keydown", onKey);
 		return () => document.removeEventListener("keydown", onKey);
@@ -133,7 +135,11 @@ const UpgradeDialog: React.FC<{ block: UpgradeBlock | null; onClose: () => void 
 						<button
 							type="button"
 							className="upg-primary"
-							onClick={() => { onClose(); navigate("/account/plan"); }}
+							onClick={() => {
+								track("plan_limit_dialog_cta");
+								onClose();
+								navigate("/account/plan");
+							}}
 						>
 							See plans
 						</button>

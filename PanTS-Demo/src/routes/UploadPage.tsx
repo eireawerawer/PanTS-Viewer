@@ -67,6 +67,7 @@ import {
 import Header from "../components/Header";
 import ProcessingSummaryBar from "../components/ProcessingSummaryBar";
 import BatchDetailsModal from "../components/BatchDetailsModal";
+import { track } from "../helpers/analytics";
 import UpgradeDialog, { type UpgradeBlock } from "../components/UpgradeDialog";
 import { useAuth } from "../contexts/authContext";
 import {
@@ -244,6 +245,7 @@ const UploadPage: React.FC = () => {
       alert("Please select .nii or .nii.gz files only");
       return;
     }
+    track("upload_files_selected");
     setSelectedItems((prev) => [
       ...prev,
       ...filteredFiles.map((f) => ({
@@ -267,6 +269,7 @@ const UploadPage: React.FC = () => {
       alert("Please drop .nii or .nii.gz files only");
       return;
     }
+    track("upload_files_selected");
     setSelectedItems((prev) => [
       ...prev,
       ...filteredFiles.map((f) => ({
@@ -406,6 +409,7 @@ const UploadPage: React.FC = () => {
   // kills a queued/running server job.
   const cancelRun = (upload: RecentUpload) => {
     const sid = upload.sessionId;
+    track("upload_cancel_inference");
     stopPolling(sid);
     setPhase(sid);
 
@@ -951,6 +955,7 @@ const UploadPage: React.FC = () => {
     const sid = crypto.randomUUID();
     const label = (item.kind === "dicom" ? item.label : item.file.name) || sid;
 
+    track("upload_start_inference");
     setRecentUploads(
       addRecentUpload({
         sessionId: sid,
@@ -1443,6 +1448,7 @@ const UploadPage: React.FC = () => {
                             });
                             return;
                           }
+                          track("upload_select_model");
                           setSelectedModel(m.id as typeof selectedModel);
                           setModelDropOpen(false);
                         }}
@@ -1568,6 +1574,7 @@ const UploadPage: React.FC = () => {
                             });
                             return;
                           }
+                          track("upload_select_postprocessing");
                           setPostValue(opt.id);
                           setPostDropOpen(false);
                         }}
@@ -1876,7 +1883,7 @@ const UploadPage: React.FC = () => {
                   </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
-                  <button style={smallBtn} onClick={() => setDetailsBatchId(batchId)}>View details</button>
+                  <button style={smallBtn} onClick={() => { track("upload_open_batch_details"); setDetailsBatchId(batchId); }}>View details</button>
                   <button style={{ ...smallBtn, background: "#002d72", color: "#fff", borderColor: "#002d72" }} onClick={() => downloadBatch(uploads)}>Download</button>
                   <RemoveBtn onClick={() => removeBatch(uploads)} />
                 </div>
@@ -1908,7 +1915,7 @@ const UploadPage: React.FC = () => {
                       <ProcessingSummaryBar key={g.batchId} title={g.label} running={running.length}
                         done={done} statusLabel={statusLabel}
                         closeNote={closeNote} closeReady={!closeInfo.active}
-                        onViewDetails={() => setDetailsBatchId(g.batchId)}
+                        onViewDetails={() => { track("upload_open_batch_details"); setDetailsBatchId(g.batchId); }}
                         onCancelAll={() => running.forEach(u => cancelRun(u))} />
                     );
                   })}

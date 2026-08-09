@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 import "./App.css";
+import AnalyticsRouteTracker from "./components/AnalyticsRouteTracker";
 import AuthModal from "./components/AuthModal";
 import { AnnotationProvider } from "./contexts/annotationContexts";
 import { AuthProvider } from "./contexts/authContext";
@@ -62,6 +63,7 @@ function App() {
         <AnnotationProvider>
           <div className="App">
             <BrowserRouter basename={BASENAME}>
+              <AnalyticsRouteTracker />
               <ScrollToTopButton />
               <Suspense fallback={<RouteFallback />}>
                 <Routes>

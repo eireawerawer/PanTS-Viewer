@@ -20,10 +20,11 @@
 // limits are enforced server-side (see flask-server/services/plan_store.py).
 // There is no payment step — pricing hasn't been set — but the limits bite.
 //
+// Account type is real too: user_account.account_type, set through PATCH
+// /auth/me. It still gates nothing — it exists so activity can be grouped by it
+// — but it is no longer a localStorage value the server has never seen.
+//
 // Not wired yet: emailNotifications -> B3, still a client-only localStorage pref.
-// Also client-only: account type (helpers/accountProfile.ts), which is
-// self-reported and gates nothing. The name is NOT part of that — it has a real
-// column and goes through updateName.
 import {
 	createContext,
 	useCallback,
@@ -34,12 +35,11 @@ import {
 	type ReactNode,
 } from "react";
 import {
-	DEFAULT_PROFILE,
-	loadProfile,
-	updateProfile as persistProfilePatch,
 	type AccountProfile,
+	type AccountType,
 	type PlanId,
 } from "../helpers/accountProfile";
+import { track } from "../helpers/analytics";
 import { API_BASE } from "../helpers/constants";
 
 export type AuthUser = {
@@ -52,7 +52,7 @@ export type AuthUser = {
 	emailNotifications: boolean; // client-only preference until B3
 	/** Billing plan, from user_account.plan. Its limits are enforced server-side. */
 	plan: PlanId;
-	/** Self-reported account type. Client-only, and gates nothing. */
+	/** Self-reported account type, from user_account.account_type. Gates nothing. */
 	profile: AccountProfile;
 };
 
@@ -91,8 +91,8 @@ type AuthContextValue = {
 	 * in — resolves with the deadline and the grace period, so the UI can say so.
 	 */
 	deleteAccount: () => Promise<{ restoreBy: string; graceDays: number }>;
-	/** Patch the self-reported account type. */
-	updateAccountProfile: (patch: Partial<AccountProfile>) => void;
+	/** Patch the self-reported account type. Persisted server-side. */
+	updateAccountProfile: (patch: Partial<AccountProfile>) => Promise<void>;
 	/** Move to another plan. No payment step — pricing isn't set. */
 	setPlan: (plan: PlanId) => Promise<void>;
 	/** Current plan usage, or null until loaded. Refreshed by refreshUsage(). */
@@ -143,7 +143,13 @@ const savePref = (id: string, on: boolean) => {
 	}
 };
 
-type ApiUser = { id: string; email: string; name?: string | null; plan?: string | null };
+type ApiUser = {
+	id: string;
+	email: string;
+	name?: string | null;
+	plan?: string | null;
+	account_type?: string | null;
+};
 const mapApiUser = (u: ApiUser): AuthUser => {
 	const custom = (u.name || "").trim();
 	return {
@@ -154,7 +160,7 @@ const mapApiUser = (u: ApiUser): AuthUser => {
 		hasCustomName: custom.length > 0,
 		emailNotifications: loadPref(u.id),
 		plan: (u.plan as PlanId) || "free",
-		profile: loadProfile(u.id) ?? DEFAULT_PROFILE,
+		profile: { accountType: (u.account_type as AccountType) || null },
 	};
 };
 
@@ -286,6 +292,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	const signOut = useCallback(async () => {
+		track("auth_sign_out");
 		// Clear locally first so the UI updates instantly, then revoke server-side.
 		setUser(null);
 		pingOtherTabs();
@@ -296,10 +303,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 	}, []);
 
-	const promptAuth = useCallback(
-		(mode: AuthMode = "signin") => setAuthPrompt({ open: true, mode }),
-		[]
-	);
+	const promptAuth = useCallback((mode: AuthMode = "signin") => {
+		track("auth_open_modal");
+		setAuthPrompt({ open: true, mode });
+	}, []);
 	const closeAuthPrompt = useCallback(
 		() => setAuthPrompt((p) => ({ ...p, open: false })),
 		[]
@@ -363,16 +370,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		return { restoreBy: data.restore_by as string, graceDays: Number(data.grace_days) };
 	}, []);
 
-	// Writes storage first, then state — deliberately not inside the setUser
-	// updater, which StrictMode invokes twice.
-	const updateAccountProfile = useCallback(
-		(patch: Partial<AccountProfile>) => {
-			if (!user) return;
-			const profile = persistProfilePatch(user.id, patch);
-			setUser((prev) => (prev ? { ...prev, profile } : prev));
-		},
-		[user]
-	);
+	const updateAccountProfile = useCallback(async (patch: Partial<AccountProfile>) => {
+		if (!("accountType" in patch)) return;
+		const res = await authFetch("/api/auth/me", {
+			method: "PATCH",
+			// "" clears it: the server reads an empty string as "not set".
+			body: JSON.stringify({ account_type: patch.accountType ?? "" }),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(data.error || "Couldn't save your role. Try again.");
+		setUser(mapApiUser(data.user));
+	}, []);
 
 	const refreshUsage = useCallback(async () => {
 		if (!user) {
