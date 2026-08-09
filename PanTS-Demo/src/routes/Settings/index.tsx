@@ -1,5 +1,5 @@
 import {
-	IconCreditCard, IconHistory, IconShieldLock, IconUser,
+	IconHeart, IconHistory, IconShieldLock, IconUser,
 } from "@tabler/icons-react";
 import React, { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
@@ -27,7 +27,7 @@ import "./Settings.css";
 // Claude keeps small preferences inside General.
 const SECTIONS = [
 	{ to: "/account", label: "Profile", icon: IconUser, end: true },
-	{ to: "/account/plan", label: "Plan", icon: IconCreditCard },
+	{ to: "/account/plan", label: "Plan", icon: IconHeart },
 	{ to: "/account/history", label: "History", icon: IconHistory },
 	{ to: "/account/privacy", label: "Privacy", icon: IconShieldLock },
 ];

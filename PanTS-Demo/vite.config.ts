@@ -51,6 +51,8 @@ export default defineConfig({
 	},
 	assetsInclude: ['**/*.wasm'],
 	server: {
+		port: 5177,
+		strictPort: true,
 		// https: {
 		// 	key: fs.readFileSync(path.resolve(__dirname, '../certs/localhost-key.pem')),
 		// 	cert: fs.readFileSync(path.resolve(__dirname, '../certs/localhost-cert.pem')),
@@ -62,7 +64,7 @@ export default defineConfig({
 		cors: true,
 		proxy: {
 			"/api": {
-				target: env.VITE_API_BASE,
+				target: 'http://127.0.0.1:5001',
 				changeOrigin: true,
 				secure: false,
 			},

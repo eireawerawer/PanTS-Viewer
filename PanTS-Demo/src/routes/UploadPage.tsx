@@ -1462,7 +1462,7 @@ const UploadPage: React.FC = () => {
                           </span>
                         </div>
                         <div className="model-dropdown-item-side">
-                          {locked && <span className="model-dropdown-lock">Upgrade</span>}
+                          {locked && <span className="model-dropdown-lock">Donate</span>}
                           {!locked && selectedModel === m.id && (
                             <svg
                               width="12"
@@ -1588,7 +1588,7 @@ const UploadPage: React.FC = () => {
                           </span>
                         </div>
                         <div className="model-dropdown-item-side">
-                          {locked && <span className="model-dropdown-lock">Upgrade</span>}
+                          {locked && <span className="model-dropdown-lock">Donate</span>}
                           {!locked && postValue === opt.id && (
                             <svg
                               width="12"
