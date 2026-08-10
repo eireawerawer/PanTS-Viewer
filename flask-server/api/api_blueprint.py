@@ -59,6 +59,7 @@ last_session_check = datetime.now()
 LOWRES_ROOT = os.environ.get("PANTS_LOWRES_PATH", "/home/visitor/pants_lowres")
 
 import hmac
+from itsdangerous import URLSafeSerializer, BadSignature
 import threading
 
 # Session/case ids come straight from client requests and are joined into
@@ -860,7 +861,10 @@ def report_html(id):
     protects case access here protects this route too -- no new data-exposure
     surface. The 'Download radiology report' button on the clinician side
     links to the existing /generate-report-pdf/<id> route."""
-    data = _build_report_data(id)
+    resolved = _resolve_case_id_or_token(id)
+    if resolved is None:
+        return jsonify({"error": "Invalid or expired link"}), 404
+    data = _build_report_data(resolved)
     if "error" in data:
         status = 400 if data["error"] == "Invalid id parameter" else 500
         return jsonify(data), status
@@ -1784,7 +1788,10 @@ def generate_report_pdf(id):
     temp_pdf_path = f"{PDF_DIR}/temp_report_{id}.pdf"
     output_pdf_path = f"{PDF_DIR}/report_{id}.pdf"
     try:
-        report_data = _build_report_data(id)
+        resolved = _resolve_case_id_or_token(id)
+        if resolved is None:
+            return jsonify({"error": "Invalid or expired link"}), 404
+        report_data = _build_report_data(resolved)
         if "error" in report_data:
             status = 400 if report_data["error"] == "Invalid id parameter" else 500
             return jsonify(report_data), status
@@ -5628,3 +5635,48 @@ def vessel_cpr(case_id):
         return jsonify({"error": "Vessel analysis failed."}), 500
     finally:
         _ANALYSIS_SLOTS.release()
+
+
+# --- share-token routes (auto-patched) ---
+def _share_serializer():
+    """Deterministic, stateless share tokens: same case_id always signs to
+    the same token (no DB row, no mapping file). Reuses whatever secret
+    Flask already has configured for sessions -- no new secret to manage.
+    NOTE: this makes share URLs opaque, it is NOT an access-control layer;
+    /api/get-report-data/<id> has no auth today regardless of this token."""
+    secret = current_app.secret_key or os.getenv("SECRET_KEY") or "dev-only-insecure-fallback"
+    return URLSafeSerializer(secret, salt="bodymaps-share-v1")
+
+
+@api_blueprint.route('/share/<case_id>/token', methods=['POST'])
+def create_share_token(case_id):
+    if not _is_safe_id(case_id):
+        return jsonify({"error": "Invalid id"}), 400
+    token = _share_serializer().dumps(str(case_id))
+    return jsonify({"share_id": token, "url": f"{_api_prefix_path()}/share/{token}"})
+
+
+@api_blueprint.route('/share/<token>', methods=['GET'])
+def get_shared_case(token):
+    try:
+        case_id = _share_serializer().loads(token)
+    except BadSignature:
+        return jsonify({"error": "Invalid or expired share link"}), 404
+    data = _build_report_data(case_id)
+    if "error" in data:
+        status = 400 if data["error"] == "Invalid id parameter" else 500
+        return jsonify(data), status
+    return jsonify(data)
+
+
+def _resolve_case_id_or_token(id_or_token: str):
+    """Accepts either a raw numeric case id (existing links keep working)
+    OR an opaque share token. Returns the real case_id, or None."""
+    if str(id_or_token).isdigit():
+        return str(id_or_token)
+    try:
+        case_id = _share_serializer().loads(id_or_token)
+        return str(case_id) if str(case_id).isdigit() else None
+    except BadSignature:
+        return None
+
