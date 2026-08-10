@@ -1,5 +1,6 @@
 import { render } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { AuthProvider } from "../contexts/authContext";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The CT viewer relies on WebGL (Niivue + Cornerstone) and a three.js loader,
@@ -106,11 +107,13 @@ afterEach(() => {
 describe("viewer smoke test", () => {
 	it("VisualizationPage mounts for a dataset case without crashing", () => {
 		const { container } = render(
-			<MemoryRouter initialEntries={["/case/1"]}>
-				<Routes>
-					<Route path="/case/:caseId" element={<VisualizationPage />} />
-				</Routes>
-			</MemoryRouter>
+			<AuthProvider>
+				<MemoryRouter initialEntries={["/case/1"]}>
+					<Routes>
+						<Route path="/case/:caseId" element={<VisualizationPage />} />
+					</Routes>
+				</MemoryRouter>
+			</AuthProvider>
 		);
 		expect(container.firstChild).toBeTruthy();
 	});

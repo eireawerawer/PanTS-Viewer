@@ -1,10 +1,11 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useEffect, type ReactElement } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AuthModal from "../components/AuthModal";
 import { AuthProvider, useAuth } from "../contexts/authContext";
-import AccountPage from "../routes/AccountPage";
+import SettingsPage from "../routes/Settings";
+import ProfileSettings from "../routes/Settings/ProfileSettings";
 import LandingPage from "../routes/LandingPage";
 import Homepage from "../routes/Homepage";
 import UploadPage from "../routes/UploadPage";
@@ -67,20 +68,43 @@ describe("route smoke tests", () => {
   it("AuthModal opens as a popup with provider options when prompted", async () => {
     const Trigger = () => {
       const { promptAuth } = useAuth();
-      useEffect(() => promptAuth("signin"), [promptAuth]);
+      useEffect(() => promptAuth(), [promptAuth]);
       return null;
     };
-    render(
-      <AuthProvider>
+    // AuthModal links out to /signup, so it needs a router in the tree.
+    renderRoute(
+      <>
         <Trigger />
         <AuthModal />
-      </AuthProvider>,
+      </>,
     );
-    expect(await screen.findByText("Sign in with Google")).toBeInTheDocument();
-    expect(screen.getByText("Sign in with GitHub")).toBeInTheDocument();
+    expect(await screen.findByText("Continue with Google")).toBeInTheDocument();
+    expect(screen.getByText("Continue with GitHub")).toBeInTheDocument();
   });
 
-  it("AccountPage renders the email-notification setting when signed in", async () => {
+  it("AuthModal switches to sign up in place, without navigating away", async () => {
+    const Trigger = () => {
+      const { promptAuth } = useAuth();
+      useEffect(() => promptAuth(), [promptAuth]);
+      return null;
+    };
+    renderRoute(
+      <>
+        <Trigger />
+        <AuthModal />
+      </>,
+    );
+    // A button, not a link out to a page.
+    const toggle = await screen.findByRole("button", { name: "Sign up" });
+    expect(screen.queryByRole("link", { name: "Sign up" })).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(
+      await screen.findByRole("dialog", { name: "Create your account" }),
+    ).toBeInTheDocument();
+  });
+
+  it("Settings renders the email-notification setting when signed in", async () => {
     // The session lives in an httponly cookie, so "signed in" means /auth/me
     // answers with a user - not a localStorage key.
     global.fetch = vi.fn(async (url: RequestInfo | URL) => ({
@@ -93,9 +117,15 @@ describe("route smoke tests", () => {
       text: async () => "",
       headers: { get: () => "application/json" },
     })) as unknown as typeof fetch;
-    renderRoute(<AccountPage />);
+    renderRoute(
+      <Routes>
+        <Route path="/" element={<SettingsPage />}>
+          <Route index element={<ProfileSettings />} />
+        </Route>
+      </Routes>,
+    );
     expect(
-      await screen.findByText("Email me when inference finishes"),
+      await screen.findByText("Email me when a scan finishes"),
     ).toBeInTheDocument();
   });
 });

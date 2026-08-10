@@ -4,7 +4,10 @@ import {
 	formatRelativeTime,
 	loadRecentUploads,
 	MAX_RECENT_UPLOADS,
+	RECENT_WINDOW_MS,
 	recentStatusColor,
+	splitByAge,
+	groupUploads,
 	updateRecentUploadStatus,
 	type RecentUpload,
 } from "./recentUploads";
@@ -84,5 +87,50 @@ describe("recentStatusColor", () => {
 		expect(recentStatusColor("Failed")).toBe("#ef4444");
 		expect(recentStatusColor("Processing")).toBe("#6a6a6a");
 		expect(recentStatusColor("Completed")).toBe("#8f8f8f");
+	});
+});
+
+describe("splitByAge", () => {
+	const now = Date.UTC(2026, 7, 7, 12, 0, 0);
+	const agoMs = (ms: number) => now - ms;
+
+	it("keeps the last day on the upload page and sends the rest to history", () => {
+		const groups = groupUploads([
+			makeEntry({ sessionId: "today", timestamp: agoMs(2 * 60 * 60 * 1000) }),
+			makeEntry({ sessionId: "old", timestamp: agoMs(3 * RECENT_WINDOW_MS) }),
+		]);
+
+		const { recent, older } = splitByAge(groups, now);
+		expect(recent.map((g) => g.timestamp)).toEqual([agoMs(2 * 60 * 60 * 1000)]);
+		expect(older.map((g) => g.timestamp)).toEqual([agoMs(3 * RECENT_WINDOW_MS)]);
+	});
+
+	it("treats an entry exactly on the boundary as recent", () => {
+		const groups = groupUploads([
+			makeEntry({ sessionId: "edge", timestamp: agoMs(RECENT_WINDOW_MS) }),
+		]);
+		expect(splitByAge(groups, now).recent).toHaveLength(1);
+	});
+
+	it("judges a batch by its newest scan so it is never torn in half", () => {
+		const groups = groupUploads([
+			makeEntry({
+				sessionId: "a", batchId: "b1", batchLabel: "2 scans",
+				timestamp: agoMs(3 * RECENT_WINDOW_MS),
+			}),
+			makeEntry({
+				sessionId: "b", batchId: "b1", batchLabel: "2 scans",
+				timestamp: agoMs(60 * 1000),
+			}),
+		]);
+
+		const { recent, older } = splitByAge(groups, now);
+		expect(older).toHaveLength(0);
+		expect(recent).toHaveLength(1);
+		expect(recent[0].kind === "batch" && recent[0].uploads).toHaveLength(2);
+	});
+
+	it("returns both sides empty for an empty list", () => {
+		expect(splitByAge([], now)).toEqual({ recent: [], older: [] });
 	});
 });

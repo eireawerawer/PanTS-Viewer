@@ -16,7 +16,14 @@
 // reversible for a grace period: the server keeps the row and signing back in
 // cancels it.
 //
+// The plan is real too: user_account.plan, changed through /me/plan, and its
+// limits are enforced server-side (see flask-server/services/plan_store.py).
+// There is no payment step — pricing hasn't been set — but the limits bite.
+//
 // Not wired yet: emailNotifications -> B3, still a client-only localStorage pref.
+// Also client-only: account type (helpers/accountProfile.ts), which is
+// self-reported and gates nothing. The name is NOT part of that — it has a real
+// column and goes through updateName.
 import {
 	createContext,
 	useCallback,
@@ -26,6 +33,13 @@ import {
 	useState,
 	type ReactNode,
 } from "react";
+import {
+	DEFAULT_PROFILE,
+	loadProfile,
+	updateProfile as persistProfilePatch,
+	type AccountProfile,
+	type PlanId,
+} from "../helpers/accountProfile";
 import { API_BASE } from "../helpers/constants";
 
 export type AuthUser = {
@@ -36,9 +50,21 @@ export type AuthUser = {
 	/** True when `name` is the user's own rather than derived from the email. */
 	hasCustomName: boolean;
 	emailNotifications: boolean; // client-only preference until B3
+	/** Billing plan, from user_account.plan. Its limits are enforced server-side. */
+	plan: PlanId;
+	/** Self-reported account type. Client-only, and gates nothing. */
+	profile: AccountProfile;
+};
+
+/** What GET /me/usage returns: the plan's limits and what's been used of them. */
+export type PlanUsage = {
+	plan: PlanId;
+	scans: { used: number; limit: number | null; in_flight: number; resets_at: string | null };
+	ai_messages: { used: number; limit: number | null; resets_at: string | null };
 };
 
 export type AuthProvider2 = "google" | "github";
+export type AuthMode = "signin" | "signup";
 
 type AuthContextValue = {
 	user: AuthUser | null;
@@ -46,7 +72,8 @@ type AuthContextValue = {
 	/** True until the initial /me check resolves (avoids a signed-out flash). */
 	loading: boolean;
 	signIn: (email: string, password: string) => Promise<AuthUser>;
-	signUp: (email: string, password: string) => Promise<AuthUser>;
+	/** `name` is optional and is stored server-side on user_account.name. */
+	signUp: (email: string, password: string, name?: string) => Promise<AuthUser>;
 	/** Full-page redirect into the provider's consent screen. Never returns. */
 	signInWithProvider: (provider: AuthProvider2) => void;
 	/** Which providers the server has credentials for (null until loaded). */
@@ -64,9 +91,19 @@ type AuthContextValue = {
 	 * in — resolves with the deadline and the grace period, so the UI can say so.
 	 */
 	deleteAccount: () => Promise<{ restoreBy: string; graceDays: number }>;
-	// Global auth popup, opened from the header or any gated action.
-	authPrompt: { open: boolean; mode: "signin" | "signup" };
-	promptAuth: (mode?: "signin" | "signup") => void;
+	/** Patch the self-reported account type. */
+	updateAccountProfile: (patch: Partial<AccountProfile>) => void;
+	/** Move to another plan. No payment step — pricing isn't set. */
+	setPlan: (plan: PlanId) => Promise<void>;
+	/** Current plan usage, or null until loaded. Refreshed by refreshUsage(). */
+	usage: PlanUsage | null;
+	refreshUsage: () => Promise<void>;
+	// Global auth popup, opened from the header or any gated action. Signing up
+	// and signing in are the same card with a different title, the way both
+	// Claude and ChatGPT do it — `mode` picks which.
+	authPrompt: { open: boolean; mode: AuthMode };
+	/** Defaults to sign-in: most people reaching a gate already have an account. */
+	promptAuth: (mode?: AuthMode) => void;
 	closeAuthPrompt: () => void;
 	/** Error surfaced by the OAuth callback redirect (?auth_error=...), if any. */
 	oauthError: string | null;
@@ -106,7 +143,7 @@ const savePref = (id: string, on: boolean) => {
 	}
 };
 
-type ApiUser = { id: string; email: string; name?: string | null };
+type ApiUser = { id: string; email: string; name?: string | null; plan?: string | null };
 const mapApiUser = (u: ApiUser): AuthUser => {
 	const custom = (u.name || "").trim();
 	return {
@@ -116,6 +153,8 @@ const mapApiUser = (u: ApiUser): AuthUser => {
 		name: custom || nameFromEmail(u.email),
 		hasCustomName: custom.length > 0,
 		emailNotifications: loadPref(u.id),
+		plan: (u.plan as PlanId) || "free",
+		profile: loadProfile(u.id) ?? DEFAULT_PROFILE,
 	};
 };
 
@@ -131,11 +170,11 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
 	const [user, setUser] = useState<AuthUser | null>(null);
 	const [loading, setLoading] = useState(true);
-	const [authPrompt, setAuthPrompt] = useState<{ open: boolean; mode: "signin" | "signup" }>({
-		open: false,
-		mode: "signin",
+	const [authPrompt, setAuthPrompt] = useState<{ open: boolean; mode: AuthMode }>({
+		open: false, mode: "signin",
 	});
 	const [oauthProviders, setOauthProviders] = useState<Record<AuthProvider2, boolean> | null>(null);
+	const [usage, setUsage] = useState<PlanUsage | null>(null);
 	// The OAuth callback redirects back with ?auth_error=... on failure (e.g. an
 	// unverified provider email colliding with an existing account). Read it once
 	// on mount, then strip it from the URL so a refresh doesn't resurface it.
@@ -188,6 +227,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	// If we came back from a failed OAuth attempt, show the popup with the error.
+	// Sign-in mode: the failure message tells them what to do, and the signup
+	// side's terms fine print would be noise on top of an error.
 	useEffect(() => {
 		if (oauthError) setAuthPrompt({ open: true, mode: "signin" });
 	}, [oauthError]);
@@ -209,22 +250,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 	};
 
-	const authAction = useCallback(async (path: string, email: string, password: string) => {
-		const res = await authFetch(path, { method: "POST", body: JSON.stringify({ email, password }) });
-		const data = await res.json().catch(() => ({}));
-		if (!res.ok) throw new Error(data.error || "Something went wrong. Try again.");
-		const mapped = mapApiUser(data.user);
-		setUser(mapped);
-		pingOtherTabs();
-		return mapped;
-	}, []);
+	const authAction = useCallback(
+		async (path: string, email: string, password: string, name?: string) => {
+			const body: Record<string, string> = { email, password };
+			if (name?.trim()) body.name = name.trim();
+			const res = await authFetch(path, { method: "POST", body: JSON.stringify(body) });
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.error || "Something went wrong. Try again.");
+			const mapped = mapApiUser(data.user);
+			setUser(mapped);
+			pingOtherTabs();
+			return mapped;
+		},
+		[]
+	);
 
 	const signIn = useCallback(
 		(email: string, password: string) => authAction("/api/auth/login", email, password),
 		[authAction]
 	);
+	// The name goes to the server with the registration — /auth/register takes it,
+	// so a signup name lands in user_account.name rather than in local storage.
 	const signUp = useCallback(
-		(email: string, password: string) => authAction("/api/auth/register", email, password),
+		(email: string, password: string, name?: string) =>
+			authAction("/api/auth/register", email, password, name),
 		[authAction]
 	);
 
@@ -247,12 +296,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 	}, []);
 
-	const promptAuth = useCallback((mode: "signin" | "signup" = "signin") => {
-		setAuthPrompt({ open: true, mode });
-	}, []);
-	const closeAuthPrompt = useCallback(() => {
-		setAuthPrompt((p) => ({ ...p, open: false }));
-	}, []);
+	const promptAuth = useCallback(
+		(mode: AuthMode = "signin") => setAuthPrompt({ open: true, mode }),
+		[]
+	);
+	const closeAuthPrompt = useCallback(
+		() => setAuthPrompt((p) => ({ ...p, open: false })),
+		[]
+	);
 
 	// Auto-close the popup once a user is established.
 	useEffect(() => {
@@ -312,6 +363,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		return { restoreBy: data.restore_by as string, graceDays: Number(data.grace_days) };
 	}, []);
 
+	// Writes storage first, then state — deliberately not inside the setUser
+	// updater, which StrictMode invokes twice.
+	const updateAccountProfile = useCallback(
+		(patch: Partial<AccountProfile>) => {
+			if (!user) return;
+			const profile = persistProfilePatch(user.id, patch);
+			setUser((prev) => (prev ? { ...prev, profile } : prev));
+		},
+		[user]
+	);
+
+	const refreshUsage = useCallback(async () => {
+		if (!user) {
+			setUsage(null);
+			return;
+		}
+		try {
+			const res = await authFetch("/api/me/usage");
+			setUsage(res.ok ? await res.json() : null);
+		} catch {
+			setUsage(null); // a usage read failing is not worth surfacing
+		}
+	}, [user]);
+
+	const setPlan = useCallback(async (plan: PlanId) => {
+		const res = await authFetch("/api/me/plan", {
+			method: "POST",
+			body: JSON.stringify({ plan }),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(data.error || "Couldn't change your plan. Try again.");
+		setUser(mapApiUser(data.user));
+	}, []);
+
+	// Keep usage in step with whoever is signed in — including after a plan
+	// change, since the limits it reports come from the plan.
+	useEffect(() => {
+		refreshUsage();
+	}, [refreshUsage]);
+
 	const clearOauthError = useCallback(() => setOauthError(null), []);
 
 	const value = useMemo<AuthContextValue>(
@@ -329,6 +420,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			exportData,
 			deleteScanHistory,
 			deleteAccount,
+			updateAccountProfile,
+			setPlan,
+			usage,
+			refreshUsage,
 			authPrompt,
 			promptAuth,
 			closeAuthPrompt,
@@ -337,7 +432,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}),
 		[user, loading, signIn, signUp, signInWithProvider, oauthProviders, signOut,
 		 updatePreferences, updateName, exportData, deleteScanHistory, deleteAccount,
-		 authPrompt, promptAuth, closeAuthPrompt, oauthError, clearOauthError]
+		 updateAccountProfile, setPlan, usage, refreshUsage, authPrompt, promptAuth,
+		 closeAuthPrompt, oauthError, clearOauthError]
 	);
 
 	return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

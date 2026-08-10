@@ -67,6 +67,8 @@ import threading
 # directory before it touches os.path; secure_filename is the barrier at each
 # path-construction site.
 from .path_safety import is_safe_id as _is_safe_id
+from .auth import current_user
+from services import plan_store
 
 
 def _metadata_xlsx_path():
@@ -1966,6 +1968,14 @@ def _set_inference_job(session_id, **kwargs):
         inference_jobs[session_id] = current
         snapshot = dict(current)
     _persist_inference_job(session_id, snapshot)
+    # A run that has stopped no longer occupies one of the plan's concurrent
+    # slots. Best-effort: a bookkeeping failure must not break the status write
+    # that the polling frontend depends on.
+    if (snapshot.get("status") or "").lower() in ("completed", "failed", "cancelled"):
+        try:
+            plan_store.finish_inference(session_id)
+        except Exception as e:
+            print(f"[usage finish] {session_id}: {e}")
 
 
 def _get_inference_job(session_id):
@@ -2010,6 +2020,19 @@ def _uploaded_file_candidate(session_id, uploaded_filename):
 def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_path=None):
     if not _is_safe_id(session_id):
         return jsonify({"error": "Invalid session ID"}), 400
+
+    # Plan enforcement sits here rather than on the routes because both
+    # /run-inference and /auto_segment funnel through this function — one gate,
+    # no way to reach the GPU around it.
+    user = current_user()
+    if user is None:
+        return jsonify({"error": "Sign in to run inference"}), 401
+    blocked = plan_store.check_inference(user["id"], model_name)
+    if blocked is not None:
+        # 402 Payment Required: the request is well-formed and the user is
+        # authenticated — the plan is what's missing.
+        return jsonify({"error": blocked["message"], "code": "plan_limit", **blocked}), 402
+
     session_path = os.path.join(SESSIONS_DIR, session_id)
     os.makedirs(session_path, exist_ok=True)
 
@@ -2032,6 +2055,10 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
         shutil.copy2(server_input_path, input_path)
     else:
         return jsonify({"error": "No CT file provided. Send MAIN_NIFTI or INPUT_SERVER_PATH."}), 400
+
+    # Metered only once the run is definitely going ahead — every early return
+    # above is a request that never reached the queue and mustn't cost a scan.
+    plan_store.record_inference(user["id"], session_id, model_name)
 
     # "queued": the worker thread starts immediately but real GPU work waits on
     # the segmentor's one-at-a-time lock; the on_start callback below flips the
@@ -4697,6 +4724,29 @@ def ai_models():
         }), 200
 
 
+def _ai_gate():
+    """Whether this caller may send an assistant message. None means yes.
+
+    Two refusals, both shaped like an assistant reply so the sidebar can render
+    them in the thread rather than needing a special case:
+
+      401 — signed out. The assistant costs real compute, so it needs an
+            account, the same rule inference has. Leaving it open also made the
+            daily allowance pointless: signing out was an unlimited tier.
+      402 — signed in, but the plan's daily allowance is spent.
+    """
+    user = current_user()
+    blocked = plan_store.check_assistant(user["id"] if user else None)
+    if blocked is None:
+        return None
+    signed_out = blocked["reason"] == "auth_required"
+    code = "auth_required" if signed_out else "plan_limit"
+    return jsonify({
+        "reply": blocked["message"], "actions": [], "source": code,
+        "code": code, **blocked,
+    }), 401 if signed_out else 402
+
+
 @api_blueprint.route("/ai-command", methods=["POST"])
 def ai_command():
     try:
@@ -4719,6 +4769,12 @@ def ai_command():
                     "source": "validation",
                 }
             ), 400
+
+        blocked = _ai_gate()
+        if blocked is not None:
+            return blocked
+        # The gate guarantees a signed-in user past this point.
+        plan_store.record_ai_message(current_user()["id"])
 
         available_organs = body.get(
             "available_organs"
@@ -5046,6 +5102,13 @@ def ai_command_stream():
     body = request.get_json(force=True, silent=True) or {}
 
     message = str(body.get("message") or "").strip()
+
+    # Checked before the stream opens, so the client gets a plain 401/402 it can
+    # act on rather than an error event buried in a 200 response body.
+    blocked = _ai_gate()
+    if blocked is not None:
+        return blocked
+    plan_store.record_ai_message(current_user()["id"])
 
     available_organs = body.get("available_organs") or []
     if not isinstance(available_organs, list):

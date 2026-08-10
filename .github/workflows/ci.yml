@@ -24,7 +24,7 @@ jobs:
       run:
         working-directory: PanTS-Demo
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -57,7 +57,7 @@ jobs:
       run:
         working-directory: flask-server
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -100,6 +100,12 @@ jobs:
       - name: OAuth unit + endpoint tests
         run: python -m pytest tests/unit/test_oauth_linking.py tests/functional/test_oauth_endpoints.py -v
 
+      # Plan limits: which models a plan may run, the rolling daily quota, the
+      # concurrency slot, and the assistant allowance. These gate real work, so a
+      # regression here silently hands out free GPU time.
+      - name: Plan-limit unit tests
+        run: python -m pytest tests/unit/test_plan_store.py -v
+
       # All migrations must apply cleanly against a fresh SQLite DB and round-trip.
       - name: Alembic migration smoke
         env:
@@ -112,7 +118,7 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # gitleaks scans full history, not just the tip
 
@@ -131,7 +137,7 @@ jobs:
     name: Dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:

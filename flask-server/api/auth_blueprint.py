@@ -7,6 +7,8 @@ Routes (registered under <BASE_PATH>/api):
   POST   /auth/logout                               -> revokes session
   GET    /auth/me                                   -> current user (401 if none)
   PATCH  /auth/me         {name}                    -> update the display name
+  POST   /me/plan         {plan}                    -> change plan (no payment)
+  GET    /me/usage                                  -> plan limits + usage so far
   GET    /me/jobs                                   -> the current user's jobs
   GET    /me/export                                 -> everything we hold, as JSON
   DELETE /me/jobs                                   -> delete scan history, keep account
@@ -20,7 +22,7 @@ from flask import Blueprint, jsonify, make_response, request
 from api.auth import (
     COOKIE_NAME, clear_session_cookie, current_user, require_auth, set_session_cookie,
 )
-from services import auth_store, job_store
+from services import auth_store, job_store, plan_store
 
 auth_blueprint = Blueprint("auth", __name__)
 
@@ -91,6 +93,31 @@ def update_me():
     if user is None:
         return jsonify({"error": "Account not found"}), 404
     return jsonify({"user": user}), 200
+
+
+@auth_blueprint.route("/me/plan", methods=["POST"])
+@require_auth
+def set_my_plan():
+    """Move to another plan.
+
+    No payment step: pricing hasn't been set, so this is a column write. The
+    limits attached to the plan are enforced for real from the next request on.
+    """
+    plan = (_json().get("plan") or "").strip()
+    try:
+        user = plan_store.set_plan(current_user()["id"], plan)
+    except ValueError:
+        return jsonify({"error": "Unknown plan"}), 400
+    if user is None:
+        return jsonify({"error": "Account not found"}), 404
+    return jsonify({"user": user}), 200
+
+
+@auth_blueprint.route("/me/usage", methods=["GET"])
+@require_auth
+def my_usage():
+    """Plan, its limits, and what's been used of them in the current window."""
+    return jsonify(plan_store.usage_summary(current_user()["id"])), 200
 
 
 @auth_blueprint.route("/me/jobs", methods=["GET"])
