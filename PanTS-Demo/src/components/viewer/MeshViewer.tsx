@@ -22,6 +22,13 @@ type SegmentationMeshViewerProps = {
   // Uploaded scans have no pre-baked meshes; fetch from the session route, which
   // builds them on demand from the session's combined_labels.
   isSession?: boolean;
+  // ── Capture-only options (demo/cinematic-capture) ──────────────────────────
+  // All default off, so the viewer's normal render path is byte-for-byte unchanged.
+  // Used by /cinematic to shoot hero footage: hands-free rotation and a rim light
+  // that reads as a product shot rather than a viewport.
+  autoRotate?: boolean;
+  autoRotateSpeed?: number;
+  cinematic?: boolean;
 };
 
 export async function fetchMeshManifest(caseId: string, isSession = false): Promise<MeshManifest> {
@@ -33,7 +40,7 @@ export async function fetchMeshManifest(caseId: string, isSession = false): Prom
   return res.json();
 }
 
-export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}, isSession = false}: SegmentationMeshViewerProps) {
+export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}, isSession = false, autoRotate = false, autoRotateSpeed = 0.6, cinematic = false}: SegmentationMeshViewerProps) {
   const [manifest, setManifest] = useState<MeshManifest | null>(null);
   const [loaded, setLoaded] = useState<Record<number, boolean>>({});
   // Bumped on every mask edit so editedSegments below is recomputed — the 3D pane
@@ -76,10 +83,21 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
   return (
     <div style={{ display: "flex", width: "100%", height: "100%" }}>
       <main style={{ flex: 1, minWidth: 0 }}>
-        <Canvas camera={{ position: [0, 250, 650], fov: 45, near: 0.1, far: 5000 }}>
+        <Canvas
+          camera={{ position: [0, 250, 650], fov: 45, near: 0.1, far: 5000 }}
+          // preserveDrawingBuffer keeps the frame readable after compositing, so the
+          // canvas can be grabbed with toBlob() for a high-res PNG sequence. Only on
+          // for capture — it costs a little performance in normal viewing.
+          gl={cinematic ? { preserveDrawingBuffer: true } : undefined}
+          dpr={cinematic ? 2 : undefined}
+        >
           <color attach="background" args={["#050505"]} />
-          <ambientLight intensity={0.7} />
+          {/* Cinematic drops the fill so the rim light below actually reads. */}
+          <ambientLight intensity={cinematic ? 0.35 : 0.7} />
           <directionalLight position={[300, 500, 300]} intensity={1.2} />
+          {cinematic && (
+            <directionalLight position={[-400, 200, -500]} intensity={1.8} color="#8ab6ff" />
+          )}
           <Suspense fallback={null}>
             <Bounds fit clip observe margin={1.2}>
               <group>
@@ -125,7 +143,7 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
               <SceneCrosshair3D position={crosshairPosition} bounds={manifest.bounds} />
             )}
           </Suspense>
-          <OrbitControls makeDefault />
+          <OrbitControls makeDefault autoRotate={autoRotate} autoRotateSpeed={autoRotateSpeed} />
         </Canvas>
       </main>
     </div>
