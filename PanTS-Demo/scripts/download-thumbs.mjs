@@ -7,8 +7,9 @@
 //   node scripts/download-thumbs.mjs --api https://bodymaps.wse.jhu.edu --n 1200
 //
 // Re-runnable: already-downloaded tiles are skipped, so an interrupted run just
-// picks up where it left off. Writes manifest.json (id -> filename), which /wall
-// reads when given ?local=1.
+// picks up where it left off. Writes manifest.json (id -> { file, tumor }), which
+// /wall reads when given ?local=1 — including the tumor flag, so the closing
+// filter re-flow works with no API call at all.
 import { mkdir, writeFile, readdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,14 +41,16 @@ function itemToId(it) {
   return digits ? String(Number(digits[0])) : null;
 }
 
-async function fetchIds() {
+async function fetchCases() {
   const url = `${API}/api/search?dataset=all&sort_by=quality&per_page=${COUNT}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`search failed (${res.status}) — is ${API} reachable?`);
   const data = await res.json();
-  const ids = (data.items ?? []).map(itemToId).filter(Boolean);
-  if (!ids.length) throw new Error("search returned no items");
-  return ids;
+  const cases = (data.items ?? [])
+    .map((it) => ({ id: itemToId(it), tumor: it.tumor ?? null }))
+    .filter((c) => c.id);
+  if (!cases.length) throw new Error("search returned no items");
+  return cases;
 }
 
 async function downloadOne(id, existing) {
@@ -74,26 +77,27 @@ async function main() {
     if (dot > 0 && file !== "manifest.json") existing.set(file.slice(0, dot), file);
   }
 
-  const ids = await fetchIds();
-  console.log(`${ids.length} ids from ${API} · ${existing.size} already on disk`);
+  const cases = await fetchCases();
+  console.log(`${cases.length} ids from ${API} · ${existing.size} already on disk`);
 
   const manifest = {};
   let done = 0;
   let failed = 0;
 
-  const queue = [...ids];
+  const queue = [...cases];
   const workers = Array.from({ length: CONCURRENCY }, async () => {
     while (queue.length) {
-      const id = queue.shift();
+      const { id, tumor } = queue.shift();
       try {
         const r = await downloadOne(id, existing);
-        if (r.name) manifest[String(r.id)] = r.name;
+        // tumor rides along so /wall's closing filter re-flow needs no API call.
+        if (r.name) manifest[String(r.id)] = { file: r.name, tumor };
         else failed++;
       } catch (e) {
         failed++;
         console.warn(`  ${id}: ${e.message}`);
       }
-      if (++done % 100 === 0) console.log(`  ${done}/${ids.length}`);
+      if (++done % 100 === 0) console.log(`  ${done}/${cases.length}`);
     }
   });
 

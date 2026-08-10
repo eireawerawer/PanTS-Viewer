@@ -17,6 +17,7 @@ import { API_BASE } from "../helpers/constants";
 import { itemToId, type CaseId, type SearchItem } from "../helpers/search";
 
 type Tile = { id: CaseId; tumor: number | null };
+type ManifestEntry = { file: string; tumor: number | null };
 
 function num(params: URLSearchParams, key: string, fallback: number): number {
   const raw = params.get(key);
@@ -48,7 +49,7 @@ export default function WallPage() {
   const useLocal = flag(params, "local", false);
 
   const [tiles, setTiles] = useState<Tile[]>([]);
-  const [localNames, setLocalNames] = useState<Record<string, string> | null>(null);
+  const [manifest, setManifest] = useState<Record<string, ManifestEntry> | null>(null);
   const [loadedCount, setLoadedCount] = useState(0);
   const [filtered, setFiltered] = useState(false);
   const [runId, setRunId] = useState(0);
@@ -57,7 +58,36 @@ export default function WallPage() {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // ── Data ────────────────────────────────────────────────────────────────────
+  // Local mode is fully offline: the manifest carries both the filenames and the
+  // tumor flag, so the whole shot runs off disk with no backend at all. That
+  // matters because the API is CORS-pinned — a locally served frontend can't
+  // call the deployed backend without a server-side allowlist change.
   useEffect(() => {
+    if (!useLocal) return;
+    let alive = true;
+    fetch("/thumbs/manifest.json")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("no manifest"))))
+      .then((data: Record<string, ManifestEntry>) => {
+        if (!alive) return;
+        setManifest(data);
+        setTiles(
+          Object.entries(data).map(([id, entry]) => ({
+            id: /^\d+$/.test(id) ? Number(id) : id,
+            tumor: entry.tumor ?? null,
+          })),
+        );
+      })
+      .catch(() =>
+        console.warn("wall: /thumbs/manifest.json missing — run scripts/download-thumbs.mjs"),
+      );
+    return () => {
+      alive = false;
+    };
+  }, [useLocal]);
+
+  // API fallback: only when not running from disk.
+  useEffect(() => {
+    if (useLocal) return;
     let alive = true;
     fetch(`${API_BASE}/api/search?dataset=all&sort_by=quality&per_page=${count}`)
       .then((r) => {
@@ -66,8 +96,7 @@ export default function WallPage() {
       })
       .then((data: { items?: SearchItem[] }) => {
         if (!alive) return;
-        const items = data.items ?? [];
-        const mapped: Tile[] = items
+        const mapped: Tile[] = (data.items ?? [])
           .map((it) => ({ id: itemToId(it), tumor: it.tumor ?? null }))
           .filter((t) => t.id !== 0);
         setTiles(mapped);
@@ -76,15 +105,7 @@ export default function WallPage() {
     return () => {
       alive = false;
     };
-  }, [count]);
-
-  useEffect(() => {
-    if (!useLocal) return;
-    fetch("/thumbs/manifest.json")
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("no manifest"))))
-      .then(setLocalNames)
-      .catch(() => console.warn("wall: /thumbs/manifest.json missing — run scripts/download-thumbs.mjs"));
-  }, [useLocal]);
+  }, [count, useLocal]);
 
   // Hero goes dead-centre so the pull-back can originate from it.
   const ordered = useMemo(() => {
@@ -107,13 +128,11 @@ export default function WallPage() {
 
   const srcFor = useCallback(
     (id: CaseId) => {
-      if (useLocal && localNames) {
-        const name = localNames[String(id)];
-        if (name) return `/thumbs/${name}`;
-      }
+      const entry = manifest?.[String(id)];
+      if (entry) return `/thumbs/${entry.file}`;
       return `${API_BASE}/api/get_image_preview/${id}`;
     },
-    [useLocal, localNames],
+    [manifest],
   );
 
   // Wait for most tiles to decode before moving — a pull-back across half-loaded
