@@ -1,9 +1,7 @@
-// useSliceAnchorPicker.ts
-//
 // Powers the guided "click the shape on the first/last slice" flow shared by
 // CopyAcrossSlicesFlyout and FillBetweenSlicesFlyout. The user never types a
 // pane name or a slice number — they click directly in whichever pane it's
-// easiest to see the organ in, and this resolves pane + slice index for them
+// easiest to see the class in, and this resolves pane + slice index for them
 // via pickSliceAnchorAtClientPoint.
 import { useEffect, useRef, useState } from "react";
 import { pickSliceAnchorAtClientPoint, type CinePane } from "../CornerstoneNifti2";
@@ -14,13 +12,6 @@ type Phase = "idle" | "picking" | "ready";
 
 interface Options {
 	segmentIndex: number;
-	/**
-	 * Does the LAST click also need to land on an existing drawing of the
-	 * segment? True for interpolation (both ends must already be drawn).
-	 * False for copy (the destination slice is expected to be empty —
-	 * that's the point of copying there), where the last click just needs
-	 * to land on a valid slice in the same pane.
-	 */
 	lastRequiresSegment: boolean;
 	/** Every rejected click (wrong spot, wrong pane, same slice, etc.) is reported here — never silent. */
 	onError: (detail: string) => void;
@@ -36,13 +27,26 @@ export function useSliceAnchorPicker({ segmentIndex, lastRequiresSegment, onErro
 	const firstRef = useRef(first);
 	firstRef.current = first;
 
+	// onError is an inline arrow in every caller, so its identity changes on
+	// every parent render — including renders caused by the error state this
+	// callback itself sets. If it were a dependency of the listener effect
+	// below, every error would tear down and re-add the window listener,
+	// and any click landing in that gap would be silently dropped. That's
+	// what produced "step 2 does nothing, no error at all" — the listener
+	// simply wasn't attached at the instant of the click. Route calls
+	// through a ref instead so the effect never resubscribes because of it.
+	const onErrorRef = useRef(onError);
+	onErrorRef.current = onError;
+
 	useEffect(() => {
 		if (phase !== "picking") return;
 
 		const onClick = (e: PointerEvent) => {
+			const target = e.target as Element | null;
+			if (target?.closest?.("[data-guided-overlay]")) return;
+
 			const hit = pickSliceAnchorAtClientPoint(e.clientX, e.clientY);
 			if (!hit) {
-				onError("Click inside one of the image panes.");
 				return;
 			}
 			e.preventDefault();
@@ -51,10 +55,10 @@ export function useSliceAnchorPicker({ segmentIndex, lastRequiresSegment, onErro
 			const isFirstStep = stepRef.current === "first";
 			const needsSegment = isFirstStep || lastRequiresSegment;
 			if (needsSegment && hit.segmentAtPoint !== segmentIndex) {
-				onError(
+				onErrorRef.current(
 					isFirstStep
-						? "Nothing drawn there — click directly on the shape you want to copy/fill from."
-						: "Nothing drawn there — click directly on the shape on this slice."
+						? "Valid class is not drawn here"
+						: "Valid class is not drawn here"
 				);
 				return;
 			}
@@ -67,11 +71,11 @@ export function useSliceAnchorPicker({ segmentIndex, lastRequiresSegment, onErro
 
 			// step === "last"
 			if (firstRef.current && hit.pane !== firstRef.current.pane) {
-				onError(`Click in the same view (${firstRef.current.pane}) as the first slice.`);
+				onErrorRef.current(`Click in the same view (${firstRef.current.pane}) as the first slice.`);
 				return;
 			}
 			if (firstRef.current && hit.sliceIndex === firstRef.current.sliceIndex) {
-				onError("That's the same slice — scroll to a different one first.");
+				onErrorRef.current("That's the same slice — scroll to a different one first.");
 				return;
 			}
 			setLast({ pane: hit.pane, sliceIndex: hit.sliceIndex });
@@ -80,7 +84,8 @@ export function useSliceAnchorPicker({ segmentIndex, lastRequiresSegment, onErro
 
 		window.addEventListener("pointerdown", onClick, true);
 		return () => window.removeEventListener("pointerdown", onClick, true);
-	}, [phase, segmentIndex, lastRequiresSegment, onError]);
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- onError intentionally excluded, see onErrorRef above
+	}, [phase, segmentIndex, lastRequiresSegment]);
 
 	const startPicking = () => {
 		setPhase("picking");
@@ -96,8 +101,8 @@ export function useSliceAnchorPicker({ segmentIndex, lastRequiresSegment, onErro
 	};
 
 	return {
-		phase, // "idle" | "picking" | "ready"
-		step, // which click we're waiting for while picking
+		phase,
+		step,
 		first,
 		last,
 		startPicking,
