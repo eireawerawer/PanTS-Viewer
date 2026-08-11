@@ -2910,7 +2910,7 @@ export function applyIslandsOperation(
     newSegmentsCreated = newLabelForComponent.size;
     for (const newIdx of newLabelForComponent.values()) {
       const color = colorForNewClass(newIdx);
-      const label = `Segment_${newIdx}`;
+      const label = `Class_${newIdx}`;
       registerNewSegmentColor(newIdx, color);
       _customSegmentLabels[newIdx] = label;
       createdSegments.push({ id: newIdx, label, color });
