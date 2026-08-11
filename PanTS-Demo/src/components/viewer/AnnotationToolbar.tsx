@@ -61,6 +61,11 @@ interface AnnotationToolbarProps {
 	/** True while a paint/erase/scissors edit is being committed — drives the
 	 *  pulsing "applying" indicator in the panel header. */
 	isRendering?: boolean;
+	/** True while one or more segment classes are being deleted in
+	 *  SegmentsPopup (fade-out + backend delete in flight) — drives a second,
+	 *  independent "Deleting…" indicator in the panel header, same spot and
+	 *  style as the tool-applying dot. */
+	isDeletingSegment?: boolean;
 
 	/** Id of whatever class/organ is currently targeted. Not used for editing
 	 *  logic here — only watched so the ribbon can deselect the active tool
@@ -329,7 +334,7 @@ export default function AnnotationToolbar({
 	open, hasSegments, hasActiveTarget, activeTool, onToolChange,
 	diameterMm, onDiameterChange, onDiameterPreviewChange, scissorsOptions, onScissorsOptionsChange,
 	renderFlyout, scissorsPointCount, onScissorsCancel, maskingArea,
-	onMaskingAreaChange, hasAnySegments, scopeLocked, isRendering,
+	onMaskingAreaChange, hasAnySegments, scopeLocked, isRendering, isDeletingSegment,
 	targetKey, showOnlyTargetMask, onShowOnlyTargetMaskChange,
 	popupRef, popupDragRef, popupMinRef, 
 }: AnnotationToolbarProps) {
@@ -651,6 +656,23 @@ export default function AnnotationToolbar({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [isRendering]);
 
+	// Same keep-mounted-for-a-beat treatment as the "Applying…" dot above,
+	// but driven by SegmentsPopup's in-flight deletes instead of a canvas
+	// edit. Stays visible until every deleting class has actually been
+	// removed (deletingIds empties out on the popup side).
+	const [deletingDotMounted, setDeletingDotMounted] = useState(false);
+	const [deletingDotVisible, setDeletingDotVisible] = useState(false);
+	useEffect(() => {
+		if (isDeletingSegment) {
+			setDeletingDotMounted(true);
+			const id = window.setTimeout(() => setDeletingDotVisible(true), 10);
+			return () => window.clearTimeout(id);
+		}
+		setDeletingDotVisible(false);
+		const id = window.setTimeout(() => setDeletingDotMounted(false), 460);
+		return () => window.clearTimeout(id);
+	}, [isDeletingSegment]);
+
 	// Signals "applied" from one-shot tool flyouts — closes settings and
 	// clears the tool's active highlight, same as clicking the icon again.
 	const handleToolApplied = useCallback(() => {
@@ -729,6 +751,10 @@ export default function AnnotationToolbar({
 
 			{/* "Applying…" indicator, always in this spot at the end of the icon row. */}
 			{renderingDotMounted && <RenderingIndicator label={renderingDotLabel} visible={renderingDotVisible} />}
+			{/* "Deleting…" indicator — independent of the one above, so both can
+			    show at once (e.g. a paint edit committing while a class delete
+			    is still in flight). */}
+			{deletingDotMounted && <RenderingIndicator label="Deleting" visible={deletingDotVisible} />}
 
 			{/* Exit / Start over for the running guided flow (Grow-from-seeds,
 			    Copy/Fill-across-slices) — fixed in the ribbon, not floating over the canvas. */}

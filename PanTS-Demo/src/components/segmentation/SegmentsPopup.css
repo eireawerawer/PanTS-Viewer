@@ -231,6 +231,26 @@
     pointer-events: none;
 }
 
+/* Portaled straight to <body> (see ColorPickerPopover in SegmentsPopup.tsx)
+   so it can spill outside .segpop/.segpop__list/.segpop__row's own
+   overflow:hidden instead of being clipped to the panel. Position itself
+   comes from the inline style (fixed top/left computed off the swatch
+   button's rect) — this just needs to sit above the popup panel itself
+   (.segpop is z-index: 45) and drop the old anchored top/left/absolute. */
+.segpop__color-popover--portaled {
+    position: fixed;
+    z-index: 2000;
+    transform-origin: top left;
+}
+
+.segpop__color-popover--portaled.is-open {
+    transform: scale(1) translateY(0);
+}
+
+.segpop__color-popover--portaled.is-closing {
+    transform: scale(0.94) translateY(-2px);
+}
+
 .segpop__color-popover-grid {
     display: grid;
     grid-template-columns: repeat(5, 20px);

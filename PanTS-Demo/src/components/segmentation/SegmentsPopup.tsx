@@ -30,6 +30,13 @@ interface SegmentsPopupProps {
 	activeCatalogOrganId: number | null;
 	onSelectCatalogOrgan: (id: number | null) => void;
 
+	/** Fires whenever the "any deletes currently in flight" state flips, so
+	 *  the parent can surface it in AnnotationToolbar's own "Deleting…"
+	 *  indicator (this popup lives outside that component). True from the
+	 *  moment a delete is confirmed until the deleted class has actually
+	 *  left `segments`. */
+	onDeletingChange?: (isDeleting: boolean) => void;
+
 	/** Refs the parent (VisualizationPage) attaches this component's outer
 	 *  panel and header to, so AnnotationToolbar's Overview walkthrough can
 	 *  spotlight this popup even though it lives outside that component. */
@@ -83,6 +90,10 @@ interface ColorPickerPopoverProps {
 	value: string;
 	onChange: (hex: string) => void;
 	onClose: () => void;
+	/** Swatch button this popover is anchored to — used only to compute a
+	 *  fixed viewport position, since the popover itself portals to
+	 *  <body> (see below) rather than rendering inline. */
+	anchorRef: React.RefObject<HTMLElement | null>;
 }
 
 // Small anchored popover for picking a class color — a grid of preset
@@ -90,9 +101,16 @@ interface ColorPickerPopoverProps {
 // scales/fades in on open and back out on close (mirrors GuidedStepModal's
 // treatment elsewhere in the annotation tool) instead of the browser's own
 // abrupt native color picker being the only way in.
-function ColorPickerPopover({ value, onChange, onClose }: ColorPickerPopoverProps) {
+//
+// Portals to <body> and positions itself with `fixed` coords computed from
+// the swatch button's own rect, rather than rendering inline where
+// .segpop__list/.segpop__row's overflow:hidden (needed for their own
+// scroll/collapse animations) would otherwise clip it to the panel. This
+// lets the popover spill out over the canvas instead of being boxed in.
+function ColorPickerPopover({ value, onChange, onClose, anchorRef }: ColorPickerPopoverProps) {
 	const [closing, setClosing] = useState(false);
 	const popRef = useRef<HTMLDivElement>(null);
+	const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
 
 	const requestClose = () => {
 		if (closing) return;
@@ -101,8 +119,38 @@ function ColorPickerPopover({ value, onChange, onClose }: ColorPickerPopoverProp
 	};
 
 	useEffect(() => {
+		const compute = () => {
+			const anchor = anchorRef.current;
+			if (!anchor) return;
+			const rect = anchor.getBoundingClientRect();
+			const popW = popRef.current?.offsetWidth ?? 208;
+			const popH = popRef.current?.offsetHeight ?? 0;
+			const margin = 8;
+			// Prefer opening to the right of the swatch; flip to the left if
+			// it would run off the viewport edge, and clamp vertically so it
+			// never gets pushed off the top/bottom either.
+			let left = rect.right + margin;
+			if (left + popW > window.innerWidth - margin) {
+				left = rect.left - popW - margin;
+			}
+			left = Math.max(margin, Math.min(left, window.innerWidth - popW - margin));
+			let top = rect.top;
+			if (popH) top = Math.max(margin, Math.min(top, window.innerHeight - popH - margin));
+			setPos({ top, left });
+		};
+		compute();
+		window.addEventListener("resize", compute);
+		window.addEventListener("scroll", compute, true);
+		return () => {
+			window.removeEventListener("resize", compute);
+			window.removeEventListener("scroll", compute, true);
+		};
+	}, [anchorRef]);
+
+	useEffect(() => {
 		const onDown = (e: MouseEvent) => {
 			if (popRef.current?.contains(e.target as Node)) return;
+			if (anchorRef.current?.contains(e.target as Node)) return;
 			requestClose();
 		};
 		const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") requestClose(); };
@@ -115,10 +163,13 @@ function ColorPickerPopover({ value, onChange, onClose }: ColorPickerPopoverProp
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
-	return (
+	if (typeof document === "undefined" || !pos) return null;
+
+	return createPortal(
 		<div
 			ref={popRef}
-			className={`segpop__color-popover ${closing ? "is-closing" : "is-open"}`}
+			className={`segpop__color-popover segpop__color-popover--portaled ${closing ? "is-closing" : "is-open"}`}
+			style={{ position: "fixed", top: pos.top, left: pos.left }}
 			onClick={(e) => e.stopPropagation()}
 		>
 			<div className="segpop__color-popover-grid">
@@ -137,7 +188,8 @@ function ColorPickerPopover({ value, onChange, onClose }: ColorPickerPopoverProp
 				<input type="color" value={value} onChange={(e) => onChange(e.target.value)} />
 				<span>Custom…</span>
 			</label>
-		</div>
+		</div>,
+		document.body
 	);
 }
 
@@ -179,7 +231,7 @@ const RIGHT_MARGIN = 0; // flush to the viewport edge, same as AISidebar
  */
 export default function SegmentsPopup({
 	open, segments, colors, visibility, activeSegmentId,
-	onSelect, onRename, onColorChange, onToggleVisibility, onDelete, onCreate,
+	onSelect, onRename, onColorChange, onToggleVisibility, onDelete, onCreate, onDeletingChange,
 	organCatalog, activeCatalogOrganId, onSelectCatalogOrgan,
 	containerRef, dragHandleRef,
 }: SegmentsPopupProps) {
@@ -246,6 +298,12 @@ export default function SegmentsPopup({
 	const [editColorDraft, setEditColorDraft] = useState("#ffffff");
 	const [renameError, setRenameError] = useState<number | null>(null);
 	const [editColorPopoverOpen, setEditColorPopoverOpen] = useState(false);
+	// Anchors for the portaled ColorPickerPopover — one swatch button lives
+	// in the add-form, the other in the inline edit row, and only one of
+	// either is ever mounted at a time, but keeping separate refs avoids
+	// them fighting over a single ref across renders.
+	const addColorBtnRef = useRef<HTMLButtonElement>(null);
+	const editColorBtnRef = useRef<HTMLButtonElement>(null);
 
 	// Deletion can take a moment on the backend — track in-flight deletes
 	// locally so the row can show a spinner instead of looking unresponsive,
@@ -260,6 +318,20 @@ export default function SegmentsPopup({
 			return next.size === prev.size ? prev : next;
 		});
 	}, [segments]);
+
+	// Tell the parent (VisualizationPage → AnnotationToolbar) whenever the
+	// "something is deleting" state actually flips, not on every render —
+	// onDeletingChange isn't guaranteed to be referentially stable, so this
+	// only fires on a real true/false transition.
+	const wasDeletingRef = useRef(false);
+	useEffect(() => {
+		const isDeleting = deletingIds.size > 0;
+		if (isDeleting !== wasDeletingRef.current) {
+			wasDeletingRef.current = isDeleting;
+			onDeletingChange?.(isDeleting);
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [deletingIds]);
 
 	// Class awaiting delete confirmation — the trash icon no longer deletes
 	// on the first click; it opens this confirm overlay (same GuidedStepModal
@@ -469,6 +541,7 @@ export default function SegmentsPopup({
 												    row, just clickable while editing. */}
 												<div className="segpop__color-anchor">
 													<button
+														ref={editColorBtnRef}
 														type="button"
 														className="segpop__color segpop__color-btn"
 														style={{ background: editColorDraft }}
@@ -481,6 +554,7 @@ export default function SegmentsPopup({
 															value={editColorDraft}
 															onChange={setEditColorDraft}
 															onClose={() => setEditColorPopoverOpen(false)}
+															anchorRef={editColorBtnRef}
 														/>
 													)}
 												</div>
@@ -491,7 +565,10 @@ export default function SegmentsPopup({
 													maxLength={MAX_SEGMENT_NAME_LENGTH}
 													onChange={(e) => { setEditNameDraft(e.target.value); setRenameError(null); }}
 													onKeyDown={(e) => {
-														if (e.key === "Enter") commitEdit(s.id);
+														// Same fix as the add-form input above: close on a
+														// successful Enter-commit instead of leaving the row
+														// stuck open in edit mode.
+														if (e.key === "Enter") { if (commitEdit(s.id)) closeEdit(s.id); }
 														if (e.key === "Escape") cancelEdit();
 													}}
 												/>
@@ -577,6 +654,7 @@ export default function SegmentsPopup({
 										<div style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}>
 											<div className="segpop__color-anchor">
 												<button
+													ref={addColorBtnRef}
 													type="button"
 													className="segpop__color segpop__color-btn"
 													style={{ background: draftColor }}
@@ -589,6 +667,7 @@ export default function SegmentsPopup({
 														value={draftColor}
 														onChange={setDraftColor}
 														onClose={() => setAddColorPopoverOpen(false)}
+														anchorRef={addColorBtnRef}
 													/>
 												)}
 											</div>
@@ -600,7 +679,11 @@ export default function SegmentsPopup({
 												maxLength={MAX_SEGMENT_NAME_LENGTH}
 												onChange={(e) => { setDraftName(e.target.value); setCreateError(""); }}
 												onKeyDown={(e) => {
-													if (e.key === "Enter") commitAdd();
+													// Mirrors the ApplyButton path below: on a successful add,
+													// close the form the same way clicking "Add class" would
+													// (previously this just called commitAdd() and left the
+													// form sitting open with no visible next step).
+													if (e.key === "Enter") { if (commitAdd()) closeAddForm(); }
 													if (e.key === "Escape") closeAddForm();
 												}}
 											/>
