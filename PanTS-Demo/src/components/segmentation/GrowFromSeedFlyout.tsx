@@ -1,316 +1,178 @@
 import { useEffect, useState } from "react";
 import type { useSmartFill } from "../../helpers/viewer/useSmartFill";
-import ApplyButton from "../ApplyButton";
-import OperationPicker, { type OperationOption } from "../OperationPicker";
+import { GuidedStepModal, GuidedContinuePill, type GuidedFlowControls } from "./SliceAnchorPickerUI";
+import { ActionButton, ActionList } from "../viewer/FlyoutPrimitives";
+import "../viewer/FlyoutPrimitives.css";
 
 type SmartFill = ReturnType<typeof useSmartFill>;
 
-// If your useSmartFill hook can report whether any foreground/background
-// scribbles actually exist, wire them up here (optional — see the two
-// commented lines in the Pick<> below and where hasForegroundMarks /
-// hasBackgroundMarks are read). Without them, "Continue" is a manual
-// self-report step; with them, this component enforces it for real and
-// shows an inline error if you try to move on with nothing marked.
 type GrowFromSeedsFlyoutProps = Pick<SmartFill, "markMode" | "setMarkMode" | "scope" | "setScope" | "apply" | "clearScribbles"> & {
 	hasForegroundMarks?: boolean;
 	hasBackgroundMarks?: boolean;
+	/** Called right after a fill commits, OR when Exit is pressed mid-flow —
+	 *  either way tells the toolbar to close this tool's settings and drop
+	 *  its "selected" highlight. */
+	onApplied?: () => void;
+	/** Closes just the small settings flyout (without deselecting the
+	 *  tool) the instant a scope is picked and the guided flow starts. */
+	onCloseSettings?: () => void;
+	/** Publishes Exit / Start over up to the annotation toolbar so it can
+	 *  render them as fixed buttons in its own ribbon for as long as this
+	 *  guided flow is running. Called with `null` once it ends. */
+	onGuidedControlsChange?: (controls: GuidedFlowControls | null) => void;
+	/** Mirrors the running state up to the toolbar so the single pulsing
+	 *  "Applying…" indicator at the right of the ribbon can show while the
+	 *  fill is in flight. */
+	onBusyChange?: (busy: boolean) => void;
 };
 
 type Step = 1 | 2 | 3;
 
-// Two flat "plane" icons for scope: one slice highlighted vs. the whole
-// stack highlighted — same visual language as the islands panel's blobs.
-function ScopeIcon({ scope }: { scope: "slice" | "volume" }) {
-	if (scope === "slice") {
-		return (
-			<svg width="20" height="20" viewBox="0 0 20 20" className="atb-scissors-icon">
-				<rect x="2" y="7" width="16" height="6" rx="1.2" fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth="1.1" strokeDasharray="1.4,1.6" />
-				<rect x="2" y="1" width="16" height="6" rx="1.2" fill="#fff" />
-				<rect x="2" y="13" width="16" height="6" rx="1.2" fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth="1.1" strokeDasharray="1.4,1.6" />
-			</svg>
-		);
-	}
-	return (
-		<svg width="20" height="20" viewBox="0 0 20 20" className="atb-scissors-icon">
-			<rect x="2" y="1" width="16" height="5.3" rx="1.1" fill="#fff" fillOpacity="0.9" />
-			<rect x="2" y="7.3" width="16" height="5.3" rx="1.1" fill="#fff" fillOpacity="0.9" />
-			<rect x="2" y="13.7" width="16" height="5.3" rx="1.1" fill="#fff" fillOpacity="0.9" />
-		</svg>
-	);
-}
-
-const SCOPE_OPTIONS: OperationOption<"slice" | "volume">[] = [
-	{ value: "slice", label: "Current slice", tooltip: "Only fill on the slice you're currently viewing.", icon: <ScopeIcon scope="slice" /> },
-	{ value: "volume", label: "All slices", tooltip: "Fill across the whole volume.", icon: <ScopeIcon scope="volume" /> },
-];
-
-// Step 1 icon: a dot landing inside a solid blob.
-function MarkInsideIcon({ size = 34 }: { size?: number }) {
-	return (
-		<svg width={size} height={size} viewBox="0 0 40 40">
-			<circle cx="20" cy="20" r="14" fill="#6ea8fe" fillOpacity="0.18" stroke="#6ea8fe" strokeWidth="1.4" />
-			<circle cx="17" cy="19" r="2.6" fill="#6ea8fe" />
-			<circle cx="23" cy="23" r="2.6" fill="#6ea8fe" />
-			<circle cx="22" cy="15" r="2.6" fill="#6ea8fe" />
-		</svg>
-	);
-}
-
-// Step 2 icon: a dot landing outside the blob, with a small "excluded" ring.
-function MarkOutsideIcon({ size = 34 }: { size?: number }) {
-	return (
-		<svg width={size} height={size} viewBox="0 0 40 40">
-			<circle cx="17" cy="19" r="12" fill="rgba(255,255,255,0.06)" stroke="rgba(255,255,255,0.3)" strokeWidth="1.4" strokeDasharray="1.6,1.8" />
-			<circle cx="31" cy="12" r="2.6" fill="#f43f5e" />
-			<circle cx="33" cy="27" r="2.6" fill="#f43f5e" />
-			<line x1="28.5" y1="9.5" x2="33.5" y2="14.5" stroke="#f43f5e" strokeWidth="1" strokeLinecap="round" opacity="0" />
-		</svg>
-	);
-}
-
-// Step 3 icon: the region fully filled solid — the end state.
-function FillReadyIcon({ size = 34 }: { size?: number }) {
-	return (
-		<svg width={size} height={size} viewBox="0 0 40 40">
-			<circle cx="20" cy="20" r="14" fill="#22c55e" fillOpacity="0.9" />
-			<path d="M14 20.5 L18 24.5 L26 15.5" fill="none" stroke="#0b3b2e" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-		</svg>
-	);
-}
-
-// Progress rail — three dots connected by a line, current step highlighted,
-// done steps checked. Built as a CSS grid (dot / line / dot / line / dot)
-// rather than dots-over-an-absolutely-positioned-line, so the connector
-// physically cannot render on top of a dot's number — it occupies its own
-// grid track between them, never overlapping. Purely visual orientation,
-// not clickable (you move forward/back only via the step buttons).
-function StepRail({ step }: { step: Step }) {
-	const state = (n: Step) => (n < step ? "done" : n === step ? "current" : "upcoming");
-	const labels = ["Mark inside", "Mark outside", "Fill"];
-
-	const dotStyle = (n: Step): React.CSSProperties => {
-		const s = state(n);
-		return {
-			width: 22,
-			height: 22,
-			borderRadius: "50%",
-			display: "flex",
-			alignItems: "center",
-			justifyContent: "center",
-			fontSize: 11,
-			fontWeight: 700,
-			justifySelf: "center",
-			background: s === "current" ? "#6ea8fe" : s === "done" ? "#22c55e" : "rgba(255,255,255,0.08)",
-			color: s === "upcoming" ? "rgba(255,255,255,0.4)" : "#0b1620",
-			border: s === "upcoming" ? "1px solid rgba(255,255,255,0.18)" : "none",
-		};
-	};
-
-	const lineStyle = (done: boolean): React.CSSProperties => ({
-		height: 2,
-		alignSelf: "center",
-		background: done ? "#22c55e" : "rgba(255,255,255,0.12)",
-	});
-
-	const labelStyle = (n: Step): React.CSSProperties => ({
-		fontSize: 9.5,
-		textAlign: "center",
-		color: state(n) === "upcoming" ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.75)",
-	});
-
-	return (
-		<div style={{ display: "grid", gridTemplateColumns: "22px 1fr 22px 1fr 22px", rowGap: 4 }}>
-			<div style={dotStyle(1)}>{state(1) === "done" ? "✓" : 1}</div>
-			<div style={lineStyle(step > 1)} />
-			<div style={dotStyle(2)}>{state(2) === "done" ? "✓" : 2}</div>
-			<div style={lineStyle(step > 2)} />
-			<div style={dotStyle(3)}>{state(3) === "done" ? "✓" : 3}</div>
-			<span style={labelStyle(1)}>{labels[0]}</span>
-			<span />
-			<span style={labelStyle(2)}>{labels[1]}</span>
-			<span />
-			<span style={labelStyle(3)}>{labels[2]}</span>
-		</div>
-	);
-}
-
-const stepCardStyle: React.CSSProperties = {
-	display: "flex",
-	flexDirection: "column",
-	alignItems: "center",
-	gap: 8,
-	textAlign: "center",
-	padding: "14px 12px",
-	borderRadius: 10,
-	background: "rgba(255,255,255,0.04)",
-	border: "1px solid rgba(255,255,255,0.08)",
-};
-
-const primaryBtnStyle: React.CSSProperties = {
-	width: "100%",
-	padding: "9px 10px",
-	borderRadius: 8,
-	border: "none",
-	background: "#6ea8fe",
-	color: "#0b1620",
-	fontWeight: 700,
-	fontSize: 12.5,
-	cursor: "pointer",
-};
-
-const secondaryBtnStyle: React.CSSProperties = {
-	width: "100%",
-	padding: "8px 10px",
-	borderRadius: 8,
-	border: "1px solid rgba(255,255,255,0.15)",
-	background: "transparent",
-	color: "rgba(255,255,255,0.75)",
-	fontSize: 12,
-	cursor: "pointer",
-};
-
-const errorStyle: React.CSSProperties = {
-	fontSize: 11.5,
-	color: "#fda4af",
-	background: "rgba(244,63,94,0.1)",
-	border: "1px solid rgba(244,63,94,0.3)",
-	borderRadius: 6,
-	padding: "6px 8px",
-};
-
 export default function GrowFromSeedsFlyout({
 	setMarkMode, scope, setScope, apply, clearScribbles,
-	hasForegroundMarks, hasBackgroundMarks,
+	hasForegroundMarks, hasBackgroundMarks, onApplied, onCloseSettings, onGuidedControlsChange, onBusyChange,
 }: GrowFromSeedsFlyoutProps) {
+	const [active, setActive] = useState(false);
 	const [step, setStep] = useState<Step>(1);
-	const [error, setError] = useState<string | null>(null);
+	const [ackStep1, setAckStep1] = useState(false);
+	const [ackStep2, setAckStep2] = useState(false);
+	const [applying, setApplying] = useState(false);
+	// Confirmation overlay shown once the fill commits.
+	const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-	// The step drives markMode — the user never toggles it directly. Step 1 =
-	// marking what to include, step 2 = marking what to exclude.
+	// Only arms the canvas for marking once the current step's instruction
+	// modal has been dismissed, so a click can't register as a seed before
+	// "Got it" is pressed. Disarms unconditionally otherwise (flow
+	// inactive, fresh scope pick, or a start-over) so no stale mode from a
+	// prior step stays live.
 	useEffect(() => {
-		if (step === 1) setMarkMode("fg");
-		else if (step === 2) setMarkMode("bg");
-	}, [step, setMarkMode]);
+		if (active && step === 1 && ackStep1) setMarkMode("fg");
+		else if (active && step === 2 && ackStep2) setMarkMode("bg");
+		else setMarkMode(null as unknown as Parameters<typeof setMarkMode>[0]);
+	}, [active, step, ackStep1, ackStep2, setMarkMode]);
 
+	// Clears marks but stays in the guided flow at step 1, unlike Exit.
+	// Marking doesn't resume until step 1's modal is acknowledged again.
 	const handleStartOver = () => {
 		clearScribbles();
 		setStep(1);
-		setError(null);
+		setAckStep1(false);
+		setAckStep2(false);
 	};
 
-	// Switching scope mid-flow means everything marked so far was placed under
-	// the old scope (this slice vs. the whole volume) and no longer means what
-	// the user thinks it means — so it's discarded, not carried over.
-	const handleScopeChange = (next: typeof scope) => {
-		handleStartOver();
-		setScope(next);
-	};
-
-	const handleContinueFromInside = () => {
-		if (hasForegroundMarks === false) {
-			setError("Click at least one point inside the region before continuing.");
-			return;
-		}
-		setError(null);
-		setStep(2);
-	};
-
-	const handleSkipOutside = () => {
-		if (hasBackgroundMarks === true) {
-			setError("You've marked points to exclude — click Continue instead, or Start over to clear them.");
-			return;
-		}
-		setError(null);
-		setStep(3);
+	// Cancels the flow and fully deselects the tool, from any step.
+	const handleExit = () => {
+		clearScribbles();
+		setStep(1);
+		setAckStep1(false);
+		setAckStep2(false);
+		setActive(false);
+		onApplied?.();
 	};
 
 	const handleFill = async () => {
-		if (hasForegroundMarks === false) {
-			setError("Nothing was marked — click Start over and mark at least one point inside the region first.");
-			return;
+		setApplying(true);
+		onBusyChange?.(true);
+		try {
+			await apply();
+		} finally {
+			setApplying(false);
+			onBusyChange?.(false);
 		}
-		setError(null);
-		await apply();
-		// A committed fill consumes the marks that produced it — starting the
-		// next fill from a clean step 1 rather than leaving stale scribbles
-		// and a "step 3" state that no longer matches what's on screen.
-		handleStartOver();
+		clearScribbles();
+		setStep(1);
+		setAckStep1(false);
+		setAckStep2(false);
+		// Stays "active" through the confirmation; deselects on "Got it" below.
+		setSuccessMessage("Operation completed successfully");
 	};
 
+	const dismissSuccess = () => {
+		setSuccessMessage(null);
+		setActive(false);
+		onApplied?.();
+	};
+
+	// Picking a scope starts the flow immediately — no separate Start button.
+	const selectScope = (next: typeof scope) => {
+		setScope(next);
+		setStep(1);
+		setAckStep1(false);
+		setAckStep2(false);
+		setActive(true);
+		onCloseSettings?.();
+	};
+
+	// Publish Exit / Start over to the toolbar ribbon while the flow is
+	// alive, except during the success confirmation (nothing to cancel then).
+	useEffect(() => {
+		if (!active || successMessage) { onGuidedControlsChange?.(null); return; }
+		onGuidedControlsChange?.({ label: "Grow from seeds", onExit: handleExit, onStartOver: handleStartOver, busy: applying });
+		return () => onGuidedControlsChange?.(null);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [active, step, applying, successMessage]);
+
+	if (successMessage) {
+		return (
+			<GuidedStepModal
+				title="Success"
+				instruction={successMessage}
+				primaryLabel="Got it"
+				onPrimary={dismissSuccess}
+			/>
+		);
+	}
+
 	return (
-		<div className="seg-effect">
-			<div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-				<span className="seg-effect__label">Scope:</span>
-				<OperationPicker name="smartfill-scope" title="" options={SCOPE_OPTIONS} value={scope} onChange={handleScopeChange} />
-			</div>
-
-			<StepRail step={step} />
-
-			{step === 1 && (
-				<div style={stepCardStyle}>
-					<MarkInsideIcon />
-					<div style={{ fontSize: 12.5, fontWeight: 700, color: "#fff" }}>Click inside the region</div>
-					<div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.4 }}>
-						Drop a few points anywhere inside what you want to fill. More points in different spots works better than one.
-					</div>
-					{error && <div style={errorStyle}>{error}</div>}
-					<button style={primaryBtnStyle} onClick={handleContinueFromInside}>
-						I've marked inside — continue
-					</button>
-				</div>
+		<>
+			{!active && (
+				// Picking a scope is an action, not a persistent mode, so
+				// these are ActionButtons rather than plain MenuRows.
+				<ActionList>
+					<ActionButton label="Grow across current slice" onClick={() => selectScope("slice")} />
+					<ActionButton label="Grow across all slices" onClick={() => selectScope("volume")} />
+				</ActionList>
 			)}
 
-			{step === 2 && (
-				<div style={stepCardStyle}>
-					<MarkOutsideIcon />
-					<div style={{ fontSize: 12.5, fontWeight: 700, color: "#fff" }}>Click anything to exclude</div>
-					<div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.4 }}>
-						Optional. If a neighboring structure keeps bleeding in, dot it here to keep it out. Skip this if you don't need it.
-					</div>
-					{error && <div style={errorStyle}>{error}</div>}
-					<button style={primaryBtnStyle} onClick={() => {
-						if (hasBackgroundMarks === false) {
-							setError("Click at least one point to exclude, or use Skip if there's nothing to exclude.");
-							return;
-						}
-						setError(null);
-						setStep(3);
-					}}>
-						I've marked outside — continue
-					</button>
-					<button style={secondaryBtnStyle} onClick={handleSkipOutside}>
-						Skip — nothing to exclude
-					</button>
-					<button style={{ ...secondaryBtnStyle, border: "none", color: "rgba(255,255,255,0.45)" }} onClick={() => setStep(1)}>
-						Back
-					</button>
-				</div>
+			{active && step === 1 && !ackStep1 && (
+				<GuidedStepModal
+					title="Mark the region"
+					instruction="Click a few points inside the area to grow."
+					onPrimary={() => setAckStep1(true)}
+				/>
+			)}
+			{active && step === 1 && ackStep1 && (
+				<GuidedContinuePill
+					label="Continue →"
+					disabled={hasForegroundMarks === false}
+					hint={hasForegroundMarks === false ? "Mark at least one point first" : undefined}
+					onClick={() => setStep(2)}
+				/>
 			)}
 
-			{step === 3 && (
-				<div style={stepCardStyle}>
-					<FillReadyIcon />
-					<div style={{ fontSize: 12.5, fontWeight: 700, color: "#fff" }}>Ready to fill</div>
-					<div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.4 }}>
-						This grows outward from your inside points, staying clear of anything marked outside, {scope === "slice" ? "on the current slice." : "across all slices."}
-					</div>
-					{error && <div style={errorStyle}>{error}</div>}
-					<div style={{ width: "100%" }}>
-						<ApplyButton onApply={handleFill} label="Fill" applyingLabel="Filling…" />
-					</div>
-					<button style={{ ...secondaryBtnStyle, border: "none", color: "rgba(255,255,255,0.45)" }} onClick={() => setStep(2)}>
-						Back
-					</button>
-				</div>
+			{active && step === 2 && !ackStep2 && (
+				<GuidedStepModal
+					title="Mark exclusions"
+					instruction="Optional — click points to exclude, or skip."
+					primaryLabel="Got it"
+					onPrimary={() => setAckStep2(true)}
+					secondaryLabel="Skip"
+					onSecondary={() => { setAckStep2(true); setStep(3); }}
+				/>
+			)}
+			{active && step === 2 && ackStep2 && (
+				<GuidedContinuePill label="Continue →" onClick={() => setStep(3)} />
 			)}
 
-			<button
-				style={{ ...secondaryBtnStyle, marginTop: 2, fontSize: 11, color: "rgba(255,255,255,0.4)" }}
-				onClick={handleStartOver}
-				title="Clear everything marked so far and start from step 1"
-			>
-				Start over
-			</button>
-		</div>
+			{active && step === 3 && (
+				<GuidedStepModal
+					title="Ready to fill"
+					instruction="Fill the marked region with your marks."
+					primaryLabel={applying ? "Filling…" : "Fill region"}
+					onPrimary={handleFill}
+					busy={applying}
+				/>
+			)}
+		</>
 	);
 }

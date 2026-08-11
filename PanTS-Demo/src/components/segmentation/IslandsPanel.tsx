@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import ApplyButton from "../ApplyButton";
-import OperationPicker, { type OperationOption } from "../OperationPicker";
+import { ActionButton, ActionList, GrandchildRow, MenuColumn, MenuDivider } from "../viewer/FlyoutPrimitives";
 import NumberSliderField from "../NumberSliderField";
 import type { IslandsOperation } from "../../helpers/CornerstoneNifti2";
+import { GuidedStepModal, PickErrorHint, type GuidedFlowControls } from "../segmentation/SliceAnchorPickerUI";
+import "../viewer/FlyoutPrimitives.css";
 
 interface IslandsPanelProps {
 	onApply: (operation: IslandsOperation, minimumSize: number) => void;
@@ -17,299 +19,312 @@ interface IslandsPanelProps {
 	pickedInvalid: boolean;
 	/** Identifies the current target segment/organ — watched only to trigger a reset when it changes. */
 	targetKey: number | null;
+	/** Called right after an operation commits — tells the toolbar to close
+	 *  this tool's settings and drop its "selected" highlight. */
+	onApplied?: () => void;
+	/** Closes just the small settings flyout (without deselecting the
+	 *  Islands tool) the instant a pick-dependent operation starts, so it
+	 *  doesn't linger empty behind the full-screen picking overlay. */
+	onCloseSettings?: () => void;
+	/** Mirrors the running state up to the toolbar so the single pulsing
+	 *  "Applying…" indicator at the right of the ribbon can show while a
+	 *  direct (non-picking) operation is in flight. */
+	onBusyChange?: (busy: boolean) => void;
+	/** Publishes Exit / Start over for the "keep/remove picked island" flow
+	 *  up to the annotation toolbar, exactly like Copy/Fill-across-slices
+	 *  and Grow-from-seeds — so all four guided flows share one fixed
+	 *  control location in the ribbon instead of each floating its own
+	 *  Exit button over the canvas. Publish `null` when not picking. */
+	onGuidedControlsChange?: (controls: GuidedFlowControls | null) => void;
 }
 
 const MIN_SIZE_VOXELS = 1;
 const MAX_SIZE_VOXELS = 20000;
 
-// Three blobs of decreasing size stand in for "islands" in a segment. Each
-// mode redraws them to show what happens: solid = kept as-is, faint dashed
-// outline = removed, red X = explicitly deleted, ring = the picked island,
-// distinct colors = split apart into separate segments.
-function IslandsOpIcon({ op }: { op: IslandsOperation }) {
-	const BIG = { cx: 7.4, cy: 8, r: 4.2 };
-	const MED = { cx: 15, cy: 6.8, r: 2.5 };
-	const SMALL = { cx: 13.2, cy: 15, r: 1.7 };
-
-	const blob = (b: { cx: number; cy: number; r: number }, mode: "solid" | "dashed" | "x", color?: string) => {
-		if (mode === "x") {
-			return (
-				<g key={`${b.cx}-${b.cy}`}>
-					<circle cx={b.cx} cy={b.cy} r={b.r} fill="none" stroke="rgba(255,255,255,0.35)" strokeWidth="1.1" strokeDasharray="1.4,1.6" />
-					<line x1={b.cx - b.r * 0.7} y1={b.cy - b.r * 0.7} x2={b.cx + b.r * 0.7} y2={b.cy + b.r * 0.7} stroke="#f43f5e" strokeWidth="1.3" strokeLinecap="round" />
-					<line x1={b.cx - b.r * 0.7} y1={b.cy + b.r * 0.7} x2={b.cx + b.r * 0.7} y2={b.cy - b.r * 0.7} stroke="#f43f5e" strokeWidth="1.3" strokeLinecap="round" />
-				</g>
-			);
-		}
-		if (mode === "dashed") {
-			return <circle key={`${b.cx}-${b.cy}`} cx={b.cx} cy={b.cy} r={b.r} fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth="1.1" strokeDasharray="1.4,1.6" />;
-		}
-		return <circle key={`${b.cx}-${b.cy}`} cx={b.cx} cy={b.cy} r={b.r} fill={color ?? "#fff"} />;
-	};
-
-	let content: React.ReactNode;
-	switch (op) {
-		case "keepLargest":
-			content = <>{blob(BIG, "solid")}{blob(MED, "dashed")}{blob(SMALL, "dashed")}</>;
-			break;
-		case "keepSelected":
-			content = (
-				<>
-					{blob(BIG, "x")}
-					{blob(MED, "solid")}
-					<circle cx={MED.cx} cy={MED.cy} r={MED.r + 1.6} fill="none" stroke="#6ea8fe" strokeWidth="1.2" />
-					{blob(SMALL, "x")}
-				</>
-			);
-			break;
-		case "removeSmall":
-			content = <>{blob(BIG, "solid")}{blob(MED, "solid")}{blob(SMALL, "x")}</>;
-			break;
-		case "removeSelected":
-			content = <>{blob(BIG, "solid")}{blob(MED, "x")}{blob(SMALL, "solid")}</>;
-			break;
-		case "splitToSegments":
-			content = <>{blob(BIG, "solid", "#f43f5e")}{blob(MED, "solid", "#6ea8fe")}{blob(SMALL, "solid", "#eab308")}</>;
-			break;
-	}
-
-	return (
-		<svg width="20" height="20" viewBox="0 0 20 20" className="atb-scissors-icon">
-			{content}
-		</svg>
-	);
-}
-
-const ISLANDS_OPTIONS: OperationOption<IslandsOperation>[] = [
-	{
-		value: "keepLargest",
-		label: "Keep largest",
-		tooltip: "Keep only the largest island in this segment — every smaller island is removed.",
-		icon: <IslandsOpIcon op="keepLargest" />,
-	},
-	{
-		value: "keepSelected",
-		label: "Keep only picked",
-		tooltip: "Click one island to pick it — every other island in this segment is deleted, leaving just the one you picked.",
-		icon: <IslandsOpIcon op="keepSelected" />,
-	},
-	{
-		value: "removeSmall",
-		label: "Remove small",
-		tooltip: "Remove every island in this segment smaller than the minimum size below.",
-		icon: <IslandsOpIcon op="removeSmall" />,
-	},
-	{
-		value: "removeSelected",
-		label: "Remove picked",
-		tooltip: "Click one island to pick it, then remove just that island — everything else in the segment is left alone.",
-		icon: <IslandsOpIcon op="removeSelected" />,
-	},
-	{
-		value: "splitToSegments",
-		label: "Split to segments",
-		tooltip: "Turn every island in this segment into its own new segment, each with its own color.",
-		icon: <IslandsOpIcon op="splitToSegments" />,
-	},
+const DIRECT_OPS: { value: IslandsOperation; label: string }[] = [
+	{ value: "keepLargest", label: "Keep largest" },
+	{ value: "splitToSegments", label: "Split to classes" },
 ];
 
-// Crosshair target used everywhere in the picker: a plain ring while idle, a
-// pulsing red ring while armed and waiting for a click, a solid green ring
-// with a checkmark once a valid pick lands, and a red ring with an X if the
-// click landed outside the segment — so the icon alone tells you the state.
-function PickIcon({ state }: { state: "idle" | "picking" | "picked" | "invalid" }) {
-	const color = state === "picking" || state === "invalid" ? "#f43f5e" : state === "picked" ? "#22c55e" : "currentColor";
-	return (
-		<svg width="18" height="18" viewBox="0 0 16 16" aria-hidden="true" style={{ flexShrink: 0 }}>
-			<circle cx="8" cy="8" r="5" fill="none" stroke={color} strokeWidth="1.3" />
-			<circle cx="8" cy="8" r="1" fill={color} />
-			<line x1="8" y1="0.5" x2="8" y2="2.5" stroke={color} strokeWidth="1.3" strokeLinecap="round" />
-			<line x1="8" y1="13.5" x2="8" y2="15.5" stroke={color} strokeWidth="1.3" strokeLinecap="round" />
-			<line x1="0.5" y1="8" x2="2.5" y2="8" stroke={color} strokeWidth="1.3" strokeLinecap="round" />
-			<line x1="13.5" y1="8" x2="15.5" y2="8" stroke={color} strokeWidth="1.3" strokeLinecap="round" />
-			{state === "picking" && <circle cx="8" cy="8" r="5" fill="none" stroke="#f43f5e" strokeWidth="1.3" className="vp-livewire-close-pulse" />}
-			{state === "picked" && (
-				<path d="M5.2 8.3 L7.1 10.2 L11 6" fill="none" stroke="#22c55e" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-			)}
-			{state === "invalid" && (
-				<g>
-					<line x1="5.8" y1="5.8" x2="10.2" y2="10.2" stroke="#f43f5e" strokeWidth="1.4" strokeLinecap="round" />
-					<line x1="10.2" y1="5.8" x2="5.8" y2="10.2" stroke="#f43f5e" strokeWidth="1.4" strokeLinecap="round" />
-				</g>
-			)}
-		</svg>
-	);
-}
+const PICK_OPS: { value: IslandsOperation; label: string }[] = [
+	{ value: "keepSelected", label: "Keep only picked" },
+	{ value: "removeSelected", label: "Remove picked" },
+];
 
-// Small "click here" cursor glyph for the call-to-action buttons — reinforces
-// that the next step happens in the viewport, not in this panel.
-function ClickHintIcon() {
-	return (
-		<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true" style={{ flexShrink: 0 }}>
-			<path d="M4 2.5 L4 12.8 L6.6 10.4 L8.3 13.7 L9.9 12.9 L8.2 9.6 L11.4 9.2 Z" fill="currentColor" />
-		</svg>
-	);
-}
+const PICK_INSTRUCTION: Record<string, string> = {
+	keepSelected: "Click the island to keep. Everything else in this class is removed.",
+	removeSelected: "Click the island to remove.",
+};
+
+const PICK_STEP_LABEL: Record<string, string> = {
+	keepSelected: "Keep only picked island",
+	removeSelected: "Remove picked island",
+};
 
 export default function IslandsPanel({
 	onApply,
-	pickingSelectedIsland,
+	pickingSelectedIsland: _pickingSelectedIsland,
 	onPickSelectedIsland,
 	onResetPick,
 	hasSelectedIsland,
 	pickedInvalid,
 	targetKey,
+	onApplied,
+	onCloseSettings,
+	onBusyChange,
+	onGuidedControlsChange,
 }: IslandsPanelProps) {
-	const [operation, setOperation] = useState<IslandsOperation>("keepLargest");
 	const [minimumSize, setMinimumSize] = useState(1000);
 
-	const needsSelectedIsland = operation === "keepSelected" || operation === "removeSelected";
+	// Which pick-dependent operation is being picked for (keep vs. remove).
+	const [pickingFor, setPickingFor] = useState<IslandsOperation | null>(null);
 
-	// A pick only ever makes sense for the exact operation + target segment it
-	// was made for — switching either one forces a fresh pick rather than
-	// silently carrying the old one over.
-	const prevOperationRef = useRef(operation);
-	useEffect(() => {
-		if (prevOperationRef.current !== operation) onResetPick();
-		prevOperationRef.current = operation;
-	}, [operation, onResetPick]);
+	// Whether the current pick's instruction modal has been dismissed yet.
+	// The picker (onPickSelectedIsland) is only armed once acked, so
+	// nothing can be picked before "Got it" is pressed.
+	const [acked, setAcked] = useState(false);
 
+	// True for the brief window between a valid pick landing and
+	// onApplied() firing, so the ribbon doesn't flash back to "waiting for
+	// a click" while the tool is mid-deselect.
+	const [committing, setCommitting] = useState(false);
+
+	// Position of the most recent click while a pick is live, so an
+	// invalid pick's error hint can be pinned right next to it.
+	const [errorPos, setErrorPos] = useState<{ x: number; y: number } | null>(null);
+
+	// Confirmation overlay shown once a keep/remove-picked commit lands.
+	const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+	// Which direct (non-picking) operation is running — drives each
+	// ActionButton's own spinner, independent of the ribbon's busy dot.
+	const [runningOp, setRunningOp] = useState<IslandsOperation | null>(null);
+	const [removingSmall, setRemovingSmall] = useState(false);
+	// Which direct op just finished — held briefly to show its checkmark
+	// before onApplied fires and the flyout closes.
+	const [successOp, setSuccessOp] = useState<IslandsOperation | null>(null);
+
+	// A pick only makes sense for the operation + target segment it was
+	// made for — switching either forces a fresh pick.
 	const prevTargetRef = useRef(targetKey);
 	useEffect(() => {
-		if (prevTargetRef.current !== targetKey) onResetPick();
+		if (prevTargetRef.current !== targetKey) {
+			onResetPick();
+			setPickingFor(null);
+			setAcked(false);
+		}
 		prevTargetRef.current = targetKey;
 	}, [targetKey, onResetPick]);
 
-	const pickState: "idle" | "picking" | "picked" | "invalid" = pickingSelectedIsland
-		? "picking"
-		: pickedInvalid
-			? "invalid"
-			: hasSelectedIsland
-				? "picked"
-				: "idle";
+	// Once a valid pick lands mid-flow, commit immediately — the click
+	// itself is the commit, there's no separate Apply step. Deliberately
+	// doesn't call onBusyChange: `committing` is already published as
+	// `busy` via onGuidedControlsChange, and calling both would light up
+	// two "something is happening" indicators for one commit. Direct
+	// (non-picking) ops below have no guided-flow label, so they're the
+	// only ones that still use onBusyChange.
+	useEffect(() => {
+		if (!pickingFor || !acked) return;
+		if (hasSelectedIsland) {
+			setCommitting(true);
+			onApply(pickingFor, minimumSize);
+			onResetPick();
+			window.setTimeout(() => {
+				setPickingFor(null);
+				setAcked(false);
+				setCommitting(false);
+				setSuccessMessage("Operation completed successfully");
+			}, 750);
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [hasSelectedIsland, pickingFor, acked]);
 
-	const applyReady = needsSelectedIsland && pickState === "picked";
+	// Track click position only while genuinely waiting on a pick, to
+	// place the inline error hint next to the rejected click.
+	const waitingForClick = !!pickingFor && acked && !committing && !hasSelectedIsland;
+	useEffect(() => {
+		if (!waitingForClick) return;
+		const onDown = (e: PointerEvent) => setErrorPos({ x: e.clientX, y: e.clientY });
+		window.addEventListener("pointerdown", onDown, true);
+		return () => window.removeEventListener("pointerdown", onDown, true);
+	}, [waitingForClick]);
+
+	useEffect(() => {
+		if (!waitingForClick) setErrorPos(null);
+	}, [waitingForClick]);
+
+	const startPicking = (op: IslandsOperation) => {
+		onResetPick();
+		setPickingFor(op);
+		setAcked(false);
+		setErrorPos(null);
+		// Close the settings flyout so it doesn't linger empty behind the
+		// full-screen guided modal.
+		onCloseSettings?.();
+	};
+
+	const acknowledgeStep = () => {
+		setAcked(true);
+		onPickSelectedIsland();
+	};
+
+	// Cancels the pick and fully deselects the tool. Published to the
+	// toolbar's fixed Exit button rather than rendered here.
+	const exitPicking = () => {
+		onResetPick();
+		setPickingFor(null);
+		setAcked(false);
+		setErrorPos(null);
+		onApplied?.();
+	};
+
+	// Clears whatever's been picked and drops back into "waiting for a
+	// click" — this flow has only one step, so there's no modal to re-show.
+	const startOver = () => {
+		onResetPick();
+		setErrorPos(null);
+	};
+
+	const dismissSuccess = () => {
+		setSuccessMessage(null);
+		onApplied?.();
+	};
+
+	useEffect(() => {
+		if (!pickingFor || successMessage) {
+			onGuidedControlsChange?.(null);
+			return;
+		}
+		onGuidedControlsChange?.({
+			label: PICK_STEP_LABEL[pickingFor] ?? "Pick an island",
+			onExit: exitPicking,
+			onStartOver: startOver,
+			busy: committing,
+		});
+		return () => onGuidedControlsChange?.(null);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [pickingFor, committing, successMessage]);
+
+	const runDirect = (op: IslandsOperation) => {
+		if (runningOp || removingSmall || successOp) return;
+		setRunningOp(op);
+		onBusyChange?.(true);
+		onApply(op, minimumSize);
+		window.setTimeout(() => {
+			setRunningOp(null);
+			setSuccessOp(op);
+			window.setTimeout(() => {
+				setSuccessOp(null);
+				onBusyChange?.(false);
+				onApplied?.();
+			}, 650);
+		}, 750);
+	};
+
+	const runRemoveSmall = () => {
+		if (runningOp || removingSmall) return;
+		setRemovingSmall(true);
+		onBusyChange?.(true);
+		onApply("removeSmall", minimumSize);
+		setRemovingSmall(false);
+	};
+
+	// Fires once ApplyButton's success checkmark has had its beat on
+	// screen — clears the ribbon's busy dot and deselects.
+	const finishRemoveSmall = () => {
+		onBusyChange?.(false);
+		onApplied?.();
+	};
+
+	const DIRECT_LABELS: Record<string, string> = { keepLargest: "Keeping largest…", splitToSegments: "Splitting…" };
+	const DIRECT_SUCCESS_LABELS: Record<string, string> = { keepLargest: "Kept largest", splitToSegments: "Split" };
+	const PICK_LABELS: Record<string, string> = { keepSelected: "Keep only picked", removeSelected: "Remove picked" };
+
+	if (successMessage) {
+		return (
+			<GuidedStepModal
+				title="Success"
+				instruction={successMessage}
+				primaryLabel="Got it"
+				onPrimary={dismissSuccess}
+			/>
+		);
+	}
 
 	return (
-		<div className="seg-effect">
-			<OperationPicker name="islands-op" options={ISLANDS_OPTIONS} value={operation} onChange={setOperation} />
+		<>
+			<MenuColumn>
+				<ActionList>
+					{DIRECT_OPS.map((o) => (
+						<ActionButton
+							key={o.value}
+							label={o.label}
+							runningLabel={DIRECT_LABELS[o.value]}
+							busy={runningOp === o.value}
+							success={successOp === o.value}
+							successLabel={DIRECT_SUCCESS_LABELS[o.value]}
+							disabled={!!runningOp || removingSmall || !!successOp}
+							onClick={() => runDirect(o.value)}
+						/>
+					))}
+				</ActionList>
 
-			{operation === "removeSmall" && (
-				<NumberSliderField
-					label="Minimum size"
-					value={minimumSize}
-					onChange={setMinimumSize}
-					min={MIN_SIZE_VOXELS}
-					max={MAX_SIZE_VOXELS}
-					step={50}
-					unit="voxels"
-					ariaLabel="Minimum island size"
+				{/* Pick-dependent operations start the shared guided-flow modal
+				    rather than applying instantly — still one-shot actions
+				    (ActionButton), just with the actual edit deferred until a
+				    valid island is clicked on the canvas. */}
+				<ActionList>
+					{PICK_OPS.map((o) => (
+						<ActionButton
+							key={o.value}
+							label={PICK_LABELS[o.value] ?? o.label}
+							disabled={!!pickingFor}
+							onClick={() => startPicking(o.value)}
+						/>
+					))}
+				</ActionList>
+
+				<MenuDivider />
+
+				{/* "Remove small" sits last — it needs its own size threshold,
+				    so it stays an expandable row (slider + Apply) rather than a
+				    single-click action like everything above it. */}
+				<GrandchildRow label="Remove small">
+					<NumberSliderField
+						label="Min size"
+						value={minimumSize}
+						onChange={setMinimumSize}
+						min={MIN_SIZE_VOXELS}
+						max={MAX_SIZE_VOXELS}
+						step={50}
+						unit="voxels"
+						ariaLabel="Minimum island size"
+					/>
+					<MenuDivider />
+					<ApplyButton onApply={runRemoveSmall} onDone={finishRemoveSmall} disabled={removingSmall} applyingLabel="Removing…" successLabel="Removed" />
+				</GrandchildRow>
+			</MenuColumn>
+
+			{/* Same "Got it" instruction modal used by Copy/Fill-across-slices
+			    and Grow-from-seeds: blocks every canvas click until dismissed,
+			    then gets out of the way and lets a real pick land. Exit /
+			    Start over now live as fixed buttons in the toolbar ribbon
+			    (via onGuidedControlsChange) instead of floating here. */}
+			{pickingFor && !acked && (
+				<GuidedStepModal
+					title={PICK_STEP_LABEL[pickingFor] ?? "Pick an island"}
+					instruction={PICK_INSTRUCTION[pickingFor] ?? "Click the island on the canvas."}
+					onPrimary={acknowledgeStep}
 				/>
 			)}
 
-			{needsSelectedIsland && (
-				<div className={`seg-effect__island-pick ${pickState === "invalid" ? "is-invalid" : ""} ${pickState === "picked" ? "is-picked" : ""}`} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-					<span className="seg-effect__label" style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-						<PickIcon state={pickState} />
-						Pick your island
-					</span>
-
-					{pickState === "idle" && (
-						<button className="seg-effect__pick" onClick={onPickSelectedIsland} style={{ display: "flex", alignItems: "center", gap: 7, justifyContent: "center" }}>
-							<ClickHintIcon />
-							Start picking
-						</button>
-					)}
-
-					{pickState === "picking" && (
-						<div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-							<button
-								className="seg-effect__pick"
-								onClick={onPickSelectedIsland}
-								style={{ display: "flex", alignItems: "center", gap: 7, justifyContent: "center", borderColor: "#f43f5e", color: "#fda4af" }}
-							>
-								<PickIcon state="picking" />
-								Waiting for your click…
-							</button>
-							<span className="atb-flyout__hint">Click directly on the island in any 2D view (axial, sagittal, or coronal).</span>
-						</div>
-					)}
-
-					{pickState === "picked" && (
-						<div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-							<span
-								className="seg-effect__pick"
-								style={{ display: "flex", alignItems: "center", gap: 7, borderColor: "#22c55e", color: "#86efac", cursor: "default", justifyContent: "center" }}
-							>
-								<PickIcon state="picked" />
-								Island picked
-							</span>
-							<button
-								className="seg-effect__pick"
-								onClick={onPickSelectedIsland}
-								title="Pick a different island"
-								style={{ display: "flex", alignItems: "center", gap: 7, justifyContent: "center" }}
-							>
-								<ClickHintIcon />
-								Pick again
-							</button>
-						</div>
-					)}
-
-					{pickState === "invalid" && (
-						<div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-							<span
-								className="seg-effect__pick"
-								style={{ display: "flex", alignItems: "center", gap: 7, borderColor: "#f43f5e", color: "#fda4af", cursor: "default", justifyContent: "center" }}
-							>
-								<PickIcon state="invalid" />
-								Not part of this segment
-							</span>
-							<button
-								className="seg-effect__pick"
-								onClick={onPickSelectedIsland}
-								style={{ borderColor: "#f43f5e", color: "#fda4af", display: "flex", alignItems: "center", gap: 7, justifyContent: "center" }}
-							>
-								<ClickHintIcon />
-								Pick again
-							</button>
-							<span className="atb-flyout__hint">That click landed outside the active segment — pick a point inside it instead.</span>
-						</div>
-					)}
-				</div>
-			)}
-
-			<div className={`seg-effect__apply-wrap ${applyReady ? "is-ready" : ""}`}>
-				{applyReady && (
-					<span
-						className="seg-effect__apply-hint"
-						style={{
-							display: "block",
-							marginBottom: 6,
-							padding: "6px 8px",
-							fontSize: 11.5,
-							lineHeight: 1.4,
-							textAlign: "center",
-							color: "#86efac",
-							background: "rgba(34,197,94,0.1)",
-							border: "1px solid rgba(34,197,94,0.25)",
-							borderRadius: 6,
-						}}
-					>
-						Island selected — press Apply to run it.
-					</span>
-				)}
-				<ApplyButton
-					disabled={needsSelectedIsland && !hasSelectedIsland}
-					onApply={() => {
-						onApply(operation, minimumSize);
-						// The pick only ever applies to one run — after Apply, whatever
-						// was picked no longer describes the (now-changed) segment, so
-						// forget it rather than leaving a stale "Island picked" state.
-						onResetPick();
-					}}
+			{pickingFor && acked && pickedInvalid && errorPos && waitingForClick && (
+				<PickErrorHint
+					message="That voxel isn't part of this class — click inside the class's own island instead."
+					x={errorPos.x}
+					y={errorPos.y}
 				/>
-			</div>
-		</div>
+			)}
+		</>
 	);
 }
