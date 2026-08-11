@@ -29,8 +29,8 @@ type GrowFromSeedsFlyoutProps = Pick<SmartFill, "markMode" | "setMarkMode" | "sc
 type Step = 1 | 2 | 3;
 
 export default function GrowFromSeedsFlyout({
-	setMarkMode, scope, setScope, apply, clearScribbles,
-	hasForegroundMarks, hasBackgroundMarks, onApplied, onCloseSettings, onGuidedControlsChange, onBusyChange,
+	setMarkMode, scope: _scope, setScope, apply, clearScribbles,
+	hasForegroundMarks, hasBackgroundMarks: _hasBackgroundMarks, onApplied, onCloseSettings, onGuidedControlsChange, onBusyChange,
 }: GrowFromSeedsFlyoutProps) {
 	const [active, setActive] = useState(false);
 	const [step, setStep] = useState<Step>(1);
@@ -94,7 +94,7 @@ export default function GrowFromSeedsFlyout({
 	};
 
 	// Picking a scope starts the flow immediately — no separate Start button.
-	const selectScope = (next: typeof scope) => {
+	const selectScope = (next: typeof _scope) => {
 		setScope(next);
 		setStep(1);
 		setAckStep1(false);

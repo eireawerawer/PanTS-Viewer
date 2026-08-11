@@ -1,8 +1,8 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
 	IconEye, IconEyeOff, IconTrash, IconPlus, IconStack2, IconSparkles,
-	IconGripVertical, IconPencil,
+	IconPencil,
 	IconLoader2, IconTargetArrow,
 } from "@tabler/icons-react";
 import type { CheckBoxData } from "../../types";
@@ -181,7 +181,7 @@ export default function SegmentsPopup({
 	open, segments, colors, visibility, activeSegmentId,
 	onSelect, onRename, onColorChange, onToggleVisibility, onDelete, onCreate,
 	organCatalog, activeCatalogOrganId, onSelectCatalogOrgan,
-	containerRef, dragHandleRef, minButtonRef,
+	containerRef, dragHandleRef,
 }: SegmentsPopupProps) {
 	// Horizontal resize — drag the left edge to widen/narrow the docked
 	// panel. The handle sits on the LEFT edge (the popup is anchored to the
@@ -373,40 +373,14 @@ export default function SegmentsPopup({
 
 	const isCustomActive = (id: number) => activeSegmentId === id && activeCatalogOrganId == null;
 
-	// --- Walkthroughs ---------------------------------------------------------
-	// Two replayable walkthroughs live in this popup, one per tab — Custom
-	// class and Existing organ. Each has its own launcher button and steps,
-	// and shares the measure-on-interval effect below since only one is
-	// ever open at a time.
-	const [customWalkthroughOpen, setCustomWalkthroughOpen] = useState(false);
-	const [existingWalkthroughOpen, setExistingWalkthroughOpen] = useState(false);
+
 	const addClassRef = useRef<HTMLDivElement>(null);
 	const tableRef = useRef<HTMLDivElement>(null);
 	const tabsRef = useRef<HTMLDivElement>(null);
 	const catalogListRef = useRef<HTMLDivElement>(null);
-	const [addClassRect, setAddClassRect] = useState<DOMRect | null>(null);
-	const [tableRect, setTableRect] = useState<DOMRect | null>(null);
-	const [tabsRect, setTabsRect] = useState<DOMRect | null>(null);
-	const [catalogListRect, setCatalogListRect] = useState<DOMRect | null>(null);
 
-	const anyWalkthroughOpen = customWalkthroughOpen || existingWalkthroughOpen;
 
-	useLayoutEffect(() => {
-		if (!anyWalkthroughOpen) return;
-		const measure = () => {
-			setAddClassRect(addClassRef.current ? addClassRef.current.getBoundingClientRect() : null);
-			setTableRect(tableRef.current ? tableRef.current.getBoundingClientRect() : null);
-			setTabsRect(tabsRef.current ? tabsRef.current.getBoundingClientRect() : null);
-			setCatalogListRect(catalogListRef.current ? catalogListRef.current.getBoundingClientRect() : (tableRef.current ? tableRef.current.getBoundingClientRect() : null));
-		};
-		measure();
-		window.addEventListener("resize", measure);
-		const id = window.setInterval(measure, 200);
-		return () => {
-			window.removeEventListener("resize", measure);
-			window.clearInterval(id);
-		};
-	}, [anyWalkthroughOpen, open, width, tab]);
+
 
 	// Bailing out here (rather than gating mount/unmount from the parent)
 	// keeps drag position, resize width, editing state, etc. alive across

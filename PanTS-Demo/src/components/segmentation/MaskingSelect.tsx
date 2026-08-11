@@ -120,7 +120,6 @@ export default function MaskingSelect({ value, onChange, hasActiveSegment, hasAn
 		};
 		document.addEventListener("mousedown", onPointerDown);
 		return () => document.removeEventListener("mousedown", onPointerDown);
-		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open]);
 
 	// NOTE: catalog organs used to force a non-interactive "Everywhere" readout

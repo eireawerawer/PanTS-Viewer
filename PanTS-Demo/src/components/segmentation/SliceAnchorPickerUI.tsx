@@ -14,6 +14,7 @@ import type { SliceAnchor } from "../../helpers/viewer/useSliceAnchorPicker";
 const PANE_LABEL: Record<string, string> = { axial: "Axial", sagittal: "Sagittal", coronal: "Coronal" };
 
 // "Axial - Slice 42" — consistent everywhere an anchor is shown.
+// eslint-disable-next-line react-refresh/only-export-components
 export function formatAnchor(anchor: SliceAnchor): string {
 	return `${PANE_LABEL[anchor.pane] ?? anchor.pane} - Slice ${anchor.sliceIndex + 1}`;
 }

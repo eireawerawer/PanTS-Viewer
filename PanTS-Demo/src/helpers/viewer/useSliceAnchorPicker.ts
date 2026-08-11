@@ -84,7 +84,6 @@ export function useSliceAnchorPicker({ segmentIndex, lastRequiresSegment, onErro
 
 		window.addEventListener("pointerdown", onClick, true);
 		return () => window.removeEventListener("pointerdown", onClick, true);
-		// eslint-disable-next-line react-hooks/exhaustive-deps -- onError intentionally excluded, see onErrorRef above
 	}, [phase, segmentIndex, lastRequiresSegment]);
 
 	const startPicking = () => {

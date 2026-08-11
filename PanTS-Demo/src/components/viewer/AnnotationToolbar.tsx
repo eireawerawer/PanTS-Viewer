@@ -86,12 +86,10 @@ interface AnnotationToolbarProps {
 	popupDragRef?: React.RefObject<HTMLDivElement | null>;
 	popupMinRef?: React.RefObject<HTMLButtonElement | null>;
 	sliceJumpRef?: React.RefObject<HTMLDivElement | null>;
-	overviewExtraRects?: OverviewRects;
-
 	
 }
 
-const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon: any; description: string }> = [
+const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon: typeof IconBrush; description: string }> = [	
 	{ id: "paint", label: "Brush", Icon: IconBrush, description: "Paint with a round brush." },
 	{ id: "erase", label: "Erase", Icon: IconEraser, description: "Erase with a round brush." },
 	{ id: "scissors", label: "Scissors", Icon: IconScissors, description: "Cut through the entire class from the current viewpoint." },
@@ -229,69 +227,7 @@ function ScissorsFlyout({ options, onChange, onCloseSettings }: {
 	);
 }
 
-// Tools whose settings must stay mounted after the settings box closes:
-// Grow-from-Seeds, Fill/Copy-Across-Slices, and Islands' pick ops each drive
-// a guided flow with its own body-portaled overlay, and need their internal
-// state (step, anchors, picks) to survive the box closing. A normal
-// FlyoutPanel unmounts on close and would kill that state — these use
-// PersistentFlyoutPanel instead, which only ever hides.
-const GUIDED_OVERLAY_TOOLS: Exclude<PrimaryEditTool, null>[] = ["growFromSeeds", "fillBetweenSlices", "copyAcrossSlices", "islands"];
 
-/** Same anchored positioning as FlyoutPanel, but never unmounts its
- *  children — closing just hides the box, since the guided-overlay tools'
- *  own portaled overlay needs to keep working while this box is invisible. */
-function PersistentFlyoutPanel({
-	visible, anchorRef, minWidth, children,
-}: {
-	visible: boolean;
-	anchorRef: React.RefObject<HTMLElement | null>;
-	minWidth?: number;
-	children: React.ReactNode;
-}) {
-	const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-
-	useEffect(() => {
-		const compute = () => {
-			const el = anchorRef.current;
-			if (!el) return;
-			const r = el.getBoundingClientRect();
-			const margin = 8;
-			const vw = typeof window !== "undefined" ? window.innerWidth : 1024;
-			const vh = typeof window !== "undefined" ? window.innerHeight : 768;
-			const estWidth = minWidth ?? 240;
-			let left = r.left;
-			let top = r.bottom + margin;
-			if (left + estWidth > vw - margin) left = Math.max(margin, vw - estWidth - margin);
-			left = Math.max(margin, left);
-			top = Math.min(top, vh - margin - 40);
-			setPos({ top, left });
-		};
-		compute();
-		window.addEventListener("resize", compute);
-		window.addEventListener("scroll", compute, true);
-		return () => {
-			window.removeEventListener("resize", compute);
-			window.removeEventListener("scroll", compute, true);
-		};
-	}, [anchorRef, minWidth]);
-
-	if (typeof document === "undefined") return null;
-	return createPortal(
-		<div
-			className="atb-pop__panel atb-pop__panel--below"
-			style={{
-				position: "fixed",
-				top: pos?.top ?? -9999,
-				left: pos?.left ?? -9999,
-				minWidth,
-				display: visible && pos ? undefined : "none",
-			}}
-		>
-			{children}
-		</div>,
-		document.body
-	);
-}
 
 // Portal-rendered tooltip — rendered to document.body and positioned via
 // getBoundingClientRect of the hovered icon, so it's never clipped by the
@@ -395,7 +331,7 @@ export default function AnnotationToolbar({
 	renderFlyout, scissorsPointCount, onScissorsCancel, maskingArea,
 	onMaskingAreaChange, hasAnySegments, scopeLocked, isRendering,
 	targetKey, showOnlyTargetMask, onShowOnlyTargetMaskChange,
-	popupRef, popupDragRef, popupMinRef, sliceJumpRef, overviewExtraRects,
+	popupRef, popupDragRef, popupMinRef, 
 }: AnnotationToolbarProps) {
 	const [hoveredTool, setHoveredTool] = useState<string | null>(null);
 	const [hoveredRect, setHoveredRect] = useState<DOMRect | null>(null);
@@ -413,17 +349,17 @@ export default function AnnotationToolbar({
 	const [firstTargetHintOpen, setFirstTargetHintOpen] = useState(false);
 	const [firstTargetHintRect, setFirstTargetHintRect] = useState<DOMRect | null>(null);
 	const prevHasActiveTargetRef = useRef(hasActiveTarget);
-	const [panelRect, setPanelRect] = useState<DOMRect | null>(null);
-	const [panelDragRect, setPanelDragRect] = useState<DOMRect | null>(null);
-	const [dockRect, setDockRect] = useState<DOMRect | null>(null);
-	const [dockDragRect, setDockDragRect] = useState<DOMRect | null>(null);
-	const [dockMinRect, setDockMinRect] = useState<DOMRect | null>(null);
-	const [panelMinRect, setPanelMinRect] = useState<DOMRect | null>(null);
+	const [, setPanelRect] = useState<DOMRect | null>(null);
+	const [, setPanelDragRect] = useState<DOMRect | null>(null);
+	const [, setDockRect] = useState<DOMRect | null>(null);
+	const [, setDockDragRect] = useState<DOMRect | null>(null);
+	const [, setDockMinRect] = useState<DOMRect | null>(null);
+	const [, setPanelMinRect] = useState<DOMRect | null>(null);
 	// Measured from refs the parent (VisualizationPage) hands in, since the
 	// popup and slice-jump overlay live outside this component.
-	const [popupRectMeasured, setPopupRectMeasured] = useState<DOMRect | null>(null);
-	const [popupDragRectMeasured, setPopupDragRectMeasured] = useState<DOMRect | null>(null);
-	const [popupMinRectMeasured, setPopupMinRectMeasured] = useState<DOMRect | null>(null);
+	const [, setPopupRectMeasured] = useState<DOMRect | null>(null);
+	const [, setPopupDragRectMeasured] = useState<DOMRect | null>(null);
+	const [, setPopupMinRectMeasured] = useState<DOMRect | null>(null);
 
 	const fieldRef = useRef<HTMLDivElement>(null);
 	const maskingFieldRef = useRef<HTMLDivElement>(null);
@@ -537,12 +473,6 @@ export default function AnnotationToolbar({
 		setHoveredRect((cur) => (hoveredTool === id ? null : cur));
 	}, [hoveredTool]);
 
-	// The ribbon and its contextual panel are both docked to the top —
-	// Word/Google-Docs style — instead of freely draggable floating windows,
-	// and neither one minimizes/collapses anymore: the panel reserves a
-	// fixed height at all times (see --atb-panel-h) so switching tools never
-	// resizes or shifts the viewer.
-	const panel = { minimized: false };
 
 	// Recompute every spotlight target while the overview walkthrough is
 	// open. Runs on every render while open (cheap: a handful of
@@ -592,12 +522,6 @@ export default function AnnotationToolbar({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open]);
 
-	const dismissOverviewWalkthrough = useCallback(() => {
-		setOverviewWalkthroughOpen(false);
-		try {
-			if (typeof window !== "undefined") window.localStorage.setItem(OVERVIEW_WALKTHROUGH_SEEN_KEY, "1");
-		} catch { /* localStorage unavailable — not worth blocking on */ }
-	}, []);
 
 	// Same reasoning as the overview walkthrough's own measuring effect just
 	// above: the popup can be dragged, so there's no single event to hook —
@@ -1041,7 +965,7 @@ export default function AnnotationToolbar({
 											onCloseSettings={() => toolFlyout.setOpen(false)}
 										/>
 									)}
-									{!["paint", "erase", "scissors"].includes(activeTool) && renderFlyout(activeTool, handleToolApplied, () => toolFlyout.setOpen(false), setGuidedControls)}
+									{activeTool && !["paint", "erase", "scissors"].includes(activeTool) && renderFlyout(activeTool, handleToolApplied, () => toolFlyout.setOpen(false), setGuidedControls)}
 								</div>
 							</div>
 						</div>

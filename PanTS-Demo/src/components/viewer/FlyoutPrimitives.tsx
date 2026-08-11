@@ -48,6 +48,8 @@ const openFlyouts = new Set<{ id: number; scope: string; close: () => void }>();
  *  its siblings" behavior — see the comment on `openFlyouts` above. Pass
  *  "top" for a tool's own top-level settings flyout and "grandchild" for
  *  any panel opened from a MenuRow inside it, so the two never fight. */
+
+// eslint-disable-next-line react-refresh/only-export-components
 export function useFlyout(initialOpen = false, options?: { closeOnOutsideClick?: boolean; scope?: string; onOutsideClose?: () => void }): FlyoutState {
 	const closeOnOutsideClick = options?.closeOnOutsideClick ?? true;
 	const scope = options?.scope ?? "default";
@@ -262,6 +264,7 @@ export function FlyoutPanel({
 	// (no anchor position computed) — still fine to unmount in that case,
 	// there's no state to lose.
 	if (keepMounted && (!pos || typeof document === "undefined")) return null;
+	if (!pos || typeof document === "undefined") return null;
 
 	return createPortal(
 		<div
