@@ -696,6 +696,18 @@ export function setActiveMaskEditTool(toolName: MaskEditToolName | null) {
   });
 }
 
+// BrushTool's circular cursor preview doesn't reliably clear on pointerleave
+// when the same shared toolGroup covers all three MPR viewports at once —
+// moving between panes can leave a stale brush circle painted in the pane
+// just left. Call this from each pane's onMouseLeave while paint/erase is
+// active to force a fresh render and drop the stale overlay.
+export function clearMaskEditCursor(pane: CinePane) {
+  if (!currentRenderingEngine) return;
+  const viewportId = CINE_VIEWPORT_BY_PANE[pane];
+  if (!viewportId) return;
+  currentRenderingEngine.renderViewports([viewportId]);
+}
+
 // Picks a color for a brand-new segment index by cycling through the NEW_CLASS_PALETTE.
 export function colorForNewClass(segmentIndex: number): Color {
   return NEW_CLASS_PALETTE[(segmentIndex - 1) % NEW_CLASS_PALETTE.length];
@@ -1791,39 +1803,73 @@ export function pickSliceAnchorAtClientPoint(
   if (!volume?.voxelManager || !volume.imageData) return null;
 
   const panes = Object.keys(CINE_VIEWPORT_BY_PANE) as CinePane[];
+
+  type PaneViewport = { getCanvas(): HTMLCanvasElement; canvasToWorld(canvasPos: Point2): Point3; getSliceIndex(): number };
+  const paneViewports: { pane: CinePane; viewport: PaneViewport; canvas: HTMLCanvasElement }[] = [];
   for (const pane of panes) {
-    const viewport = engine.getViewport(CINE_VIEWPORT_BY_PANE[pane]) as unknown as
-      | { getCanvas(): HTMLCanvasElement; canvasToWorld(canvasPos: Point2): Point3; getSliceIndex(): number }
-      | undefined;
+    const viewport = engine.getViewport(CINE_VIEWPORT_BY_PANE[pane]) as unknown as PaneViewport | undefined;
     if (!viewport) continue;
-
-    let canvas: HTMLCanvasElement;
     try {
-      canvas = viewport.getCanvas();
+      paneViewports.push({ pane, viewport, canvas: viewport.getCanvas() });
     } catch {
-      continue;
+      // canvas not ready for this pane yet
     }
-    const rect = canvas.getBoundingClientRect();
-    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) continue;
-
-    const canvasPos: Point2 = [clientX - rect.left, clientY - rect.top];
-    let world: Point3;
-    try {
-      world = viewport.canvasToWorld(canvasPos);
-    } catch {
-      continue;
-    }
-    const [i, j, k] = volume.imageData.worldToIndex(world).map((v: number) => Math.round(v));
-    const [dimX, dimY, dimZ] = volume.voxelManager.dimensions;
-    const inBounds = i >= 0 && j >= 0 && k >= 0 && i < dimX && j < dimY && k < dimZ;
-    const raw = inBounds ? volume.voxelManager.getAtIJK(i, j, k) : undefined;
-    return {
-      pane,
-      sliceIndex: viewport.getSliceIndex(),
-      segmentAtPoint: typeof raw === "number" ? raw : undefined,
-    };
   }
-  return null;
+
+  // Ask the DOM which element is ACTUALLY on top at this screen point,
+  // rather than looping over each pane's own getBoundingClientRect() and
+  // taking the first one whose (possibly stale, possibly overlapping —
+  // e.g. right after a resize or while a pane is mid-transition in/out of
+  // a maximized layout) rect happens to contain the click. Bounding-rect
+  // order was a fixed iteration order (Object.keys), not screen order, so
+  // whichever pane's rect was checked first could "win" a click that
+  // visually landed in a different, currently-on-top pane — which is what
+  // made the second guided click intermittently resolve to the wrong pane
+  // and misreport as "click in the same view" even when it was.
+  let hitCanvas: HTMLCanvasElement | undefined;
+  if (typeof document !== "undefined" && typeof document.elementFromPoint === "function") {
+    const topEl = document.elementFromPoint(clientX, clientY);
+    if (topEl) {
+      // The canvas itself, or a wrapper directly around it — climb to the
+      // nearest <canvas> if the hit landed on an overlay div instead.
+      hitCanvas = (topEl.closest("canvas") as HTMLCanvasElement | null)
+        ?? (topEl as HTMLElement).querySelector?.("canvas")
+        ?? undefined;
+    }
+  }
+
+  // Prefer the pane whose own canvas is literally the element under the
+  // cursor. Fall back to the old rect-containment scan only if that lookup
+  // couldn't resolve anything (e.g. elementFromPoint unsupported) — same
+  // behavior as before in that fallback case, so nothing regresses.
+  const candidates = hitCanvas
+    ? paneViewports.filter((p) => p.canvas === hitCanvas)
+    : paneViewports.filter((p) => {
+        const rect = p.canvas.getBoundingClientRect();
+        return !(clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom);
+      });
+
+  const match = candidates[0];
+  if (!match) return null;
+
+  const { pane, viewport, canvas } = match;
+  const rect = canvas.getBoundingClientRect();
+  const canvasPos: Point2 = [clientX - rect.left, clientY - rect.top];
+  let world: Point3;
+  try {
+    world = viewport.canvasToWorld(canvasPos);
+  } catch {
+    return null;
+  }
+  const [i, j, k] = volume.imageData.worldToIndex(world).map((v: number) => Math.round(v));
+  const [dimX, dimY, dimZ] = volume.voxelManager.dimensions;
+  const inBounds = i >= 0 && j >= 0 && k >= 0 && i < dimX && j < dimY && k < dimZ;
+  const raw = inBounds ? volume.voxelManager.getAtIJK(i, j, k) : undefined;
+  return {
+    pane,
+    sliceIndex: viewport.getSliceIndex(),
+    segmentAtPoint: typeof raw === "number" ? raw : undefined,
+  };
 }
 
 // Centroid (world mm) of every segment label, from one pass over the labelmap. Cached for
@@ -4658,13 +4704,9 @@ export function buildMaskFilter(area: MaskingArea, ids: number[]): MaskFilter {
 }
 
 
-// CornerstoneNifti2.ts
-// Locks/unlocks segments for the BRUSH specifically, based on the current global
-// masking selection — NOT just "lock everything except the active segment."
-// "everywhere" must unlock everything (the brush can paint over any organ);
-// the inside/outside-segment(s) variants restrict which OTHER segments the
-// brush may overwrite, so their locking mirrors what maskFilter is doing at
-// the voxel level for every other (non-brush) tool.
+// Locks/unlocks segments for the BRUSH based on the current global masking
+// selection (not just "lock everything except active"): "everywhere" unlocks
+// all; inside/outside-segment(s) mirrors what maskFilter does for other tools.
 function _applyBrushLockState(activeIndex: number, unlockedIds: number[] | "all") {
   try {
     const volume = cache.getVolume(segmentationId);
@@ -4785,11 +4827,8 @@ export function beginBrushMaskGuard() {
 }
 
 // Same inside/outside rule as buildMaskFilter, but evaluated against a plain
-// label snapshot instead of the live volume. endBrushMaskGuard must judge each
-// voxel by what it WAS before the stroke, not by what the brush just painted
-// into it — a MaskFilter built from the live vm.getAtIJK() answers the wrong
-// question here (see endBrushMaskGuard below for why that broke both
-// "inside" and "outside" scopes).
+// label snapshot instead of the live volume — endBrushMaskGuard must judge
+// each voxel by what it WAS before the stroke, not what the brush painted.
 function buildSnapshotMaskFilter(
   area: MaskingArea,
   ids: number[],
@@ -4809,20 +4848,11 @@ function buildSnapshotMaskFilter(
 }
 
 // Call when the stroke ends (pointerup) — reverts anything the brush touched
-// that falls outside the given masking scope.
-//
-// IMPORTANT: this takes `area`/`ids` (the same inputs buildMaskFilter takes),
-// NOT a pre-built MaskFilter. A MaskFilter built from the live volume reads
-// each voxel's label AFTER the stroke already wrote it — so by the time this
-// ran, a voxel the brush just painted now carried the *active* segment's
-// label. For "inside" scopes that made a background voxel the brush painted
-// look like it was already inside the scope (idSet often contains the active
-// segment), so nothing ever got reverted — "inside" silently behaved like
-// "everywhere". For "outside" scopes it made the exact opposite mistake: the
-// freshly-painted voxel now matches the very id it's supposed to stay outside
-// of, so the filter rejected it and every stroke got reverted immediately.
-// Judging eligibility from the pre-stroke snapshot (what the voxel WAS, not
-// what it became) fixes both.
+// outside the given masking scope. Takes `area`/`ids` rather than a
+// pre-built MaskFilter, because a filter built from the live volume would
+// read each voxel's label AFTER the stroke wrote it — judging eligibility
+// from the pre-stroke snapshot instead is what makes "inside"/"outside"
+// scopes revert the right voxels.
 export function endBrushMaskGuard(area: MaskingArea, ids: number[]) {
   const snapshot = _brushStrokeSnapshot;
   _brushStrokeSnapshot = null;
