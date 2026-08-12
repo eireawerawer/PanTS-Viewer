@@ -29,6 +29,10 @@ type SegmentationMeshViewerProps = {
   autoRotate?: boolean;
   autoRotateSpeed?: number;
   cinematic?: boolean;
+  // Supply a manifest instead of fetching one. /cinematic passes a manifest read
+  // from public/meshes (see scripts/download-meshes.mjs) whose organ urls already
+  // point at local GLBs, so the cold open shoots with no backend reachable.
+  manifestOverride?: MeshManifest | null;
 };
 
 export async function fetchMeshManifest(caseId: string, isSession = false): Promise<MeshManifest> {
@@ -40,7 +44,7 @@ export async function fetchMeshManifest(caseId: string, isSession = false): Prom
   return res.json();
 }
 
-export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}, isSession = false, autoRotate = false, autoRotateSpeed = 0.6, cinematic = false}: SegmentationMeshViewerProps) {
+export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}, isSession = false, autoRotate = false, autoRotateSpeed = 0.6, cinematic = false, manifestOverride = null}: SegmentationMeshViewerProps) {
   const [manifest, setManifest] = useState<MeshManifest | null>(null);
   const [loaded, setLoaded] = useState<Record<number, boolean>>({});
   // Bumped on every mask edit so editedSegments below is recomputed — the 3D pane
@@ -63,17 +67,26 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
 
   useEffect(() => {
     let alive = true;
+
+    const apply = (data: MeshManifest) => {
+      if (!alive) return;
+      setManifest(data);
+      const initialLoaded: Record<number, boolean> = {};
+      for (const organ of data.organs) initialLoaded[organ.id] = true;
+      setLoaded(initialLoaded);
+    };
+
+    // A supplied manifest short-circuits the fetch entirely — nothing hits the API.
+    if (manifestOverride) {
+      apply(manifestOverride);
+      return () => { alive = false; };
+    }
+
     fetchMeshManifest(caseId, isSession)
-      .then((data) => {
-        if (!alive) return;
-        setManifest(data);
-        const initialLoaded: Record<number, boolean> = {};
-        for (const organ of data.organs) initialLoaded[organ.id] = true;
-        setLoaded(initialLoaded);
-      })
+      .then(apply)
       .catch((err) => console.error(err));
     return () => { alive = false; };
-  }, [caseId, isSession]);
+  }, [caseId, isSession, manifestOverride]);
 
   const organs = useMemo(() => manifest?.organs ?? [], [manifest]);
 

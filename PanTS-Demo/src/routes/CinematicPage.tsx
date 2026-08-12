@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { SegmentationMeshViewer, fetchMeshManifest } from "../components/viewer/MeshViewer";
-import type { OrganMeshInfo } from "../types";
+import type { MeshManifest, OrganMeshInfo } from "../types";
 
 /** Read a numeric query param, falling back when absent or unparseable. */
 function num(params: URLSearchParams, key: string, fallback: number): number {
@@ -61,23 +61,38 @@ export default function CinematicPage() {
   const rotate = flag(params, "rotate", true);
   const reveal = flag(params, "reveal", true);
   const isSession = flag(params, "session", false);
+  const useLocal = flag(params, "local", false);
 
-  const [organs, setOrgans] = useState<OrganMeshInfo[] | null>(null);
+  const [manifest, setManifest] = useState<MeshManifest | null>(null);
   const [visibleIds, setVisibleIds] = useState<Set<number>>(new Set());
   // Bumped by the R key to restart the reveal between takes.
   const [runId, setRunId] = useState(0);
 
   useEffect(() => {
     let alive = true;
-    fetchMeshManifest(caseId, isSession)
-      .then((manifest) => {
-        if (alive) setOrgans(manifest.organs);
+
+    // local=1 reads the manifest written by scripts/download-meshes.mjs, whose
+    // organ urls already point into public/meshes — so the whole shot runs off
+    // disk with no backend, no tunnel and no Cloudflare in the path.
+    const load = useLocal
+      ? fetch(`/meshes/${caseId}/manifest.json`).then((r) => {
+          if (!r.ok) throw new Error(`no local manifest (${r.status}) — run scripts/download-meshes.mjs`);
+          return r.json() as Promise<MeshManifest>;
+        })
+      : fetchMeshManifest(caseId, isSession);
+
+    load
+      .then((data) => {
+        if (alive) setManifest(data);
       })
       .catch((err) => console.error("cinematic: manifest failed", err));
+
     return () => {
       alive = false;
     };
-  }, [caseId, isSession]);
+  }, [caseId, isSession, useLocal]);
+
+  const organs = manifest?.organs ?? null;
 
   const ordered = useMemo(
     () => (organs ? revealOrder(organs, start) : []),
@@ -134,7 +149,7 @@ export default function CinematicPage() {
         color: "transparent",
       }}
     >
-      {organs && (
+      {manifest && (
         <SegmentationMeshViewer
           caseId={caseId}
           checkState={checkState}
@@ -145,6 +160,9 @@ export default function CinematicPage() {
           autoRotate={rotate}
           autoRotateSpeed={speed}
           cinematic
+          // Hand over the manifest we already have so the viewer doesn't refetch —
+          // required in local mode, where there is no API to fetch from.
+          manifestOverride={manifest}
         />
       )}
     </div>
