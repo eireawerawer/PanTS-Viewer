@@ -19,7 +19,7 @@ import "./AnnotationToolbar.css";
 import MaskingSelect, { type MaskingArea } from "../segmentation/MaskingSelect";
 import NumberSliderField from "../NumberSliderField";
 import { FlyoutArrow, FlyoutPanel, MenuColumn, MenuRow, MenuDivider, useFlyout } from "./FlyoutPrimitives";
-import type { GuidedFlowControls } from "../segmentation/SliceAnchorPickerUI";
+import { PickErrorHint, type GuidedFlowControls } from "../segmentation/SliceAnchorPickerUI";
 
 // localStorage keys: once the overview tour (or first-target hint) has been
 // seen, it won't auto-open again.
@@ -419,12 +419,18 @@ export default function AnnotationToolbar({
 
 	const toolFlyout = useFlyout(false, {
 		scope: "top",
-		// Outside click = full deselect. For a guided-overlay tool, route
-		// through its own Exit handler so scribbles/anchors/picks get
-		// cleared too; everything else just deselects directly.
+		// Outside click behavior differs by tool: the "equip and use on the
+		// canvas" tools (paint/erase/scissors/level tracing — LIVE_COMMIT_TOOLS)
+		// stay equipped when you click away to do something else on the canvas
+		// — only their settings flyout closes, so the icon keeps its
+		// selected/white background and the tool is still active to use. The
+		// one-shot action tools (margin, smoothing, islands, etc.) fully
+		// deselect on an outside click, same as before. A guided-overlay tool
+		// routes through its own Exit so scribbles/anchors/picks get cleared.
 		onOutsideClose: () => {
-			if (guidedControlsRef.current) guidedControlsRef.current.onExit();
-			else onToolChange(null);
+			if (guidedControlsRef.current) { guidedControlsRef.current.onExit(); return; }
+			if (activeTool && LIVE_COMMIT_TOOLS.includes(activeTool)) return; // flyout already closes itself; stay equipped
+			onToolChange(null);
 		},
 	});
 
@@ -629,12 +635,29 @@ export default function AnnotationToolbar({
 	// tool is active, instead of each tool floating its own controls over
 	// the canvas.
 	const [guidedControls, setGuidedControls] = useState<GuidedFlowControls | null>(null);
+	// Brief Hopkins-blue warning shown near the cursor when Continue is
+	// pressed while blocked (e.g. no seed points marked yet) — only appears
+	// on an actual press, not just sitting there whenever the button happens
+	// to be disabled. Same PickErrorHint pill used for "no valid segment
+	// here" during Copy across slices, positioned off the click that
+	// triggered it, rather than a caption fixed in the ribbon.
+	const [continueWarning, setContinueWarning] = useState<string | null>(null);
+	const [continueWarningPos, setContinueWarningPos] = useState<{ x: number; y: number } | null>(null);
+	const continueWarningTimerRef = useRef<number | null>(null);
+	const flashContinueWarning = (message: string, pos: { x: number; y: number }) => {
+		if (continueWarningTimerRef.current) window.clearTimeout(continueWarningTimerRef.current);
+		setContinueWarning(message);
+		setContinueWarningPos(pos);
+		continueWarningTimerRef.current = window.setTimeout(() => setContinueWarning(null), 2200);
+	};
 	useEffect(() => {
 		guidedControlsRef.current = guidedControls;
+		if (!guidedControls) setContinueWarning(null); // don't let a stale warning bleed into the next flow
 	}, [guidedControls]);
 	useEffect(() => {
 		if (!activeTool) setGuidedControls(null);
 	}, [activeTool]);
+	useEffect(() => () => { if (continueWarningTimerRef.current) window.clearTimeout(continueWarningTimerRef.current); }, []);
 
 	// Keeps the "Applying…" dot mounted for a beat after `isRendering` goes
 	// false so it can fade out via CSS instead of vanishing mid-pulse.
@@ -697,7 +720,7 @@ export default function AnnotationToolbar({
 			aria-orientation="horizontal"
 		>
 			<div ref={dockContentRef} style={{ display: "flex", alignItems: "center", width: "100%" }}>
-			<div style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0, gap: 30 }}>
+			<div style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0, gap: 20 }}>
 				{TOOL_DEFS.map(({ id, label, Icon, description }) => {
 					// Only equip-and-use tools (paint/erase/scissors/level tracing)
 					// get a settings arrow; other tools open settings on icon click.
@@ -770,6 +793,16 @@ export default function AnnotationToolbar({
 						borderLeft: "1px solid rgba(255, 255, 255, 0.09)",
 					}}
 				>
+					{/* Local, self-contained keyframes for the Continue button's
+					    glow-pulse below — kept here rather than in the shared
+					    stylesheet since it's only ever used by this one button. */}
+					<style>{`
+						@keyframes seg-effect-continue-pulse {
+							0% { box-shadow: 0 0 0 0 rgba(104, 172, 229, 0.55); }
+							70% { box-shadow: 0 0 0 8px rgba(104, 172, 229, 0); }
+							100% { box-shadow: 0 0 0 0 rgba(104, 172, 229, 0); }
+						}
+					`}</style>
 					<span
 						style={{
 							fontFamily: "\"JetBrains Mono\", ui-monospace, monospace",
@@ -810,6 +843,47 @@ export default function AnnotationToolbar({
 						</span>
 					) : (
 						<>
+							{guidedControls.onContinue && (
+								// The primary "move to the next step" action — made visually
+								// louder (solid blue, pulsing) than Start over / Exit so it's
+								// the obvious next thing to press, and placed first since it's
+								// the one most people want most of the time. Deliberately not a
+								// native `disabled` button even when blocked — a disabled button
+								// can't be clicked at all, so pressing it couldn't show a
+								// warning. It stays clickable; pressing it while blocked flashes
+								// an orange "why" message instead of a permanently-visible caption.
+								<span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+									<button
+										type="button"
+										onClick={(e) => {
+											if (guidedControls.continueDisabled) {
+												flashContinueWarning(guidedControls.continueHint ?? "Mark at least one point first", { x: e.clientX, y: e.clientY });
+												return;
+											}
+											guidedControls.onContinue?.();
+										}}
+										style={{
+											background: "var(--jhu-blue, #002D72)",
+											border: "1px solid var(--jhu-blue-light, #68ACE5)",
+											borderRadius: 999,
+											color: "#ffffff",
+											cursor: "pointer",
+											fontSize: 11.5,
+											fontWeight: 800,
+											padding: "6px 14px",
+											whiteSpace: "nowrap",
+											opacity: guidedControls.continueDisabled ? 0.6 : 1,
+											boxShadow: guidedControls.continueDisabled ? "none" : "0 0 0 0 rgba(104, 172, 229, 0.55)",
+											animation: guidedControls.continueDisabled ? "none" : "seg-effect-continue-pulse 1.6s ease-out infinite",
+										}}
+									>
+										{guidedControls.continueLabel ?? "Continue →"}
+									</button>
+									{continueWarning && continueWarningPos && (
+										<PickErrorHint message={continueWarning} x={continueWarningPos.x} y={continueWarningPos.y} />
+									)}
+								</span>
+							)}
 							<button
 								type="button"
 								onClick={guidedControls.onStartOver}
@@ -1037,7 +1111,7 @@ export default function AnnotationToolbar({
 					}}
 				>
 					<div style={{ fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.9)" }}>
-						Select an existing class or create a custom one, then start annotating.
+						Select an existing class or create a custom one to start annotating.
 					</div>
 					<button
 						type="button"

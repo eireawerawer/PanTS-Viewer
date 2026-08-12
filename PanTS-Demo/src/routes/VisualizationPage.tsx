@@ -445,6 +445,11 @@ function VisualizationPage() {
 	
 	const [showAnnotationToolbar, setShowAnnotationToolbar] = useState(false);
 	const [isEditRendering, setIsEditRendering] = useState(false);
+	// Mirrors SegmentsPopup's "something is currently being deleted" state up
+	// to AnnotationToolbar's ribbon, same as isEditRendering does for a
+	// paint/erase/scissors commit — drives the "Deleting…" indicator on the
+	// right side of the toolbar while a class delete is in flight.
+	const [isDeletingSegment, setIsDeletingSegment] = useState(false);
 	useEffect(() => {
 		if (!showAnnotationToolbar) setEditMode((m) => (m === "brush" || m === "eraser" || m === "lasso" ? null : m));
 	}, [showAnnotationToolbar]);
@@ -458,6 +463,13 @@ function VisualizationPage() {
 	// the pencil button itself" from "this click was some other toolbar
 	// control", so the two handlers don't double-toggle annotation mode.
 	const annotatePencilRef = useRef<HTMLButtonElement>(null);
+	// Wraps the standalone Undo/Redo buttons so the topbar's "close the
+	// annotation ribbon on any other click" handler (below) can exclude
+	// them too — otherwise clicking Undo while the ribbon is open bubbles
+	// up and immediately closes the ribbon, which reads as "undo closed
+	// the toolbar I just opened." Undo/redo should never affect ribbon
+	// visibility, only mask/measurement history.
+	const undoRedoGroupRef = useRef<HTMLDivElement>(null);
 	const sliceJumpWrapRef = useRef<HTMLDivElement>(null);
 
 	useEffect(() => {
@@ -687,6 +699,15 @@ function VisualizationPage() {
 		if (tool && !hasActiveTarget) return; // no target picked — refuse to activate anything
 		setActiveToolbarTool(tool);
 		setEditMode(tool ? TOOLBAR_TO_EDIT_MODE[tool] ?? null : null);
+		// setMaskBrushSize's very first call (from the slider) is the only
+		// thing that ever pushes diameterMm into Cornerstone's tool group —
+		// if the group wasn't ready yet at that point (e.g. the user paints
+		// before ever touching the slider), the brush silently falls back to
+		// Cornerstone's own default instead of the 10mm the slider shows.
+		// Re-push it here, every time paint/erase is actually selected, so
+		// what gets painted always matches the slider by the time the brush
+		// can be used — cheap and idempotent if it was already applied.
+		if (tool === "paint" || tool === "erase") setMaskBrushSize(diameterMm);
 	  };
 
 	
@@ -857,6 +878,15 @@ function VisualizationPage() {
 							for (const s of r.createdSegments!) next[s.id] = colorToHex(s.color);
 							return next;
 						});
+						// Same "just-created class becomes the target" behavior as
+						// handleCreateClass above — otherwise the edit target is left
+						// pointed at whatever the split just broke apart, which is a
+						// confusing thing to keep painting into. Picks the first of
+						// the new classes (order matches newLabelForComponent's
+						// insertion order on the backend, which isn't otherwise
+						// meaningful, but it has to be one of them).
+						setActiveSegmentState(r.createdSegments[0].id);
+						setActiveCatalogOrganId(null);
 					}
 				  }
 				}}
@@ -2536,7 +2566,11 @@ const aiAvailableOrgans = useMemo(() => {
 						// own onClick already toggles the state; without the
 						// exclusion this bubbling handler would immediately flip it
 						// back off right after turning it on.
-						if (showAnnotationToolbar && !annotatePencilRef.current?.contains(e.target as Node)) {
+						if (
+							showAnnotationToolbar &&
+							!annotatePencilRef.current?.contains(e.target as Node) &&
+							!undoRedoGroupRef.current?.contains(e.target as Node)
+						) {
 							setShowAnnotationToolbar(false);
 						}
 					}}
@@ -2974,23 +3008,28 @@ const aiAvailableOrgans = useMemo(() => {
 
 											{/* Undo/redo stay standalone (not grouped) — they're used constantly
 											    during a review and shouldn't cost an extra click to reach. Cover
-											    measurements as well as mask edits; ⌘Z/⇧⌘Z work everywhere too. */}
-											<button
-												className="vp-tool"
-												onClick={() => undoMaskEdit()}
-												aria-label="Undo"
-											>
-												<IconArrowBackUp size={20} color="white" />
-												<span className="vp-tool__tip">Undo (⌘Z) — measurements & mask edits</span>
-											</button>
-											<button
-												className="vp-tool"
-												onClick={() => redoMaskEdit()}
-												aria-label="Redo"
-											>
-												<IconArrowForwardUp size={20} color="white" />
-												<span className="vp-tool__tip">Redo (⇧⌘Z)</span>
-											</button>
+											    measurements as well as mask edits; ⌘Z/⇧⌘Z work everywhere too.
+											    Wrapped in undoRedoGroupRef so clicking either button never closes
+											    an already-open annotation ribbon (see the topbar's onClick above) —
+											    undo/redo history is independent of ribbon visibility. */}
+											<div ref={undoRedoGroupRef} style={{ display: "contents" }}>
+												<button
+													className="vp-tool"
+													onClick={() => undoMaskEdit()}
+													aria-label="Undo"
+												>
+													<IconArrowBackUp size={20} color="white" />
+													<span className="vp-tool__tip">Undo (⌘Z) — measurements & mask edits</span>
+												</button>
+												<button
+													className="vp-tool"
+													onClick={() => redoMaskEdit()}
+													aria-label="Redo"
+												>
+													<IconArrowForwardUp size={20} color="white" />
+													<span className="vp-tool__tip">Redo (⇧⌘Z)</span>
+												</button>
+											</div>
 											
 											{!isLocal && (
 												<button
@@ -3880,6 +3919,7 @@ const aiAvailableOrgans = useMemo(() => {
 				hasAnySegments={hasAnySegments}
 				scopeLocked={false}
 				isRendering={isEditRendering}
+				isDeletingSegment={isDeletingSegment}
 				targetKey={activeCatalogOrganId ?? activeSegment}
 				showOnlyTargetMask={showOnlyTargetMask}
 				onShowOnlyTargetMaskChange={setShowOnlyTargetMask}
@@ -3900,6 +3940,7 @@ const aiAvailableOrgans = useMemo(() => {
 				onToggleVisibility={handleToggleSegmentVisibility}
 				onDelete={handleDeleteSegment}
 				onCreate={handleCreateClass}
+				onDeletingChange={setIsDeletingSegment}
 				organCatalog={organCatalog}
 				activeCatalogOrganId={activeCatalogOrganId}
 				onSelectCatalogOrgan={handleSelectCatalogOrgan}
