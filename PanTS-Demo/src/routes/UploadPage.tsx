@@ -7,6 +7,19 @@ import React, {
   useState,
 } from "react";
 
+// LesionSegmenter's four lesions, offered as a macOS-style submenu off the model
+// item. Only pancreatic is GT-validated; the rest are flagged experimental.
+const LESION_OPTIONS: {
+  id: "pancreatic" | "liver" | "kidney" | "colon";
+  label: string;
+  experimental?: boolean;
+}[] = [
+  { id: "pancreatic", label: "Pancreatic lesion" },
+  { id: "liver", label: "Liver lesion", experimental: true },
+  { id: "kidney", label: "Kidney lesion", experimental: true },
+  { id: "colon", label: "Colon lesion", experimental: true },
+];
+
 const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "None",
@@ -1410,8 +1423,13 @@ const UploadPage: React.FC = () => {
                   <span>
                     {selectedModel === "None"
                       ? "None (view scan)"
-                      : MODEL_OPTIONS.find((m) => m.id === selectedModel)
-                          ?.label || "Select a model"}
+                      : selectedModel === "LesionSegmenter"
+                        ? `LesionSegmenter — ${
+                            LESION_OPTIONS.find((l) => l.id === lesionTarget)
+                              ?.label ?? "Pancreatic lesion"
+                          }`
+                        : MODEL_OPTIONS.find((m) => m.id === selectedModel)
+                            ?.label || "Select a model"}
                   </span>
                   <svg
                     className={`model-dropdown-chevron${modelDropOpen ? " rotated" : ""}`}
@@ -1436,10 +1454,11 @@ const UploadPage: React.FC = () => {
                       // than being hidden — you can't want what you can't see,
                       // and ChatGPT's model picker works the same way.
                       const locked = modelLocked(m.id);
+                      const hasSubmenu = !locked && m.id === "LesionSegmenter";
                       return (
                       <div
                         key={m.id}
-                        className={`model-dropdown-item${selectedModel === m.id ? " selected" : ""}${locked ? " locked" : ""}`}
+                        className={`model-dropdown-item${selectedModel === m.id ? " selected" : ""}${locked ? " locked" : ""}${hasSubmenu ? " has-submenu" : ""}`}
                         onClick={() => {
                           if (locked) {
                             setModelDropOpen(false);
@@ -1463,7 +1482,24 @@ const UploadPage: React.FC = () => {
                         </div>
                         <div className="model-dropdown-item-side">
                           {locked && <span className="model-dropdown-lock">Donate</span>}
-                          {!locked && selectedModel === m.id && (
+                          {hasSubmenu ? (
+                            <svg
+                              className="model-submenu-arrow"
+                              width="7"
+                              height="10"
+                              viewBox="0 0 7 10"
+                              fill="none"
+                            >
+                              <path
+                                d="M1 1l4 4-4 4"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          ) : (
+                            !locked && selectedModel === m.id && (
                             <svg
                               width="12"
                               height="12"
@@ -1479,39 +1515,60 @@ const UploadPage: React.FC = () => {
                                 strokeLinejoin="round"
                               />
                             </svg>
+                            )
                           )}
                         </div>
+                        {hasSubmenu && (
+                          <div className="model-submenu" role="menu">
+                            {LESION_OPTIONS.map((l) => (
+                              <div
+                                key={l.id}
+                                role="menuitemradio"
+                                aria-checked={lesionTarget === l.id}
+                                className={`model-submenu-item${lesionTarget === l.id ? " selected" : ""}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedModel("LesionSegmenter");
+                                  setLesionTarget(l.id);
+                                  setModelDropOpen(false);
+                                }}
+                              >
+                                <span className="model-submenu-check">
+                                  {lesionTarget === l.id && (
+                                    <svg
+                                      width="12"
+                                      height="12"
+                                      viewBox="0 0 12 12"
+                                      fill="none"
+                                    >
+                                      <path
+                                        d="M2 6l3 3 5-5"
+                                        stroke="currentColor"
+                                        strokeWidth="1.5"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                      />
+                                    </svg>
+                                  )}
+                                </span>
+                                <span className="model-submenu-label">
+                                  {l.label}
+                                  {l.experimental && (
+                                    <span className="model-submenu-exp">
+                                      experimental
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                       );
                     })}
                   </div>
                 )}
               </div>
-              {selectedModel === "LesionSegmenter" && (
-                <div className="lesion-target-select">
-                  <label
-                    htmlFor="lesion-target"
-                    className="lesion-target-label"
-                  >
-                    Lesion
-                  </label>
-                  <select
-                    id="lesion-target"
-                    className="model-dropdown-btn"
-                    value={lesionTarget}
-                    onChange={(e) =>
-                      setLesionTarget(
-                        e.target.value as typeof lesionTarget
-                      )
-                    }
-                  >
-                    <option value="pancreatic">Pancreatic lesion</option>
-                    <option value="liver">Liver lesion (experimental)</option>
-                    <option value="kidney">Kidney lesion (experimental)</option>
-                    <option value="colon">Colon lesion (experimental)</option>
-                  </select>
-                </div>
-              )}
             </div>
 
             <div className="pipeline-arrow">→</div>

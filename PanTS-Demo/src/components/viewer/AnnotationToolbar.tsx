@@ -12,23 +12,19 @@ import {
 	IconStack2,
 	IconCopy,
 	IconWaveSine,
-	IconGripVertical,
-	IconMinus,
-	IconChevronsUp,
 	IconCircleDashed,
+	IconCheck,
 } from "@tabler/icons-react";
 import "./AnnotationToolbar.css";
-import { useDraggablePanel } from "../../helpers/viewer/useDraggablePanel";
 import MaskingSelect, { type MaskingArea } from "../segmentation/MaskingSelect";
 import NumberSliderField from "../NumberSliderField";
-import ToolWalkthrough, { WalkthroughLauncherButton } from "../walkthrough/ToolWalkthrough";
-import { buildToolSteps, buildOverviewSteps, type OverviewRects } from "../walkthrough/WalkthroughContent";
+import { FlyoutArrow, FlyoutPanel, MenuColumn, MenuRow, MenuDivider, useFlyout } from "./FlyoutPrimitives";
+import { PickErrorHint, type GuidedFlowControls } from "../segmentation/SliceAnchorPickerUI";
 
-// Shared across the whole app: once the overview tour has been shown (either
-// automatically on first open, or manually via replay-then-dismiss), it
-// won't auto-pop again on future visits — the "Show walkthrough" launcher in
-// the dock header remains the way to bring it back up any time.
+// localStorage keys: once the overview tour (or first-target hint) has been
+// seen, it won't auto-open again.
 const OVERVIEW_WALKTHROUGH_SEEN_KEY = "mm_annotation_walkthrough_seen";
+const FIRST_TARGET_HINT_SEEN_KEY = "mm_annotation_first_target_hint_seen";
 
 export type PrimaryEditTool =
 	| "paint" | "erase" | "scissors" | "levelTracing"
@@ -40,10 +36,8 @@ export type ScissorsSliceCut = "unlimited" | "positive" | "negative" | "symmetri
 
 export interface ScissorsOptions {
 	operation: ScissorsOperation;
-	/** Magnetic edge snap — when on, each placed point (and the live preview
-	 *  point) snaps to the nearest strong intensity edge within a small radius,
-	 *  like Photoshop's magnetic lasso. Makes it much easier to trace
-	 *  high-contrast organ/bone boundaries without hand-placing every point. */
+	/** When on, each placed point snaps to the nearest strong intensity edge
+	 *  within a small radius (like Photoshop's magnetic lasso). */
 	magnetEnabled?: boolean;
 }
 
@@ -64,35 +58,55 @@ interface AnnotationToolbarProps {
 	onMaskingAreaChange: (v: MaskingArea) => void;
 	hasAnySegments: boolean;
 	scopeLocked?: boolean;
-	/** True while a paint/erase/scissors edit is actively being committed —
-	 *  drives a small pulsing dot in the panel header so lag never reads as
-	 *  "nothing happened". */
+	/** True while a paint/erase/scissors edit is being committed — drives the
+	 *  pulsing "applying" indicator in the panel header. */
 	isRendering?: boolean;
+	/** True while one or more segment classes are being deleted in
+	 *  SegmentsPopup (fade-out + backend delete in flight) — drives a second,
+	 *  independent "Deleting…" indicator in the panel header, same spot and
+	 *  style as the tool-applying dot. */
+	isDeletingSegment?: boolean;
 
-	renderFlyout: (tool: Exclude<PrimaryEditTool, null>) => React.ReactNode;
+	/** Id of whatever class/organ is currently targeted. Not used for editing
+	 *  logic here — only watched so the ribbon can deselect the active tool
+	 *  when the target changes (see the reset effect below). */
+	targetKey: number | null;
+
+	/** When on (default), every class except the targeted one is hidden from
+	 *  the CT viewer. A ribbon-level display preference, not a per-tool
+	 *  setting. */
+	showOnlyTargetMask: boolean;
+	onShowOnlyTargetMaskChange: (v: boolean) => void;
+
+	// `onApplied`: one-shot tools (margin, smoothing, islands, logical
+	// operators, grow-from-seeds, hollow, ...) call this once their Apply
+	// button runs, to deselect the tool (see LIVE_COMMIT_TOOLS for tools that
+	// skip this). `onCloseSettings` closes just the settings flyout without
+	// deselecting the tool — used by level tracing (auto-close on mode pick)
+	// and the guided-overlay tools (close once their full-screen walkthrough
+	// takes over).
+	renderFlyout: (tool: Exclude<PrimaryEditTool, null>, onApplied: () => void, onCloseSettings: () => void, onGuidedControlsChange: (controls: GuidedFlowControls | null) => void) => React.ReactNode;
 
 	popupRef?: React.RefObject<HTMLDivElement | null>;
 	popupDragRef?: React.RefObject<HTMLDivElement | null>;
 	popupMinRef?: React.RefObject<HTMLButtonElement | null>;
 	sliceJumpRef?: React.RefObject<HTMLDivElement | null>;
-	overviewExtraRects?: OverviewRects;
-
 	
 }
 
-const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon: any; description: string }> = [
+const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon: typeof IconBrush; description: string }> = [	
 	{ id: "paint", label: "Brush", Icon: IconBrush, description: "Paint with a round brush." },
 	{ id: "erase", label: "Erase", Icon: IconEraser, description: "Erase with a round brush." },
-	{ id: "scissors", label: "Scissors", Icon: IconScissors, description: "Cut through the entire segment from the current viewpoint." },
+	{ id: "scissors", label: "Scissors", Icon: IconScissors, description: "Cut through the entire class from the current viewpoint." },
 	{ id: "levelTracing", label: "Level Tracing", Icon: IconRipple, description: "Trace the boundary of similar intensity around the cursor." },
-	{ id: "margin", label: "Margin", Icon: IconArrowsDiagonal, description: "Grow or shrink selected segment by specified margin size." },
-	{ id: "smoothing", label: "Smoothing", Icon: IconWaveSine, description: "Make segment boundaries smoother." },
-	{ id: "islands", label: "Islands", Icon: IconDroplet, description: "Edit islands (connected components) in a segment." },
-	{ id: "logicalOperators", label: "Logical operators", Icon: IconMathFunction, description: "Apply logical operators or combine segments." },
-	{ id: "growFromSeeds", label: "Grow from seeds", Icon: IconWand, description: "Grow segments from user-placed seed scribbles." },
-	{ id: "fillBetweenSlices", label: "Fill between slices", Icon: IconStack2, description: "Interpolate segment shape between two annotated slices." },
-	{ id: "copyAcrossSlices", label: "Copy across slices", Icon: IconCopy, description: "Copy the segment's shape from one slice across a range." },
-	{ id: "hollow", label: "Hollow", Icon: IconCircleDashed, description: "Make the segment hollow by replacing it with a uniform-thickness shell." },
+	{ id: "margin", label: "Margin", Icon: IconArrowsDiagonal, description: "Grow or shrink the selected class by a specified margin size." },
+	{ id: "smoothing", label: "Smoothing", Icon: IconWaveSine, description: "Make class boundaries smoother." },
+	{ id: "islands", label: "Islands", Icon: IconDroplet, description: "Edit islands (connected components) in a class." },
+	{ id: "logicalOperators", label: "Logical operators", Icon: IconMathFunction, description: "Apply logical operators or combine classes." },
+	{ id: "growFromSeeds", label: "Grow from seeds", Icon: IconWand, description: "Grow a class from user-placed seed scribbles." },
+	{ id: "fillBetweenSlices", label: "Fill between slices", Icon: IconStack2, description: "Interpolate a class's shape between two annotated slices." },
+	{ id: "copyAcrossSlices", label: "Copy across slices", Icon: IconCopy, description: "Copy a class's shape from one slice across a range." },
+	{ id: "hollow", label: "Hollow", Icon: IconCircleDashed, description: "Make the class hollow by replacing it with a uniform-thickness shell." },
 ];
 
 const SCISSORS_OPERATIONS: { value: ScissorsOperation; label: string }[] = [
@@ -109,39 +123,14 @@ const LIVE_COMMIT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["paint", "erase", "
 const MIN_DIAMETER_MM = 2;
 const MAX_DIAMETER_MM = 40;
 
-// Dock width matches its CSS (.atb--vertical: 6px*2 padding + 55px buttons =
-// 67px, rounded to 68). Exported so SegmentsPopup can size its own default
-// resting position off the same number instead of duplicating a magic
-// constant that could silently drift out of sync.
-export const ANNOTATION_DOCK_WIDTH = 68;
+// Ribbon height, matches --atb-ribbon-h in CSS. Exported so SegmentsPopup
+// can dock directly beneath the ribbon without duplicating the constant.
+export const ANNOTATION_DOCK_WIDTH = 60;
 
-function ScissorsOpIcon({ op }: { op: ScissorsOperation }) {
-	const fill = op === "fillInside" || op === "fillOutside";
-	const inside = op === "eraseInside" || op === "fillInside";
-	return (
-		<svg width="20" height="20" viewBox="0 0 20 20" className="atb-scissors-icon">
-			<rect x="1" y="1" width="18" height="18" rx="3" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="1" />
-			<circle
-				cx="10" cy="10" r="6"
-				fill={inside && fill ? "#fff" : "none"}
-				stroke="#fff"
-				strokeWidth="1.4"
-				strokeDasharray={inside ? "0" : "2,2"}
-			/>
-			{!inside && fill && (
-				<path d="M1 1 H19 V19 H1 Z M4 4 A6 6 0 0 1 16 4 A6 6 0 0 1 16 16 A6 6 0 0 1 4 16 A6 6 0 0 1 4 4 Z"
-					fill="#fff" fillRule="evenodd" opacity="0.9" />
-			)}
-		</svg>
-	);
-}
-
-// Magnet icon: a horseshoe magnet with two little "attraction" arcs pulling
-// toward the poles — reused as the checkbox glyph and standalone next to the
-// "Magnetic edge snap" label so the toggle reads at a glance even before
-// hovering for the tooltip.
-function MagnetIcon({ active }: { active?: boolean }) {
-	const stroke = active ? "#08090b" : "#fff";
+function MagnetIcon({ active: _active }: { active?: boolean }) {
+	// Always white — this row's background never goes solid light like an
+	// .is-active MenuRow, so a dark stroke would be invisible here.
+	const stroke = "#fff";
 	return (
 		<svg width="16" height="16" viewBox="0 0 20 20" fill="none">
 			<path
@@ -156,15 +145,6 @@ function MagnetIcon({ active }: { active?: boolean }) {
 		</svg>
 	);
 }
-
-// Drop-in replacement for `DiameterFlyout` in AnnotationToolbar.tsx.
-// Same props/behavior (live preview while dragging), now using the shared
-// NumberSliderField so the pen/eraser diameter box behaves like every other
-// typable field: one number shown once, unit beside it, decimals typable.
-//
-// Add this import near the top of AnnotationToolbar.tsx:
-//   import NumberSliderField from "./NumberSliderField";
-// then replace the existing `function DiameterFlyout(...) { ... }` with this.
 
 function DiameterFlyout({
 	title, diameterMm, onDiameterChange, onPreviewChange, fieldRef,
@@ -195,55 +175,64 @@ function DiameterFlyout({
 	);
 }
 
-function ScissorsFlyout({ options, onChange, pointCount, onCancel }: {
+function ScissorsFlyout({ options, onChange, onCloseSettings }: {
 	options: ScissorsOptions;
 	onChange: (opts: ScissorsOptions) => void;
 	pointCount: number;
 	onCancel: () => void;
+	/** Closes the Scissors settings flyout once an operation is picked;
+	 *  scissors itself stays equipped. */
+	onCloseSettings: () => void;
 }) {
 	const set = <K extends keyof ScissorsOptions>(key: K, value: ScissorsOptions[K]) =>
 		onChange({ ...options, [key]: value });
 
+	// Brief "picked" state on the row before the settings flyout collapses.
+	const pickOperation = (op: ScissorsOperation) => {
+		set("operation", op);
+		window.setTimeout(() => onCloseSettings(), 320);
+	};
+
 	return (
-		<div className="seg-effect">
-			<div className="atb-flyout__grid atb-flyout__grid--scissors">
-				<div className="atb-flyout__col">
-					<span className="atb-flyout__label">Operation:</span>
-					{SCISSORS_OPERATIONS.map((op) => (
-						<label className="atb-flyout__radio" key={op.value}>
-							<input
-								type="radio"
-								name="scissors-op"
-								checked={options.operation === op.value}
-								onChange={() => set("operation", op.value)}
-							/>
-							<ScissorsOpIcon op={op.value} />
-							{op.label}
-						</label>
-					))}
-				</div>
-				<label className="atb-flyout__checkbox atb-flyout__span-all atb-flyout__magnet-toggle">
+		<div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 190 }}>
+			<MenuColumn>
+				<label className="atb-menu-row atb-menu-row--checkbox" title="Snap each point to the nearest strong intensity edge, like Photoshop's magnetic lasso">
+					<span className="atb-menu-row__label" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+						<MagnetIcon active={options.magnetEnabled} />
+						Magnetic snap
+					</span>
 					<input
 						type="checkbox"
-						checked={!!options.magnetEnabled}
+						className="atb-menu-row__checkbox-input"
+						// Undefined (never touched) reads as ON — the default people
+						// want nearly all the time — while an explicit false (user
+						// unchecked it) is respected.
+						checked={options.magnetEnabled !== false}
 						onChange={(e) => set("magnetEnabled", e.target.checked)}
 					/>
-					<MagnetIcon active={options.magnetEnabled} />
-					Magnetic edge snap
 				</label>
-				<div className="atb-flyout__span-all atb-flyout__draw-actions">
-					<button type="button" className="atb-flyout__draw-btn atb-flyout__draw-btn--cancel" disabled={pointCount === 0} onClick={onCancel}>
-						Cancel shape
-					</button>
-				</div>
-				<div className="atb-flyout__hint atb-flyout__span-all">
-				Draw a shape, then click back on the <span className="atb-flyout__hint-dot" /> red start point to close it. Ctrl+Z undoes the last point.
-				{options.magnetEnabled && " The edge hugs nearby boundaries between clicks, like Photoshop's magnetic lasso."}
-				</div>
-			</div>
+			</MenuColumn>
+
+			<MenuDivider />
+
+			<MenuColumn>
+				{SCISSORS_OPERATIONS.map((op) => (
+					<MenuRow
+						key={op.value}
+						label={op.label}
+						// Reflects `options.operation` directly (not some local
+						// "just picked" flag), so re-opening later always shows
+						// the operation that's actually active.
+						open={op.value === options.operation}
+						onClick={() => pickOperation(op.value)}
+					/>
+				))}
+			</MenuColumn>
 		</div>
 	);
 }
+
+
 
 // Portal-rendered tooltip — rendered to document.body and positioned via
 // getBoundingClientRect of the hovered icon, so it's never clipped by the
@@ -256,13 +245,27 @@ function IconTooltip({
 	anchorRect: DOMRect | null;
 }) {
 	if (!anchorRect) return null;
+	// Tooltip is centered above its icon by default (so it reads as an
+	// annotation on the icon rather than colliding with whatever settings
+	// flyout opens below the ribbon), but that puts it offscreen for icons
+	// near either edge (Brush on the left, Hollow on the right) — clamp the
+	// center point so the box (max-width 240) always stays fully within the
+	// viewport, with a small margin.
+	const halfWidth = 120;
+	const margin = 8;
+	const viewportWidth = typeof window !== "undefined" ? window.innerWidth : 1024;
+	const idealCenter = anchorRect.left + anchorRect.width / 2;
+	const clampedCenter = Math.min(
+		Math.max(idealCenter, halfWidth + margin),
+		viewportWidth - halfWidth - margin
+	);
 	return createPortal(
 		<div
 			style={{
 				position: "fixed",
-				top: anchorRect.top + anchorRect.height / 2,
-				left: anchorRect.left - 10,
-				transform: "translate(-100%, -50%)",
+				top: anchorRect.top - 10,
+				left: clampedCenter,
+				transform: "translate(-50%, -100%)",
 				background: "#fff",
 				color: "#111",
 				borderRadius: 8,
@@ -283,19 +286,34 @@ function IconTooltip({
 	);
 }
 
-// Small pulsing dot — the only feedback for live-commit tools (paint/erase/
-// scissors) since they have no ApplyButton. Lives in the panel header next
-// to the tool name so it's visible without adding any body text.
-function RenderingIndicator() {
+// Small pulsing-dot indicator for whatever tool currently has an edit in
+// progress. Lives at the far right of the horizontal ribbon (after the last
+// tool icon) rather than inside any one tool's own settings flyout, so it
+// stays visible — and in one consistent place — no matter which tool is
+// running or whether that tool's settings happen to be open right now.
+function RenderingIndicator({ label, visible }: { label?: string; visible: boolean }) {
 	return (
 		<span
 			style={{
 				display: "inline-flex",
 				alignItems: "center",
-				gap: 5,
-				fontSize: 10.5,
-				color: "rgba(255,255,255,0.65)",
+				gap: 6,
+				fontSize: 11,
+				fontWeight: 600,
+				color: "rgba(255,255,255,0.75)",
 				flexShrink: 0,
+				marginLeft: 14,
+				paddingLeft: 14,
+				borderLeft: "1px solid rgba(255, 255, 255, 0.09)",
+				whiteSpace: "nowrap",
+				// Fades in/out instead of popping in and out of existence —
+				// the caller keeps this mounted for a beat after `visible`
+				// goes false (see renderingDotMounted/renderingDotVisible in
+				// AnnotationToolbar) so this transition actually has time to
+				// play instead of being cut off by an instant unmount.
+				opacity: visible ? 1 : 0,
+				transform: visible ? "translateY(0)" : "translateY(-2px)",
+				transition: "opacity 0.4s ease, transform 0.4s ease",
 			}}
 		>
 			<span
@@ -304,11 +322,11 @@ function RenderingIndicator() {
 					width: 7,
 					height: 7,
 					borderRadius: "50%",
-					background: "#6ea8fe",
+					background: "var(--jhu-blue-light, #68ACE5)",
 					animation: "seg-effect-render-pulse 0.9s ease-in-out infinite",
 				}}
 			/>
-			Loading...
+			{label ? `${label} — applying…` : "Applying…"}
 		</span>
 	);
 }
@@ -316,53 +334,146 @@ export default function AnnotationToolbar({
 	open, hasSegments, hasActiveTarget, activeTool, onToolChange,
 	diameterMm, onDiameterChange, onDiameterPreviewChange, scissorsOptions, onScissorsOptionsChange,
 	renderFlyout, scissorsPointCount, onScissorsCancel, maskingArea,
-	onMaskingAreaChange, hasAnySegments, scopeLocked, isRendering,
-	popupRef, popupDragRef, popupMinRef, sliceJumpRef, overviewExtraRects,
+	onMaskingAreaChange, hasAnySegments, scopeLocked, isRendering, isDeletingSegment,
+	targetKey, showOnlyTargetMask, onShowOnlyTargetMaskChange,
+	popupRef, popupDragRef, popupMinRef, 
 }: AnnotationToolbarProps) {
 	const [hoveredTool, setHoveredTool] = useState<string | null>(null);
 	const [hoveredRect, setHoveredRect] = useState<DOMRect | null>(null);
-	const [dockMinimized, setDockMinimized] = useState(false);
 	const iconRefs = useRef<Record<string, HTMLElement | null>>({});
 
-	// --- Walkthroughs --------------------------------------------------------
-	// Every tool gets an identical "Show walkthrough" launcher in its panel
-	// header (toolWalkthroughOpen). There's also one Overview walkthrough,
-	// launched from the dock, that tours the dock + corner panel dragging/
-	// minimizing (the segments-popup portion is filled in by the caller via
-	// `overviewExtraRects`, since the popup lives outside this component).
-	// Reopening either after dismissal — the launcher button never goes away
-	// — is the entire "replay" mechanism; no separate control is needed.
-	const [toolWalkthroughOpen, setToolWalkthroughOpen] = useState(false);
+	// --- Walkthrough ----------------------------------------------------------
+	// One overview tour that auto-opens on first visit (see effect below).
 	const [overviewWalkthroughOpen, setOverviewWalkthroughOpen] = useState(false);
-	const [fieldRect, setFieldRect] = useState<DOMRect | null>(null);
-	const [maskingRect, setMaskingRect] = useState<DOMRect | null>(null);
-	const [panelRect, setPanelRect] = useState<DOMRect | null>(null);
-	const [panelDragRect, setPanelDragRect] = useState<DOMRect | null>(null);
-	const [dockRect, setDockRect] = useState<DOMRect | null>(null);
-	const [dockDragRect, setDockDragRect] = useState<DOMRect | null>(null);
-	const [dockMinRect, setDockMinRect] = useState<DOMRect | null>(null);
-	const [panelMinRect, setPanelMinRect] = useState<DOMRect | null>(null);
-	// Measured from the refs the parent (VisualizationPage) hands in — the
-	// popup and the slice-jump overlay both live outside this component, so
-	// their DOM nodes are only reachable via these external refs.
-	const [popupRectMeasured, setPopupRectMeasured] = useState<DOMRect | null>(null);
-	const [popupDragRectMeasured, setPopupDragRectMeasured] = useState<DOMRect | null>(null);
-	const [popupMinRectMeasured, setPopupMinRectMeasured] = useState<DOMRect | null>(null);
-	const [sliceJumpRect, setSliceJumpRect] = useState<DOMRect | null>(null);
+	// "Pick a class first" hint — shown when a disabled tool icon is clicked
+	// (disabled buttons don't fire onClick, so this replaces that silent no-op).
+	const [pickClassHintOpen, setPickClassHintOpen] = useState(false);
+	const [pickClassHintRect, setPickClassHintRect] = useState<DOMRect | null>(null);
+	// One-off nudge shown the first time a target class gets picked, separate
+	// from the overview tour (which may already be dismissed by then).
+	const [firstTargetHintOpen, setFirstTargetHintOpen] = useState(false);
+	const [firstTargetHintRect, setFirstTargetHintRect] = useState<DOMRect | null>(null);
+	const prevHasActiveTargetRef = useRef(hasActiveTarget);
+	const [, setPanelRect] = useState<DOMRect | null>(null);
+	const [, setPanelDragRect] = useState<DOMRect | null>(null);
+	const [, setDockRect] = useState<DOMRect | null>(null);
+	const [, setDockDragRect] = useState<DOMRect | null>(null);
+	const [, setDockMinRect] = useState<DOMRect | null>(null);
+	const [, setPanelMinRect] = useState<DOMRect | null>(null);
+	// Measured from refs the parent (VisualizationPage) hands in, since the
+	// popup and slice-jump overlay live outside this component.
+	const [, setPopupRectMeasured] = useState<DOMRect | null>(null);
+	const [, setPopupDragRectMeasured] = useState<DOMRect | null>(null);
+	const [, setPopupMinRectMeasured] = useState<DOMRect | null>(null);
 
 	const fieldRef = useRef<HTMLDivElement>(null);
 	const maskingFieldRef = useRef<HTMLDivElement>(null);
 	const panelBodyRef = useRef<HTMLDivElement>(null);
-	const panelHeadRef = useRef<HTMLDivElement>(null);
+	// Unstyled inner wrapper measured for --atb-panel-h (see JSX usage below
+	// for why measuring the styled body directly caused runaway growth).
+	const panelBodyContentRef = useRef<HTMLDivElement>(null);
 	const panelMinRef = useRef<HTMLButtonElement>(null);
 	const dockElRef = useRef<HTMLDivElement>(null);
+	// Unstyled inner wrapper measured for --atb-ribbon-h. Observing the
+	// styled dock element itself (which has `min-height: var(--atb-ribbon-h)`)
+	// would be self-referential and grow without bound.
+	const dockContentRef = useRef<HTMLDivElement>(null);
 	const dockDragRef = useRef<HTMLDivElement>(null);
 
-	// Close the tool walkthrough if the person switches tools (or closes the
-	// panel) while it's up — its targets no longer exist under a new tool.
+	// Measures the ribbon's real height into --atb-ribbon-h (consumed by
+	// VisualizationPage.css to reserve space above the CT viewport), since a
+	// hardcoded value drifts as row contents like MaskingSelect change.
+	// useLayoutEffect so it lands before paint, avoiding a one-frame flash of
+	// the CSS fallback height. Math.ceil + 1px pad absorbs sub-pixel rounding.
+	useLayoutEffect(() => {
+		const el = dockContentRef.current;
+		if (!el) return;
+		const sync = () => {
+			const h = Math.ceil(el.getBoundingClientRect().height) + 1;
+			document.documentElement.style.setProperty("--atb-ribbon-h", `${h}px`);
+		};
+		sync();
+		const ro = new ResizeObserver(sync);
+		ro.observe(el);
+		return () => ro.disconnect();
+		// `open` is a dependency (not `[]`) so this re-runs and picks up the
+		// real element once the ribbon actually mounts.
+	}, [open]);
+
+	// The per-tool settings panel floats over the viewer (anchored under
+	// whichever icon opened it — see `toolFlyout` below), so it never needs
+	// to reserve space below the ribbon.
 	useEffect(() => {
-		setToolWalkthroughOpen(false);
-	}, [activeTool]);
+		document.documentElement.style.setProperty("--atb-panel-h", "0px");
+	}, []);
+
+	// Settings flyout — the small rectangle that opens under a tool's arrow.
+	// Only one tool's settings are open at a time, always for whichever tool
+	// is active. Guided-overlay tools (Grow-from-Seeds, Fill/Copy-Across-
+	// Slices) render `keepMounted` (see GUIDED_OVERLAY_TOOLS above), so an
+	// outside click here just hides the box without tearing down their state.
+	// Mirrored into a ref so the outside-click handler below (created before
+	// `guidedControls` state exists in source order) always reads the latest
+	// published guided flow.
+	const guidedControlsRef = useRef<GuidedFlowControls | null>(null);
+
+	const toolFlyout = useFlyout(false, {
+		scope: "top",
+		// Outside click behavior differs by tool: the "equip and use on the
+		// canvas" tools (paint/erase/scissors/level tracing — LIVE_COMMIT_TOOLS)
+		// stay equipped when you click away to do something else on the canvas
+		// — only their settings flyout closes, so the icon keeps its
+		// selected/white background and the tool is still active to use. The
+		// one-shot action tools (margin, smoothing, islands, etc.) fully
+		// deselect on an outside click, same as before. A guided-overlay tool
+		// routes through its own Exit so scribbles/anchors/picks get cleared.
+		onOutsideClose: () => {
+			if (guidedControlsRef.current) { guidedControlsRef.current.onExit(); return; }
+			if (activeTool && LIVE_COMMIT_TOOLS.includes(activeTool)) return; // flyout already closes itself; stay equipped
+			onToolChange(null);
+		},
+	});
+
+	// This component stays mounted while the toolbar is toggled off (see
+	// `if (!open) return null` further down), so state has to be reset
+	// explicitly on close — otherwise the flyout reopens anchored to a
+	// stale/detached icon ref, and the active tool stays visually selected.
+	useEffect(() => {
+		if (open) return;
+		// Exit any running guided flow so placed seeds/anchors/picks clear.
+		guidedControlsRef.current?.onExit();
+		toolFlyout.setOpen(false);
+		toolFlyout.anchorRef.current = null;
+		setGuidedControls(null);
+		setHoveredTool(null);
+		setHoveredRect(null);
+		onToolChange(null);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open]);
+
+	// Same reset, triggered by the TARGET changing (e.g. clicking a
+	// different class) instead of the toolbar closing. Tracked via a ref so
+	// this only fires on an actual change, not on first mount.
+	const prevTargetKeyRef = useRef(targetKey);
+	useEffect(() => {
+		if (prevTargetKeyRef.current === targetKey) return;
+		prevTargetKeyRef.current = targetKey;
+		if (!open) return; // the toolbar-closed effect above already covers this case
+		guidedControlsRef.current?.onExit();
+		toolFlyout.setOpen(false);
+		setGuidedControls(null);
+		setHoveredTool(null);
+		setHoveredRect(null);
+		onToolChange(null);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [targetKey, open]);
+
+	const openToolSettings = (tool: Exclude<PrimaryEditTool, null>) => {
+		if (!hasSegments || !hasActiveTarget) return;
+		if (activeTool !== tool) onToolChange(tool);
+		toolFlyout.anchorRef.current = iconRefs.current[tool] ?? null;
+		toolFlyout.setOpen(true);
+	};
 	const showTooltip = useCallback((id: string) => {
 		const el = iconRefs.current[id];
 		setHoveredRect(el ? el.getBoundingClientRect() : null);
@@ -373,43 +484,17 @@ export default function AnnotationToolbar({
 		setHoveredRect((cur) => (hoveredTool === id ? null : cur));
 	}, [hoveredTool]);
 
-	const panel = useDraggablePanel({
-		initial: { x: 24, y: 24 },
-		expandedSize: { width: 300, height: 420 },
-		minimizedSize: { width: 300, height: 46 },
-		marginX: -30,
-	});
-	const dockPanel = useDraggablePanel({
-		// Flush against the real right edge on first load. Use clientWidth (not
-		// innerWidth) since innerWidth includes the scrollbar's own width, which
-		// otherwise leaves a visible gap between the dock and the page content.
-		// y is intentionally small so the dock sits near the top of the viewport
-		// by default, clear of the segments popup that anchors near the bottom.
-		initial: { x: typeof document !== "undefined" ? document.documentElement.clientWidth - ANNOTATION_DOCK_WIDTH : 24, y: 80 },
-		// TOOL_DEFS.length icons + minimize button, each ~56px tall (52px + 4px gap), plus padding
-		expandedSize: { width: ANNOTATION_DOCK_WIDTH, height: TOOL_DEFS.length * 56 + 60 },
-		minimizedSize: { width: ANNOTATION_DOCK_WIDTH, height: 116 }, // 1 icon + minimize button + padding
-		marginX: 0,
-		// Only left/right dragging is meaningful for a vertical dock; keep it
-		// pinned flush to whichever screen edge it's dragged toward, and never
-		// let vertical dragging place it where its full icon list would be
-		// clipped off the top or bottom of the viewport.
-		lockToScreenEdges: true,
-	});
 
-	// Recompute every spotlight target whenever either walkthrough is open.
-	// Runs on every render while open (cheap: a handful of
+	// Recompute every spotlight target while the overview walkthrough is
+	// open. Runs on every render while open (cheap: a handful of
 	// getBoundingClientRect calls) so it stays correct across panel drags,
 	// minimize/expand, and window resizes — none of which have one single
 	// event to hook reliably given both panels are freely draggable.
-	const anyWalkthroughOpen = toolWalkthroughOpen || overviewWalkthroughOpen;
 	useLayoutEffect(() => {
-		if (!anyWalkthroughOpen) return;
+		if (!overviewWalkthroughOpen) return;
 		const measure = () => {
-			setFieldRect(fieldRef.current ? fieldRef.current.getBoundingClientRect() : null);
-			setMaskingRect(maskingFieldRef.current ? maskingFieldRef.current.getBoundingClientRect() : null);
 			setPanelRect(panelBodyRef.current ? panelBodyRef.current.getBoundingClientRect() : null);
-			setPanelDragRect(panelHeadRef.current ? panelHeadRef.current.getBoundingClientRect() : null);
+			setPanelDragRect(null);
 			setDockRect(dockElRef.current ? dockElRef.current.getBoundingClientRect() : null);
 			setDockDragRect(dockDragRef.current ? dockDragRef.current.getBoundingClientRect() : null);
 			// The dock's minimize button doesn't have its own dedicated ref —
@@ -421,7 +506,6 @@ export default function AnnotationToolbar({
 			setPopupRectMeasured(popupRef?.current ? popupRef.current.getBoundingClientRect() : null);
 			setPopupDragRectMeasured(popupDragRef?.current ? popupDragRef.current.getBoundingClientRect() : null);
 			setPopupMinRectMeasured(popupMinRef?.current ? popupMinRef.current.getBoundingClientRect() : null);
-			setSliceJumpRect(sliceJumpRef?.current ? sliceJumpRef.current.getBoundingClientRect() : null);
 		};
 		measure();
 		window.addEventListener("resize", measure);
@@ -432,13 +516,12 @@ export default function AnnotationToolbar({
 			window.removeEventListener("scroll", measure, true);
 			window.clearInterval(id);
 		};
-	}, [anyWalkthroughOpen, panel.pos.x, panel.pos.y, panel.minimized, dockPanel.pos.x, dockPanel.pos.y, dockMinimized, activeTool, popupRef, popupDragRef, popupMinRef, sliceJumpRef]);
+	}, [overviewWalkthroughOpen, activeTool, popupRef, popupDragRef, popupMinRef]);
 
 	// First-run auto-open: the moment this toolbar is opened (Annotate
 	// pressed) with no target picked yet, show the overview tour once per
 	// browser. Reopening the dock later (or already having a target) never
-	// re-triggers it — the header's "Show walkthrough" launcher is the only
-	// way to bring it back after that.
+	// re-triggers it — there's no manual launcher to bring it back after.
 	useEffect(() => {
 		if (!open) return;
 		if (hasActiveTarget) return;
@@ -450,112 +533,227 @@ export default function AnnotationToolbar({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open]);
 
-	const dismissOverviewWalkthrough = useCallback(() => {
-		setOverviewWalkthroughOpen(false);
+
+	// Same reasoning as the overview walkthrough's own measuring effect just
+	// above: the popup can be dragged, so there's no single event to hook —
+	// recompute on a short interval plus resize/scroll while the hint is
+	// showing.
+	useLayoutEffect(() => {
+		if (!pickClassHintOpen) return;
+		const measure = () => setPickClassHintRect(popupRef?.current ? popupRef.current.getBoundingClientRect() : null);
+		measure();
+		window.addEventListener("resize", measure);
+		window.addEventListener("scroll", measure, true);
+		const id = window.setInterval(measure, 200);
+		return () => {
+			window.removeEventListener("resize", measure);
+			window.removeEventListener("scroll", measure, true);
+			window.clearInterval(id);
+		};
+	}, [pickClassHintOpen, popupRef]);
+
+	// The hint exists to explain why a click didn't do anything — once a
+	// class actually gets picked there's nothing left to explain, so don't
+	// make the person also remember to dismiss it themselves.
+	useEffect(() => {
+		if (hasActiveTarget) setPickClassHintOpen(false);
+	}, [hasActiveTarget]);
+
+	const dismissPickClassHint = useCallback(() => setPickClassHintOpen(false), []);
+
+	// Fires on the false -> true transition only (a ref, not state, tracks
+	// "previous" so this doesn't re-fire on every render while already
+	// true). Marks itself seen immediately on trigger — not on dismiss —
+	// so it can never show a second time even if the tab closes before
+	// "Got it" is pressed.
+	useEffect(() => {
+		const wasActive = prevHasActiveTargetRef.current;
+		prevHasActiveTargetRef.current = hasActiveTarget;
+		if (wasActive || !hasActiveTarget) return;
+		let alreadySeen = false;
 		try {
-			if (typeof window !== "undefined") window.localStorage.setItem(OVERVIEW_WALKTHROUGH_SEEN_KEY, "1");
-		} catch { /* localStorage unavailable — not worth blocking on */ }
-	}, []);
+			alreadySeen = typeof window !== "undefined" && window.localStorage.getItem(FIRST_TARGET_HINT_SEEN_KEY) === "1";
+		} catch { /* localStorage unavailable — just show it */ }
+		if (alreadySeen) return;
+		setFirstTargetHintOpen(true);
+		try {
+			if (typeof window !== "undefined") window.localStorage.setItem(FIRST_TARGET_HINT_SEEN_KEY, "1");
+		} catch { /* not worth blocking on */ }
+	}, [hasActiveTarget]);
+
+	useLayoutEffect(() => {
+		if (!firstTargetHintOpen) return;
+		const measure = () => setFirstTargetHintRect(dockElRef.current ? dockElRef.current.getBoundingClientRect() : null);
+		measure();
+		window.addEventListener("resize", measure);
+		const id = window.setInterval(measure, 200);
+		return () => {
+			window.removeEventListener("resize", measure);
+			window.clearInterval(id);
+		};
+	}, [firstTargetHintOpen]);
+
+	const dismissFirstTargetHint = useCallback(() => setFirstTargetHintOpen(false), []);
 
 	const enabled = hasSegments && hasActiveTarget;
 
+	// LIVE_COMMIT_TOOLS (paint/erase/scissors/level tracing) are "equip and
+	// use" tools — clicking them just arms the tool, same as before, and they
+	// stay equipped until something else is picked. Every other tool
+	// (margin, smoothing, islands, logical operators, grow-from-seeds,
+	// hollow, fill/copy across slices) is "click once, configure, apply" —
+	// clicking the icon should immediately open its settings flyout right
+	// there, the same way clicking Margin already opened its column of
+	// options, instead of requiring a second click on the little arrow.
 	const selectTool = (tool: Exclude<PrimaryEditTool, null>) => {
 		if (!enabled) return;
-		onToolChange(activeTool === tool ? null : tool);
+		if (activeTool === tool) {
+			// Clicking the already-active tool again toggles it off entirely
+			// (and closes whatever settings were open for it). For a guided
+			// flow (Grow-from-Seeds, Fill/Copy-Across-Slices, Islands' pick
+			// ops) this needs to be a real Exit — not just a deselect — so
+			// any placed seeds/anchors/picks are cleared the same way they
+			// would be if Exit had been pressed directly, rather than being
+			// silently left behind for the next time this tool is opened.
+			if (guidedControlsRef.current) { guidedControlsRef.current.onExit(); return; }
+			toolFlyout.setOpen(false);
+			onToolChange(null);
+			return;
+		}
+		if (LIVE_COMMIT_TOOLS.includes(tool)) {
+			toolFlyout.setOpen(false);
+			onToolChange(tool);
+		} else {
+			openToolSettings(tool);
+		}
 	};
 
-	if (!open) return null;
+	// Exit / Start over for whatever guided modal flow (Grow-from-seeds,
+	// Copy/Fill-across-slices) is currently running, published up by the
+	// tool itself — rendered as fixed black/white buttons in the ribbon
+	// below so they're always in the same place regardless of which guided
+	// tool is active, instead of each tool floating its own controls over
+	// the canvas.
+	const [guidedControls, setGuidedControls] = useState<GuidedFlowControls | null>(null);
+	// Brief Hopkins-blue warning shown near the cursor when Continue is
+	// pressed while blocked (e.g. no seed points marked yet) — only appears
+	// on an actual press, not just sitting there whenever the button happens
+	// to be disabled. Same PickErrorHint pill used for "no valid segment
+	// here" during Copy across slices, positioned off the click that
+	// triggered it, rather than a caption fixed in the ribbon.
+	const [continueWarning, setContinueWarning] = useState<string | null>(null);
+	const [continueWarningPos, setContinueWarningPos] = useState<{ x: number; y: number } | null>(null);
+	const continueWarningTimerRef = useRef<number | null>(null);
+	const flashContinueWarning = (message: string, pos: { x: number; y: number }) => {
+		if (continueWarningTimerRef.current) window.clearTimeout(continueWarningTimerRef.current);
+		setContinueWarning(message);
+		setContinueWarningPos(pos);
+		continueWarningTimerRef.current = window.setTimeout(() => setContinueWarning(null), 2200);
+	};
+	useEffect(() => {
+		guidedControlsRef.current = guidedControls;
+		if (!guidedControls) setContinueWarning(null); // don't let a stale warning bleed into the next flow
+	}, [guidedControls]);
+	useEffect(() => {
+		if (!activeTool) setGuidedControls(null);
+	}, [activeTool]);
+	useEffect(() => () => { if (continueWarningTimerRef.current) window.clearTimeout(continueWarningTimerRef.current); }, []);
+
+	// Keeps the "Applying…" dot mounted for a beat after `isRendering` goes
+	// false so it can fade out via CSS instead of vanishing mid-pulse.
+	const [renderingDotMounted, setRenderingDotMounted] = useState(false);
+	const [renderingDotVisible, setRenderingDotVisible] = useState(false);
+	const [renderingDotLabel, setRenderingDotLabel] = useState<string | undefined>(undefined);
+	useEffect(() => {
+		if (isRendering) {
+			setRenderingDotLabel(TOOL_DEFS.find((t) => t.id === activeTool)?.label);
+			setRenderingDotMounted(true);
+			// Next tick, so mount (opacity 0) and fade-in (opacity 1) are
+			// separate paints rather than jumping straight to fully visible.
+			const id = window.setTimeout(() => setRenderingDotVisible(true), 10);
+			return () => window.clearTimeout(id);
+		}
+		setRenderingDotVisible(false);
+		const id = window.setTimeout(() => setRenderingDotMounted(false), 460);
+		return () => window.clearTimeout(id);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [isRendering]);
+
+	// Same keep-mounted-for-a-beat treatment as the "Applying…" dot above,
+	// but driven by SegmentsPopup's in-flight deletes instead of a canvas
+	// edit. Stays visible until every deleting class has actually been
+	// removed (deletingIds empties out on the popup side).
+	const [deletingDotMounted, setDeletingDotMounted] = useState(false);
+	const [deletingDotVisible, setDeletingDotVisible] = useState(false);
+	useEffect(() => {
+		if (isDeletingSegment) {
+			setDeletingDotMounted(true);
+			const id = window.setTimeout(() => setDeletingDotVisible(true), 10);
+			return () => window.clearTimeout(id);
+		}
+		setDeletingDotVisible(false);
+		const id = window.setTimeout(() => setDeletingDotMounted(false), 460);
+		return () => window.clearTimeout(id);
+	}, [isDeletingSegment]);
+
+	// Signals "applied" from one-shot tool flyouts — closes settings and
+	// clears the tool's active highlight, same as clicking the icon again.
+	const handleToolApplied = useCallback(() => {
+		toolFlyout.setOpen(false);
+		onToolChange(null);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [onToolChange]);
 
 	const activeDef = activeTool ? TOOL_DEFS.find((t) => t.id === activeTool) : null;
-	const showRenderingDot = !!isRendering && !!activeTool && LIVE_COMMIT_TOOLS.includes(activeTool);
-
-	// Minimized dock shows exactly one icon: the active tool if one is
-	// selected, otherwise Brush (first entry) as the default resting state.
-	const minimizedDef = activeDef ?? TOOL_DEFS[0];
-
-	return (
+	// Portal straight to <body>: VisualizationPage's root has
+	// overflow:hidden, which clips fixed-position descendants' paint.
+	if (typeof document === "undefined") return null;
+	// Stays mounted always and lets CSS (is-open/is-closed) animate it,
+	// instead of `open` gating a hard unmount that couldn't animate out.
+	return createPortal(
 		<>
+		<div className={`atb-shell ${open ? "is-open" : "is-closed"}`}>
 		<div
 			ref={dockElRef}
-			className={`atb atb--vertical ${!enabled ? "atb--disabled" : ""} ${dockMinimized ? "atb--vertical-min" : ""}`}
+			className={`atb atb--horizontal ${!enabled ? "atb--disabled" : ""}`}
 			role="toolbar"
-			aria-orientation="vertical"
-			style={{ position: "fixed", top: dockPanel.pos.y, left: dockPanel.pos.x, right: "auto", bottom: "auto" }}
+			aria-orientation="horizontal"
 		>
-			<div
-				ref={dockDragRef}
-				{...dockPanel.dragHandleProps}
-				title="Drag to move"
-				style={{
-					display: "flex",
-					alignItems: "center",
-					justifyContent: "center",
-					width: "100%",
-					height: 16,
-					cursor: "grab",
-					color: "rgba(255,255,255,0.35)",
-					touchAction: "none",
-				}}
-			>
-				<IconGripVertical size={13} />
-			</div>
-			<div style={{ display: "flex", justifyContent: "center", padding: "0 0 2px" }}>
-				<WalkthroughLauncherButton
-					label="See demo"
-					title="Show the annotation tools walkthrough"
-					onClick={() => setOverviewWalkthroughOpen(true)}
-				/>
-			</div>
-				{dockMinimized ? (
-					<div
-						ref={(el) => { iconRefs.current[minimizedDef.id] = el; }}
-						style={{ position: "relative" }}
-						onMouseEnter={() => showTooltip(minimizedDef.id)}
-						onMouseLeave={() => hideTooltip(minimizedDef.id)}
-					>
-						<button
-							className={`atb__btn ${activeTool === minimizedDef.id ? "is-active" : ""}`}
-							onClick={() => selectTool(minimizedDef.id)}
-							disabled={!enabled}
-							aria-label={minimizedDef.label}
-							onFocus={() => showTooltip(minimizedDef.id)}
-							onBlur={() => hideTooltip(minimizedDef.id)}
-						>
-							<minimizedDef.Icon size={26} stroke={1.75} />
-						</button>
-						{hoveredTool === minimizedDef.id && (
-							<IconTooltip
-								label={minimizedDef.label}
-								description={
-									!hasSegments
-										? `${minimizedDef.description} (no volume loaded)`
-										: !hasActiveTarget
-											? `${minimizedDef.description} (pick an organ or create a segment first)`
-											: minimizedDef.description
-								}
-								anchorRect={hoveredRect}
-							/>
-						)}
-					</div>
-				) : (
-					TOOL_DEFS.map(({ id, label, Icon, description }) => (
+			<div ref={dockContentRef} style={{ display: "flex", alignItems: "center", width: "100%" }}>
+			<div style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0, gap: 20 }}>
+				{TOOL_DEFS.map(({ id, label, Icon, description }) => {
+					// Only equip-and-use tools (paint/erase/scissors/level tracing)
+					// get a settings arrow; other tools open settings on icon click.
+					const hasSettingsArrow = LIVE_COMMIT_TOOLS.includes(id);
+					const settingsOpenHere = toolFlyout.open && activeTool === id;
+					return (
 						<div
 							key={id}
 							ref={(el) => { iconRefs.current[id] = el; }}
-							style={{ position: "relative" }}
+							style={{ position: "relative", display: "inline-flex", alignItems: "center" }}
 							onMouseEnter={() => showTooltip(id)}
 							onMouseLeave={() => hideTooltip(id)}
 						>
 							<button
 								className={`atb__btn ${activeTool === id ? "is-active" : ""}`}
-								onClick={() => selectTool(id)}
-								disabled={!enabled}
+								onClick={() => { if (enabled) selectTool(id); else setPickClassHintOpen(true); }}
 								aria-label={label}
+								aria-disabled={!enabled}
 								onFocus={() => showTooltip(id)}
 								onBlur={() => hideTooltip(id)}
 							>
-								<Icon size={50} stroke={1.75} />
+								<Icon size={20} />
 							</button>
+							{hasSettingsArrow && (
+								<FlyoutArrow
+									open={settingsOpenHere}
+									onClick={() => {
+										if (settingsOpenHere) toolFlyout.setOpen(false);
+										else openToolSettings(id);
+									}}
+									label={`${label} settings`}
+								/>
+							)}
 							{hoveredTool === id && (
 								<IconTooltip
 									label={label}
@@ -563,88 +761,296 @@ export default function AnnotationToolbar({
 										!hasSegments
 											? `${description} (no volume loaded)`
 											: !hasActiveTarget
-												? `${description} (pick an organ or create a segment first)`
+												? `${description}`
 												: description
 									}
 									anchorRect={hoveredRect}
 								/>
 							)}
 						</div>
-					))
-				)}
-
-				{/* Minimize toggle — always its own row, never scrolls off with the
-				    icon list, so it's reachable regardless of dock state. */}
-				<button
-					className="atb__btn atb__min-btn"
-					onClick={() => setDockMinimized((v) => !v)}
-					aria-label={dockMinimized ? "Expand toolbar" : "Minimize toolbar"}
-					title={dockMinimized ? "Expand toolbar" : "Minimize toolbar"}
-					onMouseEnter={() => showTooltip("__min")}
-					onMouseLeave={() => hideTooltip("__min")}
-					onFocus={() => showTooltip("__min")}
-					onBlur={() => hideTooltip("__min")}
-					ref={(el) => { iconRefs.current["__min"] = el; }}
-					style={{ position: "relative" }}
-				>
-					{dockMinimized ? <IconChevronsUp size={18} /> : <IconMinus size={18} />}
-				</button>
-				{hoveredTool === "__min" && (
-					<IconTooltip
-						label={dockMinimized ? "Expand toolbar" : "Minimize toolbar"}
-						description={dockMinimized ? "Show all tools" : "Collapse to just the active tool"}
-						anchorRect={hoveredRect}
-					/>
-				)}
+					);
+				})}
 			</div>
 
-			{activeTool && enabled && activeDef &&
-				createPortal(
+			{/* "Applying…" indicator, always in this spot at the end of the icon row. */}
+			{renderingDotMounted && <RenderingIndicator label={renderingDotLabel} visible={renderingDotVisible} />}
+			{/* "Deleting…" indicator — independent of the one above, so both can
+			    show at once (e.g. a paint edit committing while a class delete
+			    is still in flight). */}
+			{deletingDotMounted && <RenderingIndicator label="Deleting" visible={deletingDotVisible} />}
+
+			{/* Exit / Start over for the running guided flow (Grow-from-seeds,
+			    Copy/Fill-across-slices) — fixed in the ribbon, not floating over the canvas. */}
+			{guidedControls && (
+				<div
+					style={{
+						flexShrink: 0,
+						display: "flex",
+						alignItems: "center",
+						gap: 8,
+						marginLeft: 14,
+						paddingLeft: 14,
+						borderLeft: "1px solid rgba(255, 255, 255, 0.09)",
+					}}
+				>
+					{/* Local, self-contained keyframes for the Continue button's
+					    glow-pulse below — kept here rather than in the shared
+					    stylesheet since it's only ever used by this one button. */}
+					<style>{`
+						@keyframes seg-effect-continue-pulse {
+							0% { box-shadow: 0 0 0 0 rgba(104, 172, 229, 0.55); }
+							70% { box-shadow: 0 0 0 8px rgba(104, 172, 229, 0); }
+							100% { box-shadow: 0 0 0 0 rgba(104, 172, 229, 0); }
+						}
+					`}</style>
+					<span
+						style={{
+							fontFamily: "\"JetBrains Mono\", ui-monospace, monospace",
+							fontSize: 10,
+							letterSpacing: "0.06em",
+							textTransform: "uppercase",
+							color: "rgba(255,255,255,0.45)",
+							whiteSpace: "nowrap",
+						}}
+					>
+						{guidedControls.label}
+					</span>
+					{guidedControls.busy ? (
+						// Once the commit is running there's nothing left to cancel
+						// or restart, so swap to the same pulsing-dot indicator.
+						<span
+							style={{
+								display: "inline-flex",
+								alignItems: "center",
+								gap: 6,
+								fontSize: 11.5,
+								fontWeight: 700,
+								color: "rgba(255,255,255,0.75)",
+								whiteSpace: "nowrap",
+							}}
+						>
+							<span
+								aria-hidden="true"
+								style={{
+									width: 7,
+									height: 7,
+									borderRadius: "50%",
+									background: "var(--jhu-blue-light, #68ACE5)",
+									animation: "seg-effect-render-pulse 0.9s ease-in-out infinite",
+								}}
+							/>
+							Applying…
+						</span>
+					) : (
+						<>
+							{guidedControls.onContinue && (
+								// The primary "move to the next step" action — made visually
+								// louder (solid blue, pulsing) than Start over / Exit so it's
+								// the obvious next thing to press, and placed first since it's
+								// the one most people want most of the time. Deliberately not a
+								// native `disabled` button even when blocked — a disabled button
+								// can't be clicked at all, so pressing it couldn't show a
+								// warning. It stays clickable; pressing it while blocked flashes
+								// an orange "why" message instead of a permanently-visible caption.
+								<span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+									<button
+										type="button"
+										onClick={(e) => {
+											if (guidedControls.continueDisabled) {
+												flashContinueWarning(guidedControls.continueHint ?? "Mark at least one point first", { x: e.clientX, y: e.clientY });
+												return;
+											}
+											guidedControls.onContinue?.();
+										}}
+										style={{
+											background: "var(--jhu-blue, #002D72)",
+											border: "1px solid var(--jhu-blue-light, #68ACE5)",
+											borderRadius: 999,
+											color: "#ffffff",
+											cursor: "pointer",
+											fontSize: 11.5,
+											fontWeight: 800,
+											padding: "6px 14px",
+											whiteSpace: "nowrap",
+											opacity: guidedControls.continueDisabled ? 0.6 : 1,
+											boxShadow: guidedControls.continueDisabled ? "none" : "0 0 0 0 rgba(104, 172, 229, 0.55)",
+											animation: guidedControls.continueDisabled ? "none" : "seg-effect-continue-pulse 1.6s ease-out infinite",
+										}}
+									>
+										{guidedControls.continueLabel ?? "Continue →"}
+									</button>
+									{continueWarning && continueWarningPos && (
+										<PickErrorHint message={continueWarning} x={continueWarningPos.x} y={continueWarningPos.y} />
+									)}
+								</span>
+							)}
+							<button
+								type="button"
+								onClick={guidedControls.onStartOver}
+								style={{
+									background: "rgba(255,255,255,0.08)",
+									border: "1px solid rgba(255,255,255,0.14)",
+									borderRadius: 999,
+									color: "rgba(255,255,255,0.8)",
+									cursor: "pointer",
+									fontSize: 11.5,
+									fontWeight: 700,
+									padding: "6px 12px",
+									whiteSpace: "nowrap",
+								}}
+							>
+								Start over
+							</button>
+							<button
+								type="button"
+								onClick={guidedControls.onExit}
+								style={{
+									background: "rgba(0, 0, 0, 0.16)",
+									border: "1px solid rgba(0, 0, 0, 0.45)",
+									borderRadius: 999,
+									color: "#ffffff",
+									cursor: "pointer",
+									fontSize: 11.5,
+									fontWeight: 800,
+									padding: "6px 12px",
+									whiteSpace: "nowrap",
+								}}
+							>
+								Exit
+							</button>
+						</>
+					)}
+				</div>
+			)}
+
+			{/* Ribbon-level display preference (on by default), not a per-tool setting. */}
+			<label
+				title={
+					!hasActiveTarget
+						? "Pick or create a class first."
+						: showOnlyTargetMask
+							? "On — every class except whichever one is currently targeted is hidden. Click to show every class's mask."
+							: "Off — every class's mask is showing. Click to show only the targeted class's mask."
+				}
+				style={{
+					flexShrink: 0,
+					display: "flex",
+					alignItems: "center",
+					gap: 9,
+					marginLeft: 14,
+					paddingLeft: 14,
+					borderLeft: "1px solid rgba(255, 255, 255, 0.09)",
+					cursor: hasActiveTarget ? "pointer" : "default",
+					userSelect: "none",
+					whiteSpace: "nowrap",
+					// Reads as inert (not clickable-but-broken) until a class is targeted.
+					opacity: hasActiveTarget ? 1 : 0.4,
+				}}
+			>
+				<span
+					style={{
+						fontFamily: "\"JetBrains Mono\", ui-monospace, monospace",
+						fontSize: 10,
+						letterSpacing: "0.06em",
+						textTransform: "uppercase",
+						color: "rgba(255,255,255,0.5)",
+					}}
+				>
+					Show only target class
+				</span>
+				<span
+					role="checkbox"
+					aria-checked={showOnlyTargetMask}
+					aria-disabled={!hasActiveTarget}
+					onClick={() => { if (hasActiveTarget) onShowOnlyTargetMaskChange(!showOnlyTargetMask); }}
+					style={{
+						position: "relative",
+						flexShrink: 0,
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+						width: 16,
+						height: 16,
+						borderRadius: 4,
+						background: showOnlyTargetMask ? "#002D72" : "rgba(255,255,255,0.06)",
+						border: `1px solid ${showOnlyTargetMask ? "#002D72" : "rgba(255,255,255,0.28)"}`,
+						transition: "background 0.16s ease, border-color 0.16s ease",
+						cursor: hasActiveTarget ? "pointer" : "default",
+						pointerEvents: hasActiveTarget ? "auto" : "none",
+					}}
+				>
+					<IconCheck
+						aria-hidden="true"
+						size={12}
+						stroke={3}
+						style={{
+							color: "#ffffff",
+							opacity: showOnlyTargetMask ? 1 : 0,
+							transform: showOnlyTargetMask ? "scale(1)" : "scale(0.5)",
+							// Matches the pop-in feel of the flyouts' own success checkmark.
+							transition: "opacity 0.14s ease, transform 0.14s cubic-bezier(0.34, 1.56, 0.64, 1)",
+						}}
+					/>
+				</span>
+			</label>
+
+			{/* Global "applies to" scope control; its dropdown anchors from its
+			    right edge (see MaskingSelect) so it's never clipped off-screen. */}
+			<div
+				ref={maskingFieldRef}
+				style={{
+					flexShrink: 0,
+					marginLeft: 14,
+					paddingLeft: 14,
+					borderLeft: "1px solid rgba(255, 255, 255, 0.09)",
+				}}
+			>
+				<MaskingSelect
+					value={maskingArea}
+					onChange={onMaskingAreaChange}
+					hasActiveSegment={hasActiveTarget}
+					hasAnySegments={hasAnySegments}
+					locked={!!scopeLocked}
+				/>
+			</div>
+			</div>{/* /dockContentRef */}
+		</div>
+
+			<FlyoutPanel
+				open={enabled && !!activeTool && !!activeDef && toolFlyout.open}
+				anchorRef={toolFlyout.anchorRef}
+				panelRef={toolFlyout.panelRef}
+				placement="below"
+				// 200 matches MenuColumn's natural floor + panel padding, so
+				// short one-shot flyouts (e.g. Smoothing) shrink to fit instead
+				// of using a flat width regardless of content.
+				minWidth={200}
+				// Forces a reposition when settings reopen for a different tool
+				// icon, so the panel doesn't stay glued under the previous one.
+				anchorKey={activeTool}
+				// Guided-overlay tools (GrowFromSeeds, Copy/FillAcrossSlices,
+				// Islands) close settings the instant their overlay takes over
+				// picking; keepMounted stops that from unmounting the picker
+				// state and its body-portaled overlay. The tool itself still
+				// unmounts normally when deselected (activeDef goes null).
+				keepMounted
+			>
+				{activeDef && (
 					<div
 						ref={panelBodyRef}
-						className={`atb-corner-panel ${panel.minimized ? "is-minimized" : ""}`}
-						style={{ position: "fixed", top: panel.pos.y, left: panel.pos.x, right: "auto", bottom: "auto" }}
+						className="atb-corner-panel atb-corner-panel--floating"
 					>
-						<div
-							ref={panelHeadRef}
-							className="atb-corner-panel__head"
-							{...panel.dragHandleProps}
-							title="Drag to move"
-							style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "6px 8px", cursor: "grab", touchAction: "none" }}
-						>
-						<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flex: 1 }}>
-							<IconGripVertical size={14} style={{ color: "rgba(255,255,255,0.4)", flexShrink: 0 }} />
-							<span style={{ fontSize: 12, fontWeight: 700, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-								{activeDef.label}
-							</span>
-							{showRenderingDot && <RenderingIndicator />}
-						</span>
-							<span style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-								{/* Identical launcher in every tool's panel — this is the one
-								    and only "Show walkthrough" affordance for whichever tool
-								    is currently active, and doubles as the replay control. */}
-								<WalkthroughLauncherButton
-									label="See demo"
-									title={`Show the ${activeDef.label} walkthrough`}
-									onClick={(e) => { e.stopPropagation(); setToolWalkthroughOpen(true); }}
-								/>
-								<button
-									ref={panelMinRef}
-									className="atb-corner-panel__icon-btn"
-									onClick={(e) => { e.stopPropagation(); panel.setMinimized((v) => !v); }}
-									aria-label={panel.minimized ? "Expand panel" : "Minimize panel"}
-									title={panel.minimized ? "Expand panel" : "Minimize panel"}
-								>
-									{panel.minimized ? <IconChevronsUp size={16} /> : <IconMinus size={16} />}
-								</button>
-							</span>
-						</div>
-						{!panel.minimized && (
-							<div className="atb-corner-panel__body">
+						<div className="atb-corner-panel__body">
+							{/* Measured for --atb-panel-h. Deliberately unstyled — observing
+							    the body div directly (which has min-height: var(--atb-panel-h))
+							    would be self-referential and grow without bound. */}
+							<div ref={panelBodyContentRef} style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: "inherit", flexWrap: "inherit" }}>
 								<div ref={fieldRef}>
 									{(activeTool === "paint" || activeTool === "erase") && (
+										// NumberSliderField's own `label` prop already shows
+										// "Brush"/"Erase" above the slider.
 										<DiameterFlyout
-											title={activeDef.label}
+											title={activeTool === "paint" ? "Brush Size" : "Eraser Size"}
 											diameterMm={diameterMm}
 											onDiameterChange={onDiameterChange}
 											onPreviewChange={onDiameterPreviewChange}
@@ -656,57 +1062,140 @@ export default function AnnotationToolbar({
 											onChange={onScissorsOptionsChange}
 											pointCount={scissorsPointCount}
 											onCancel={onScissorsCancel}
+											onCloseSettings={() => toolFlyout.setOpen(false)}
 										/>
 									)}
-									{!["paint", "erase", "scissors"].includes(activeTool) && renderFlyout(activeTool)}
-								</div>
-
-								<div ref={maskingFieldRef}>
-									<MaskingSelect
-										value={maskingArea}
-										onChange={onMaskingAreaChange}
-										hasActiveSegment={hasActiveTarget}
-										hasAnySegments={hasAnySegments}
-										locked={!!scopeLocked}
-									/>
+									{activeTool && !["paint", "erase", "scissors"].includes(activeTool) && renderFlyout(activeTool, handleToolApplied, () => toolFlyout.setOpen(false), setGuidedControls)}
 								</div>
 							</div>
-						)}
-					</div>,
-					document.body
+						</div>
+					</div>
 				)}
+			</FlyoutPanel>
+		</div>{/* /.atb-shell */}
 
-			{activeTool && (
-				<ToolWalkthrough
-					visible={toolWalkthroughOpen}
-					label={`${activeDef?.label ?? "Tool"} walkthrough`}
-					onDismiss={() => setToolWalkthroughOpen(false)}
-					steps={buildToolSteps(activeTool, {
-						panelRect,
-						fieldRect,
-						maskingRect,
-						sliceJumpRect,
-					})}
+		{open && pickClassHintOpen && pickClassHintRect && (
+			<>
+				{/* Traces the live popup rect so it stays aligned if the popup is
+				    dragged or resized while showing. */}
+				<div
+					aria-hidden="true"
+					style={{
+						position: "fixed",
+						top: pickClassHintRect.top,
+						left: pickClassHintRect.left - 3,
+						width: pickClassHintRect.width + 6,
+						height: pickClassHintRect.height + 3,
+						border: "2px dashed var(--jhu-blue-light, #68ACE5)",
+						borderRadius: 12,
+						pointerEvents: "none",
+						zIndex: 120,
+						boxShadow: "0 0 0 4000px rgba(0,0,0,0.35)",
+					}}
 				/>
-			)}
+				<div
+					role="dialog"
+					aria-label="Pick a class first"
+					style={{
+						position: "fixed",
+						top: pickClassHintRect.top,
+						left: Math.max(12, pickClassHintRect.left - 300),
+						width: 260,
+						background: "#16181d",
+						border: "1px solid rgba(255,255,255,0.14)",
+						borderRadius: 12,
+						boxShadow: "0 18px 44px -12px rgba(0,0,0,0.75)",
+						padding: "14px 16px",
+						zIndex: 121,
+						color: "#fff",
+					}}
+				>
+					<div style={{ fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.9)" }}>
+						Select an existing class or create a custom one to start annotating.
+					</div>
+					<button
+						type="button"
+						onClick={dismissPickClassHint}
+						style={{
+							marginTop: 12,
+							width: "100%",
+							background: "#fff",
+							color: "#08090b",
+							border: "none",
+							borderRadius: 8,
+							fontSize: 12.5,
+							fontWeight: 700,
+							padding: "8px 0",
+							cursor: "pointer",
+						}}
+					>
+						Got it
+					</button>
+				</div>
+			</>
+		)}
 
-			<ToolWalkthrough
-				visible={overviewWalkthroughOpen}
-				label="Annotation tools walkthrough"
-				onDismiss={dismissOverviewWalkthrough}
-				steps={buildOverviewSteps({
-					...overviewExtraRects,
-					popupRect: popupRectMeasured ?? overviewExtraRects?.popupRect,
-					popupDragRect: popupDragRectMeasured ?? overviewExtraRects?.popupDragRect,
-					popupMinRect: popupMinRectMeasured ?? overviewExtraRects?.popupMinRect,
-					dockRect,
-					dockDragRect,
-					dockMinRect,
-					panelRect,
-					panelDragRect,
-					panelMinRect,
-				})}
-			/>
-		</>
+		{open && firstTargetHintOpen && firstTargetHintRect && (
+			<>
+				<div
+					aria-hidden="true"
+					style={{
+						position: "fixed",
+						top: firstTargetHintRect.top,
+						left: firstTargetHintRect.left,
+						width: firstTargetHintRect.width,
+						height: firstTargetHintRect.height,
+						border: "2px dashed var(--jhu-blue-light, #68ACE5)",
+						borderRadius: 8,
+						pointerEvents: "none",
+						zIndex: 120,
+						boxShadow: "0 0 0 4000px rgba(0,0,0,0.35)",
+					}}
+				/>
+				<div
+					role="dialog"
+					aria-label="Start annotating"
+					style={{
+						position: "fixed",
+						top: firstTargetHintRect.bottom + 10,
+						left: firstTargetHintRect.left,
+						width: 260,
+						background: "#16181d",
+						border: "1px solid rgba(255,255,255,0.14)",
+						borderRadius: 12,
+						boxShadow: "0 18px 44px -12px rgba(0,0,0,0.75)",
+						padding: "14px 16px",
+						zIndex: 121,
+						color: "#fff",
+					}}
+				>
+					<div style={{ fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.9)" }}>
+						Click any of these icons to start annotating.
+					</div>
+					<button
+						type="button"
+						onClick={dismissFirstTargetHint}
+						style={{
+							marginTop: 12,
+							width: "100%",
+							background: "#fff",
+							color: "#08090b",
+							border: "none",
+							borderRadius: 8,
+							fontSize: 12.5,
+							fontWeight: 700,
+							padding: "8px 0",
+							cursor: "pointer",
+						}}
+					>
+						Got it
+					</button>
+				</div>
+			</>
+		)}
+
+
+		</>,
+		document.body
 	);
 }
