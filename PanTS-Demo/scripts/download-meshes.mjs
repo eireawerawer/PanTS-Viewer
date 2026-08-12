@@ -32,10 +32,20 @@ if (!CASE_ID) {
 
 const OUT_DIR = join(HERE, "..", "public", "meshes", String(CASE_ID));
 
-/** organ.url may be absolute (http…) or server-relative (/api/…); normalise both. */
+/**
+ * The server bakes fully-qualified urls into the manifest, pointing at the public
+ * hostname. Always fetch via --api instead: that host may be unreachable (broken
+ * proxy, no DNS, off-network) while the backend behind an SSH tunnel is fine.
+ * Keep only the path and re-root it.
+ */
 function resolveUrl(url) {
-  if (/^https?:\/\//i.test(url)) return url;
-  return `${API}${url.startsWith("/") ? "" : "/"}${url}`;
+  let path = url;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    // already relative
+  }
+  return `${API}${path.startsWith("/") ? "" : "/"}${path}`;
 }
 
 /** Stable local filename for an organ's GLB. */

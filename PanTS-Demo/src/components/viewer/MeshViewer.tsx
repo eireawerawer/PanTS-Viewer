@@ -35,13 +35,36 @@ type SegmentationMeshViewerProps = {
   manifestOverride?: MeshManifest | null;
 };
 
+/**
+ * The server bakes fully-qualified GLB urls into manifest.json
+ * ("https://bodymaps.wse.jhu.edu/api/cases/.../liver.glb"). Those bypass
+ * API_BASE and the dev proxy, so three.js fetches the public host directly no
+ * matter where the app is running — which breaks the 3D pane whenever that
+ * hostname is unreachable but the API is (dev proxy, SSH tunnel, staging).
+ *
+ * Keeping only the path makes each url same-origin, so it follows whatever
+ * route the rest of the app already uses. In production this is a no-op: the
+ * app and the API share an origin there.
+ */
+function toSameOriginPath(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url; // already relative
+  }
+}
+
 export async function fetchMeshManifest(caseId: string, isSession = false): Promise<MeshManifest> {
   const base = isSession
     ? `${APP_CONSTANTS.API_ORIGIN}/api/sessions/${caseId}/mesh-manifest`
     : `${APP_CONSTANTS.API_ORIGIN}/api/cases/${caseId}/mesh-manifest`;
   const res = await fetch(base);
   if (!res.ok) throw new Error(`Failed to fetch mesh manifest: ${res.status}`);
-  return res.json();
+  const manifest: MeshManifest = await res.json();
+  return {
+    ...manifest,
+    organs: (manifest.organs ?? []).map((o) => ({ ...o, url: toSameOriginPath(o.url) })),
+  };
 }
 
 export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}, isSession = false, autoRotate = false, autoRotateSpeed = 0.6, cinematic = false, manifestOverride = null}: SegmentationMeshViewerProps) {
