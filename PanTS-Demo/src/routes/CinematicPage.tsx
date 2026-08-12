@@ -92,7 +92,24 @@ export default function CinematicPage() {
     };
   }, [caseId, isSession, useLocal]);
 
-  const organs = manifest?.organs ?? null;
+  // Drop organs from the shot by key or name, comma-separated. The default hides
+  // the lungs: this is an abdominal scan, so they're truncated by the top of the
+  // volume and the cut edge reads as broken geometry when the mesh fills a frame.
+  const excluded = useMemo(() => {
+    const raw = params.get("exclude") ?? "lung_left,lung_right";
+    return new Set(
+      raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
+    );
+  }, [params]);
+
+  const organs = useMemo(() => {
+    if (!manifest?.organs) return null;
+    return manifest.organs.filter(
+      (o) =>
+        !excluded.has((o.key ?? "").toLowerCase()) &&
+        !excluded.has((o.name ?? "").toLowerCase()),
+    );
+  }, [manifest, excluded]);
 
   const ordered = useMemo(
     () => (organs ? revealOrder(organs, start) : []),
