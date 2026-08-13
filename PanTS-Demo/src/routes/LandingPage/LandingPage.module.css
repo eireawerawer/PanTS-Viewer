@@ -14,7 +14,8 @@
   background: #ffffff;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto; /* short viewports scroll instead of clipping the hero */
   font-family: "IBM Plex Sans", system-ui, sans-serif;
   color: #111111;
 }

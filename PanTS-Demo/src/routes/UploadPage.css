@@ -1,7 +1,8 @@
 /* ===== UploadPage.css =====
-   Redesigned to match the BodyMaps landing page aesthetic.
-   Color palette: #ffffff / #f5f5f5 / #111111 (monochrome)
-   Fonts: Space Grotesk, JetBrains Mono
+   DEFERRED pre-brand surface: still monochrome + Space Grotesk while
+   in-flight PRs on this file land. Do not copy this vocabulary — new
+   styling uses the BodyMaps tokens (ink/paper/accent, IBM Plex); see
+   BRANDING.md at the repo root.
 */
 
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');

@@ -1,6 +1,6 @@
-/* Account control for both nav bars. Monochrome to match the BodyMaps header;
-   BodyMaps ink is used for the primary "Sign in" action to
-   match the landing page's active tab / primary button. */
+/* Account control for both nav bars. Ink primary per BRANDING.md;
+   ink fill on the primary "Sign in" action to match the landing
+   page's active tab / primary button. */
 
 .signInBtn {
 	padding: 8px 20px;

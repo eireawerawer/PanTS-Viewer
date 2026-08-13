@@ -16,7 +16,7 @@ the rules below.
 | `--paper` / `--paper-2` / `--paper-3` | `#FFFFFF` / `#F7F7F4` / `#ECEBE5` | Page ground, off-white bands, cards |
 | `--rule` | `#E2E1DA` | Hairline dividers, card borders (instead of shadows) |
 | `--accent` | `#E76F51` | Vivid orange: decorative bands/graphics, accents and CTA fills on **dark** surfaces (pair with ink text) |
-| `--accent-deep` | `#C2532F` | Orange **text only** on light: links, eyebrow numbers, stat values (AA on white; vivid fails). Not for button fills — primary fills are ink |
+| `--accent-deep` | `#C2532F` | Orange **text only** on light: links, eyebrow numbers, stat values. AA on `--paper` (#FFFFFF) **only** — on `paper-2`/`paper-3`/`#fafafa` use `--accent-deep-hover` instead. Not for button fills — primary fills are ink |
 | `--accent-tint` | `#F08A6F` | Small orange text on **dark** (7.3:1 on ink) |
 | `--muted` / `--muted-2` | `#5A6175` / `#6B7285` | Secondary / tertiary text on light |
 | `--accent-deep-hover` | `#A8431F` | Hover state for accent-deep fills/links (app-local, not a pack token) |
@@ -61,5 +61,14 @@ in `scripts/brand-guard.mjs` because they are under active development in
 open PRs — they get migrated in a follow-up, not piecemeal:
 `UploadPage.css/.tsx`, `VisualizationPage.css/.tsx`, `AnnotationToolbar.*`,
 `FlyoutPrimitives.css`, the `segmentation/` components, `ToolWalkthrough.css`,
-`MeasurementPanel.css`, `AISidebar.css`, `Preview.tsx`, and the Flask PDF
-report. Don't add files to an allowlist to silence the guard — use the tokens.
+`MeasurementPanel.css`, `AISidebar.css`, `Preview.tsx`, and (pre-registered
+for an in-flight branch) `SharePatientCard.tsx`. Their "Space Grotesk" /
+"JetBrains Mono" declarations render as IBM Plex via an alias `@font-face`
+shim in `brand.css` until migrated. Don't add files to an allowlist to
+silence the guard — use the tokens.
+
+The guard's scan scope is `PanTS-Demo/` only, by decision: repo-root apps
+(`analytics/`) and `flask-server/` are out of scope for now. The Flask PDF
+report (`flask-server/api/utils.py` header drawing plus its template) is a
+known deferred brand surface *outside* the guard's reach — migrate it when
+that file's in-flight PRs land.

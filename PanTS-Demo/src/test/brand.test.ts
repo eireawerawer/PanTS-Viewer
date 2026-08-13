@@ -8,7 +8,8 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-// vitest runs with cwd = PanTS-Demo (where vite.config.ts lives)
+// cwd is PanTS-Demo because npm runs scripts from the package dir and CI
+// sets working-directory accordingly (vitest itself does not chdir)
 const read = (rel: string) => readFileSync(resolve(process.cwd(), rel), "utf8");
 
 describe("brand identity", () => {
