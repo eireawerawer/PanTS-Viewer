@@ -21,10 +21,51 @@ import NumberSliderField from "../NumberSliderField";
 import { FlyoutArrow, FlyoutPanel, MenuColumn, MenuRow, MenuDivider, useFlyout } from "./FlyoutPrimitives";
 import type { GuidedFlowControls } from "../segmentation/SliceAnchorPickerUI";
 
-// localStorage keys: once the overview tour (or first-target hint) has been
-// seen, it won't auto-open again.
+// sessionStorage keys: once the overview tour (or first-target hint) has
+// been seen, it won't auto-open again FOR THE REST OF THIS TAB SESSION.
+// Deliberately sessionStorage rather than localStorage — these are meant to
+// re-appear on every fresh page load/reload, not just once ever per browser.
 const OVERVIEW_WALKTHROUGH_SEEN_KEY = "mm_annotation_walkthrough_seen";
 const FIRST_TARGET_HINT_SEEN_KEY = "mm_annotation_first_target_hint_seen";
+const SHORTCUTS_INTRO_SEEN_KEY = "mm_annotation_shortcuts_intro_seen";
+// Guided-flow (Continue / Start over / Exit) explainer. Each guided tool
+// (Grow from Seeds, Copy across slices, Fill between slices, Islands) gets
+// its OWN "seen" flag — so seeing the explainer for one doesn't suppress it
+// for the others — even though several of them share the same wording.
+const GUIDED_HINT_SEEN_KEY_PREFIX = "mm_annotation_guided_hint_seen_";
+
+// Grouped keyboard shortcuts shown once, the moment the annotation toolbar
+// itself is opened (see SHORTCUTS_INTRO_SEEN_KEY below). Kept as plain data
+// rather than JSX so the popup's layout stays entirely in one component.
+const SHORTCUT_GROUPS: Array<{ label: string; rows: Array<{ label: string; keys: string[] }> }> = [
+	{
+		label: "Navigation",
+		rows: [
+			{ label: "Step one slice", keys: ["["] },
+			{ label: "Step 10 slices", keys: ["Shift", "["] },
+			{ label: "Zoom in to cursor", keys: ["+"] },
+			{ label: "Zoom out from cursor", keys: ["-"] },
+			{ label: "Reset zoom to fit", keys: ["Ctrl", "0"] },
+			{ label: "First / last slice", keys: ["Home"] },
+		],
+	},
+	{
+		label: "While drawing a shape",
+		rows: [
+			{ label: "Close the shape", keys: ["Enter"] },
+			{ label: "Cancel the shape", keys: ["Esc"] },
+			{ label: "Undo last point", keys: ["Ctrl", "Z"] },
+		],
+	},
+	{
+		label: "Editing",
+		rows: [
+			{ label: "Undo / redo edit", keys: ["Ctrl", "Z"] },
+			{ label: "Redo edit", keys: ["Shift", "Ctrl", "Z"] },
+			{ label: "Resize brush ±2mm", keys: ["Shift", "["] },
+		],
+	},
+];
 
 export type PrimaryEditTool =
 	| "paint" | "erase" | "scissors" | "levelTracing"
@@ -91,7 +132,14 @@ interface AnnotationToolbarProps {
 	popupDragRef?: React.RefObject<HTMLDivElement | null>;
 	popupMinRef?: React.RefObject<HTMLButtonElement | null>;
 	sliceJumpRef?: React.RefObject<HTMLDivElement | null>;
-	
+
+	/** The main toolbar's own Annotate/pencil button — this ribbon measures
+	 *  its horizontal center and opens with a "branching off" reveal
+	 *  anchored there (see the clip-path reveal + pointer triangle in the
+	 *  render below), instead of just fading in as a flat full-width bar
+	 *  with no visual link back to the button that opened it. */
+	anchorRef?: React.RefObject<HTMLElement | null>;
+
 }
 
 const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon: typeof IconBrush; description: string }> = [	
@@ -122,6 +170,24 @@ const LIVE_COMMIT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["paint", "erase", "
 
 const MIN_DIAMETER_MM = 2;
 const MAX_DIAMETER_MM = 40;
+
+// Which "explain Continue / Start over / Exit" message a guided tool falls
+// under. Grow from Seeds gets its own copy; the slice-range tools (Copy/Fill
+// across slices) and Islands' pick-based ops (Remove picked/Keep picked)
+// all drive the exact same three controls, so they share one message keyed
+// off a single "seen" flag rather than repeating the popup three times.
+type GuidedHintGroup = "growSeeds" | "sliceOps";
+function guidedHintGroup(tool: PrimaryEditTool): GuidedHintGroup | null {
+	if (tool === "growFromSeeds") return "growSeeds";
+	if (tool === "copyAcrossSlices" || tool === "fillBetweenSlices" || tool === "islands") return "sliceOps";
+	return null;
+}
+const GUIDED_HINT_COPY: Record<GuidedHintGroup, string> = {
+	growSeeds:
+		"Continue moves on once you've placed your seed scribbles. Start over clears every seed and lets you begin again. Exit leaves Grow from Seeds without changing anything.",
+	sliceOps:
+		"Continue (labeled Remove picked/Keep picked/etc. depending on the tool) applies your picks. Start over clears them and lets you pick again. Exit leaves the tool without changing anything.",
+};
 
 // Ribbon height, matches --atb-ribbon-h in CSS. Exported so SegmentsPopup
 // can dock directly beneath the ribbon without duplicating the constant.
@@ -291,7 +357,7 @@ function IconTooltip({
 // tool icon) rather than inside any one tool's own settings flyout, so it
 // stays visible — and in one consistent place — no matter which tool is
 // running or whether that tool's settings happen to be open right now.
-function RenderingIndicator({ label, visible }: { label?: string; visible: boolean }) {
+function RenderingIndicator({ label: _label, visible }: { label?: string; visible: boolean }) {
 	return (
 		<span
 			style={{
@@ -326,8 +392,66 @@ function RenderingIndicator({ label, visible }: { label?: string; visible: boole
 					animation: "seg-effect-render-pulse 0.9s ease-in-out infinite",
 				}}
 			/>
-			{label ? `${label} — applying…` : "Applying…"}
+			{/* Plain "Applying…" — no tool-name prefix (e.g. "Islands —
+			    applying…"), same reasoning as the guided-flow label being
+			    hidden once busy above: the dot itself already lives right
+			    next to whichever tool triggered it, so naming it again here
+			    was redundant. `label` is still accepted for callers that
+			    pass one, just no longer rendered. */}
+			Applying…
 		</span>
+	);
+}
+
+/** First-use popup listing the annotation keyboard shortcuts, portaled to
+ *  <body> and centered over the whole viewer (not anchored to the ribbon —
+ *  it's a one-time orientation card, not a per-tool flyout). Shown once
+ *  (see SHORTCUTS_INTRO_SEEN_KEY) the moment the annotation toolbar opens. */
+function ShortcutsIntroPopup({ onDismiss }: { onDismiss: () => void }) {
+	return createPortal(
+		<div
+			className="atb-shortcuts-overlay"
+			onMouseDown={(e) => { if (e.target === e.currentTarget) onDismiss(); }}
+		>
+			<div className="atb-shortcuts-card" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+				<div className="atb-shortcuts-card__header">
+					<div>
+						<p className="atb-shortcuts-card__title">Keyboard shortcuts</p>
+						<p className="atb-shortcuts-card__subtitle">Some shortcuts to help you while annotating.</p>
+					</div>
+					<button type="button" className="atb-shortcuts-card__close" onClick={onDismiss} aria-label="Close">
+						<IconCheck size={0} style={{ display: "none" }} />
+						×
+					</button>
+				</div>
+				<div className="atb-shortcuts-card__body">
+					{SHORTCUT_GROUPS.map((group) => (
+						<div className="atb-shortcuts-group" key={group.label}>
+							<p className="atb-shortcuts-group__label">{group.label}</p>
+							{group.rows.map((row) => (
+								<div className="atb-shortcuts-row" key={row.label}>
+									<span className="atb-shortcuts-row__label">{row.label}</span>
+									<span className="atb-shortcuts-row__keys">
+										{row.keys.map((k, i) => (
+											<span key={k + i} style={{ display: "inline-flex", alignItems: "center" }}>
+												{i > 0 && <span className="atb-shortcuts-row__keys-sep">+</span>}
+												<span className="atb-kbd">{k}</span>
+											</span>
+										))}
+									</span>
+								</div>
+							))}
+						</div>
+					))}
+				</div>
+				<div className="atb-shortcuts-card__footer">
+					<button type="button" className="atb-shortcuts-card__got-it" onClick={onDismiss}>
+						Got it
+					</button>
+				</div>
+			</div>
+		</div>,
+		document.body
 	);
 }
 export default function AnnotationToolbar({
@@ -336,11 +460,63 @@ export default function AnnotationToolbar({
 	renderFlyout, scissorsPointCount, onScissorsCancel, maskingArea,
 	onMaskingAreaChange, hasAnySegments, scopeLocked, isRendering, isDeletingSegment,
 	targetKey, showOnlyTargetMask, onShowOnlyTargetMaskChange,
-	popupRef, popupDragRef, popupMinRef, 
+	popupRef, popupDragRef, popupMinRef, anchorRef,
 }: AnnotationToolbarProps) {
 	const [hoveredTool, setHoveredTool] = useState<string | null>(null);
 	const [hoveredRect, setHoveredRect] = useState<DOMRect | null>(null);
 	const iconRefs = useRef<Record<string, HTMLElement | null>>({});
+	// Just the icon <button> itself, keyed the same as iconRefs — needed
+	// only for LIVE_COMMIT_TOOLS, whose wrapper div also contains the
+	// separate FlyoutArrow chevron beside the icon. Anchoring the settings
+	// flyout to that wrapper (as iconRefs alone would) meant the computed
+	// center included the arrow's own width, so the flyout's pointer sat
+	// visibly right of the icon's true center instead of directly under
+	// it. Anchoring to the icon button alone keeps the pointer centered on
+	// the icon regardless of the arrow sitting beside it.
+	const btnRefs = useRef<Record<string, HTMLElement | null>>({});
+
+	// Measures the annotate/pencil button's horizontal center (in viewport
+	// px) so the ribbon can visually "branch off" from it — the clip-path
+	// reveal and the little pointer triangle below both key off this same
+	// number. A plain window "resize" listener isn't enough on its own:
+	// the topbar wraps to multiple rows on narrow screens (moving the
+	// button vertically too), and plenty of things can shift the button's
+	// x-position without ever firing a window resize event at all — the
+	// AI sidebar opening/closing, a webfont finishing load, other topbar
+	// icons changing count. A ResizeObserver on the button itself (and its
+	// offset parent, so a parent-driven reflow that leaves the button's
+	// own size unchanged still gets caught) covers those; the short
+	// interval is the same belt-and-suspenders fallback used above for
+	// the walkthrough spotlight and the pick-class hint, for the rare
+	// layout change neither observer sees. Kept running any time the
+	// ribbon is open OR closing, so the pointer never gets left stranded
+	// at a stale position from before a resize.
+	const [anchorX, setAnchorX] = useState<number | null>(null);
+	useLayoutEffect(() => {
+		const measure = () => {
+			const el = anchorRef?.current;
+			if (!el) { setAnchorX(null); return; }
+			const rect = el.getBoundingClientRect();
+			setAnchorX(rect.left + rect.width / 2);
+		};
+		measure();
+		window.addEventListener("resize", measure);
+		window.addEventListener("scroll", measure, true);
+		const el = anchorRef?.current;
+		const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+		if (ro && el) {
+			ro.observe(el);
+			if (el.parentElement) ro.observe(el.parentElement);
+		}
+		const id = window.setInterval(measure, 250);
+		return () => {
+			window.removeEventListener("resize", measure);
+			window.removeEventListener("scroll", measure, true);
+			ro?.disconnect();
+			window.clearInterval(id);
+		};
+	}, [anchorRef, open]);
+
 
 	// --- Walkthrough ----------------------------------------------------------
 	// One overview tour that auto-opens on first visit (see effect below).
@@ -354,6 +530,18 @@ export default function AnnotationToolbar({
 	const [firstTargetHintOpen, setFirstTargetHintOpen] = useState(false);
 	const [firstTargetHintRect, setFirstTargetHintRect] = useState<DOMRect | null>(null);
 	const prevHasActiveTargetRef = useRef(hasActiveTarget);
+	// First-use shortcuts popup — shown the first time any tool icon in the
+	// ribbon is clicked (once a target class is already active, since a
+	// disabled icon click goes through pickClassHintOpen instead).
+	const [shortcutsIntroOpen, setShortcutsIntroOpen] = useState(false);
+	// "Explain Continue/Start over/Exit" — shown the first time a guided flow
+	// (Grow from Seeds, Copy/Fill-across-slices, Islands' pick ops) actually
+	// surfaces those controls, once per flow family per session.
+	const [guidedHintOpen, setGuidedHintOpen] = useState(false);
+	const [guidedHintRect, setGuidedHintRect] = useState<DOMRect | null>(null);
+	const [guidedHintText, setGuidedHintText] = useState<string>("");
+	const guidedControlsBoxRef = useRef<HTMLDivElement>(null);
+	const prevGuidedControlsRef = useRef<GuidedFlowControls | null>(null);
 	const [, setPanelRect] = useState<DOMRect | null>(null);
 	const [, setPanelDragRect] = useState<DOMRect | null>(null);
 	const [, setDockRect] = useState<DOMRect | null>(null);
@@ -465,7 +653,10 @@ export default function AnnotationToolbar({
 	const openToolSettings = (tool: Exclude<PrimaryEditTool, null>) => {
 		if (!hasSegments || !hasActiveTarget) return;
 		if (activeTool !== tool) onToolChange(tool);
-		toolFlyout.anchorRef.current = iconRefs.current[tool] ?? null;
+		// LIVE_COMMIT_TOOLS anchor to their own icon button (btnRefs) so
+		// the flyout centers on the icon, not the wider icon+arrow
+		// wrapper — see the btnRefs comment above for why.
+		toolFlyout.anchorRef.current = btnRefs.current[tool] ?? iconRefs.current[tool] ?? null;
 		toolFlyout.setOpen(true);
 	};
 	const showTooltip = useCallback((id: string) => {
@@ -521,9 +712,27 @@ export default function AnnotationToolbar({
 		if (hasActiveTarget) return;
 		let alreadySeen = false;
 		try {
-			alreadySeen = typeof window !== "undefined" && window.localStorage.getItem(OVERVIEW_WALKTHROUGH_SEEN_KEY) === "1";
-		} catch { /* localStorage unavailable — just show it */ }
+			alreadySeen = typeof window !== "undefined" && window.sessionStorage.getItem(OVERVIEW_WALKTHROUGH_SEEN_KEY) === "1";
+		} catch { /* sessionStorage unavailable — just show it */ }
 		if (!alreadySeen) setOverviewWalkthroughOpen(true);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open]);
+
+	// Shortcuts popup: fires the moment the annotation toolbar itself is
+	// opened (the "Annotate" button in the main topbar, alongside
+	// Measurements/AI) — not tied to picking a class or clicking a tool
+	// icon. Once per session via SHORTCUTS_INTRO_SEEN_KEY.
+	useEffect(() => {
+		if (!open) return;
+		let alreadySeen = false;
+		try {
+			alreadySeen = typeof window !== "undefined" && window.sessionStorage.getItem(SHORTCUTS_INTRO_SEEN_KEY) === "1";
+		} catch { /* sessionStorage unavailable — just show it */ }
+		if (alreadySeen) return;
+		setShortcutsIntroOpen(true);
+		try {
+			if (typeof window !== "undefined") window.sessionStorage.setItem(SHORTCUTS_INTRO_SEEN_KEY, "1");
+		} catch { /* not worth blocking on */ }
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open]);
 
@@ -566,12 +775,12 @@ export default function AnnotationToolbar({
 		if (wasActive || !hasActiveTarget) return;
 		let alreadySeen = false;
 		try {
-			alreadySeen = typeof window !== "undefined" && window.localStorage.getItem(FIRST_TARGET_HINT_SEEN_KEY) === "1";
-		} catch { /* localStorage unavailable — just show it */ }
+			alreadySeen = typeof window !== "undefined" && window.sessionStorage.getItem(FIRST_TARGET_HINT_SEEN_KEY) === "1";
+		} catch { /* sessionStorage unavailable — just show it */ }
 		if (alreadySeen) return;
 		setFirstTargetHintOpen(true);
 		try {
-			if (typeof window !== "undefined") window.localStorage.setItem(FIRST_TARGET_HINT_SEEN_KEY, "1");
+			if (typeof window !== "undefined") window.sessionStorage.setItem(FIRST_TARGET_HINT_SEEN_KEY, "1");
 		} catch { /* not worth blocking on */ }
 	}, [hasActiveTarget]);
 
@@ -635,6 +844,7 @@ export default function AnnotationToolbar({
 	useEffect(() => {
 		if (!activeTool) setGuidedControls(null);
 	}, [activeTool]);
+	useEffect(() => () => { if (continueWarningTimerRef.current) window.clearTimeout(continueWarningTimerRef.current); }, []);
 
 	// Keeps the "Applying…" dot mounted for a beat after `isRendering` goes
 	// false so it can fade out via CSS instead of vanishing mid-pulse.
@@ -689,7 +899,36 @@ export default function AnnotationToolbar({
 	// instead of `open` gating a hard unmount that couldn't animate out.
 	return createPortal(
 		<>
-		<div className={`atb-shell ${open ? "is-open" : "is-closed"}`}>
+		{/* Little pointer connecting the ribbon visually back to the
+		    Annotate button it branched off of — kept OUTSIDE .atb-shell
+		    (rather than as its first child, which is where this used to
+		    live) and given its own z-index above .vp-topbar's 55. Being
+		    stacked inside .atb-shell capped the whole pointer at the
+		    shell's own z-index (50), so the topbar — deliberately raised
+		    above the shell so ITS tooltips render over the open ribbon —
+		    was painting over the pointer's tip and swallowing it right as
+		    it reached up toward the Annotate button. Only meaningful once
+		    we actually know where that button is. */}
+		{anchorX != null && (
+			<div className={`atb-shell__connector ${open ? "is-open" : "is-closed"}`} aria-hidden="true">
+				<span className="atb-shell__pointer" style={{ left: anchorX }} />
+			</div>
+		)}
+		<div
+			className={`atb-shell ${open ? "is-open" : "is-closed"}`}
+			style={anchorX != null ? {
+				// Grows outward from the annotate button's own x-position
+				// instead of just fading in flat — a genuine "branching off
+				// the button" reveal. clip-path circle() with matching
+				// function/param shape on both ends is what lets the browser
+				// actually animate between them (see .atb-shell.is-open /
+				// .is-closed in AnnotationToolbar.css for the transition).
+				clipPath: open
+					? `circle(150% at ${anchorX}px 0%)`
+					: `circle(0% at ${anchorX}px 0%)`,
+				["--atb-anchor-x" as string]: `${anchorX}px`,
+			} : undefined}
+		>
 		<div
 			ref={dockElRef}
 			className={`atb atb--horizontal ${!enabled ? "atb--disabled" : ""}`}
@@ -712,6 +951,7 @@ export default function AnnotationToolbar({
 							onMouseLeave={() => hideTooltip(id)}
 						>
 							<button
+								ref={(el) => { if (hasSettingsArrow) btnRefs.current[id] = el; }}
 								className={`atb__btn ${activeTool === id ? "is-active" : ""}`}
 								onClick={() => { if (enabled) selectTool(id); else setPickClassHintOpen(true); }}
 								aria-label={label}
@@ -760,6 +1000,7 @@ export default function AnnotationToolbar({
 			    Copy/Fill-across-slices) — fixed in the ribbon, not floating over the canvas. */}
 			{guidedControls && (
 				<div
+					ref={guidedControlsBoxRef}
 					style={{
 						flexShrink: 0,
 						display: "flex",
@@ -770,6 +1011,16 @@ export default function AnnotationToolbar({
 						borderLeft: "1px solid rgba(255, 255, 255, 0.09)",
 					}}
 				>
+					{/* Local, self-contained keyframes for the Continue button's
+					    glow-pulse below — kept here rather than in the shared
+					    stylesheet since it's only ever used by this one button. */}
+					<style>{`
+						@keyframes seg-effect-continue-pulse {
+							0% { box-shadow: 0 0 0 0 rgba(104, 172, 229, 0.55); }
+							70% { box-shadow: 0 0 0 8px rgba(104, 172, 229, 0); }
+							100% { box-shadow: 0 0 0 0 rgba(104, 172, 229, 0); }
+						}
+					`}</style>
 					<span
 						style={{
 							fontFamily: "\"JetBrains Mono\", ui-monospace, monospace",
@@ -813,34 +1064,14 @@ export default function AnnotationToolbar({
 							<button
 								type="button"
 								onClick={guidedControls.onStartOver}
-								style={{
-									background: "rgba(255,255,255,0.08)",
-									border: "1px solid rgba(255,255,255,0.14)",
-									borderRadius: 999,
-									color: "rgba(255,255,255,0.8)",
-									cursor: "pointer",
-									fontSize: 11.5,
-									fontWeight: 700,
-									padding: "6px 12px",
-									whiteSpace: "nowrap",
-								}}
+								className="atb-guided__btn atb-guided__btn--startover"
 							>
 								Start over
 							</button>
 							<button
 								type="button"
 								onClick={guidedControls.onExit}
-								style={{
-									background: "rgba(0, 0, 0, 0.16)",
-									border: "1px solid rgba(0, 0, 0, 0.45)",
-									borderRadius: 999,
-									color: "#ffffff",
-									cursor: "pointer",
-									fontSize: 11.5,
-									fontWeight: 800,
-									padding: "6px 12px",
-									whiteSpace: "nowrap",
-								}}
+								className="atb-guided__btn atb-guided__btn--exit"
 							>
 								Exit
 							</button>
@@ -1120,6 +1351,70 @@ export default function AnnotationToolbar({
 			</>
 		)}
 
+
+		{shortcutsIntroOpen && <ShortcutsIntroPopup onDismiss={() => setShortcutsIntroOpen(false)} />}
+
+		{open && guidedHintOpen && guidedHintRect && (
+			<>
+				{/* Same dashed-spotlight treatment as the pick-class/first-target
+				    hints above, but wrapping the Continue/Start over/Exit cluster
+				    itself so it's obvious which controls the card is describing. */}
+				<div
+					aria-hidden="true"
+					style={{
+						position: "fixed",
+						top: guidedHintRect.top - 8,
+						left: guidedHintRect.left - 8,
+						width: guidedHintRect.width + 16,
+						height: guidedHintRect.height + 16,
+						border: "2px dashed var(--jhu-blue-light, #68ACE5)",
+						borderRadius: 12,
+						pointerEvents: "none",
+						zIndex: 120,
+						boxShadow: "0 0 0 4000px rgba(0,0,0,0.35)",
+					}}
+				/>
+				<div
+					role="dialog"
+					aria-label="Guided flow controls"
+					style={{
+						position: "fixed",
+						top: guidedHintRect.bottom + 10,
+						left: Math.max(12, Math.min(guidedHintRect.left, window.innerWidth - 292)),
+						width: 260,
+						background: "#16181d",
+						border: "1px solid rgba(255,255,255,0.14)",
+						borderRadius: 12,
+						boxShadow: "0 18px 44px -12px rgba(0,0,0,0.75)",
+						padding: "14px 16px",
+						zIndex: 121,
+						color: "#fff",
+					}}
+				>
+					<div style={{ fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.9)" }}>
+						{guidedHintText}
+					</div>
+					<button
+						type="button"
+						onClick={dismissGuidedHint}
+						style={{
+							marginTop: 12,
+							width: "100%",
+							background: "#fff",
+							color: "#08090b",
+							border: "none",
+							borderRadius: 8,
+							fontSize: 12.5,
+							fontWeight: 700,
+							padding: "8px 0",
+							cursor: "pointer",
+						}}
+					>
+						Got it
+					</button>
+				</div>
+			</>
+		)}
 
 		</>,
 		document.body
