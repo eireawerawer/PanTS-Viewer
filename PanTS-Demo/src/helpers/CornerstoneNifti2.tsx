@@ -813,10 +813,18 @@ export function createNewAnnotationClass(
 }
 
 
-// Brush radius in world mm (applies to both the brush and eraser instances).
-export function setMaskBrushSize(mm: number) {
+// Cornerstone's setBrushSizeForToolGroup takes a RADIUS in world mm, but
+// everywhere in our own UI (the slider, its label, the dashed size-preview
+// overlay) treats the value as a DIAMETER — that's what "Brush Size: 10mm"
+// and a 10mm-wide preview circle mean to the user. Passing the diameter
+// straight through as if it were the radius was making the actually-painted
+// circle twice as wide as the size the user picked (and than the preview
+// overlay showed), which is why the preview never matched what landed on
+// the segmentation. Halve it here, at the one place diameter becomes radius,
+// so every caller can keep speaking in diameter mm.
+export function setMaskBrushSize(diameterMm: number) {
   try {
-    cornerstoneTools.utilities.segmentation.setBrushSizeForToolGroup(toolGroupId, mm);
+    cornerstoneTools.utilities.segmentation.setBrushSizeForToolGroup(toolGroupId, diameterMm / 2);
   } catch {
     /* tool group not ready */
   }
@@ -2805,27 +2813,110 @@ export function applyMargin(
   const segVolume = cache.getVolume(segmentationId);
   if (!segVolume) return null;
   const spacing = segVolume.spacing as number[];
-  const avgSpacing = (spacing[0] + spacing[1] + spacing[2]) / 3;
-  // Clamp to a sane range: guards against NaN/Infinity if spacing is
-  // degenerate, and against a runaway iteration count for extreme mm inputs.
-  // (BFS in _morphDistanceMask is O(volume) regardless of iteration count,
-  // so this cap is a sanity/UX limit rather than a perf necessity now — but
-  // there's no reason to march further than the volume can possibly span.)
-  const rawIterations = marginMm / avgSpacing;
-  const iterations = Number.isFinite(rawIterations) ? Math.min(2000, Math.max(1, Math.round(rawIterations))) : 1;
+  // Convert mm -> voxel-iteration count SEPARATELY per axis, the same way
+  // getActualMarginMm already does for its "Actual: X x Y x Zmm" readout.
+  // The previous version averaged spacing[0..2] into one number and applied
+  // that single iteration count isotropically to all three axes. That's
+  // only correct for isotropic volumes — real CT volumes are frequently
+  // anisotropic (e.g. ~0.7mm in-plane vs 3-5mm slice thickness), so
+  // averaging silently made the operation overshoot the requested margin on
+  // the coarse axis (or undershoot on the fine ones) while never matching
+  // what the "Actual" readout next to it claimed. Clamp per axis for the
+  // same reasons as before: guard NaN/Infinity from degenerate spacing, and
+  // cap runaway iteration counts for extreme mm inputs.
+  const iterationsPerAxis = [0, 1, 2].map((axis) => {
+    const raw = marginMm / spacing[axis];
+    return Number.isFinite(raw) ? Math.min(2000, Math.max(1, Math.round(raw))) : 1;
+  }) as [number, number, number];
   const targets = applyToVisibleSegments && visibleSegmentIndices.length ? visibleSegmentIndices : [_activeEditSegment];
 
   let total = 0;
   const savedActive = _activeEditSegment;
   for (const segmentIndex of targets) {
     _activeEditSegment = segmentIndex;
-    const r = operation === "grow"
-      ? dilateActiveSegment(iterations, 6, undefined, maskFilter)
-      : erodeActiveSegment(iterations, 6, undefined, maskFilter);
+    const r = _applyAnisotropicMorphSequence(operation === "grow" ? "dilate" : "erode", iterationsPerAxis, maskFilter);
     if (r) total += r.changedVoxels;
   }
   _activeEditSegment = savedActive;
   return { changedVoxels: total };
+}
+
+// Axis-only offset pairs (no diagonals) — growth/shrink by a box-shaped
+// structuring element with a possibly-different radius per axis is
+// separable: doing three sequential single-axis passes, each with its own
+// iteration count, is mathematically exact (order doesn't matter for
+// min/max filters with a box element), unlike trying to encode three
+// different radii into one combined multi-axis BFS "level".
+const _AXIS_OFFSETS: number[][][] = [
+  [[1, 0, 0], [-1, 0, 0]],
+  [[0, 1, 0], [0, -1, 0]],
+  [[0, 0, 1], [0, 0, -1]],
+];
+
+function _applyAnisotropicMorphSequence(
+  mode: "dilate" | "erode",
+  iterationsPerAxis: [number, number, number],
+  maskFilter: MaskFilter = () => true
+): { changedVoxels: number } | null {
+  const segVolume = cache.getVolume(segmentationId);
+  const vm = segVolume?.voxelManager as any;
+  if (!segVolume || !vm) return null;
+  const activeSegment = _activeEditSegment;
+
+  const maxIter = Math.max(...iterationsPerAxis);
+  const margin = maxIter + 1;
+  const bbox = _segBBox(vm, activeSegment, margin);
+  if (!bbox) return null;
+  const { i0, i1, j0, j1, k0, k1 } = bbox;
+  const w = i1 - i0 + 1, h = j1 - j0 + 1, d = k1 - k0 + 1;
+  const idxLocal = (i: number, j: number, k: number) => (i - i0) + (j - j0) * w + (k - k0) * w * h;
+
+  const original = new Uint8Array(w * h * d);
+  for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++)
+    if (vm.getAtIJK(i, j, k) === activeSegment) original[idxLocal(i, j, k)] = 1;
+
+  // Split by CONNECTED COMPONENT, not by the whole segment's bbox — an
+  // annotation drawn on a single axial/sagittal/coronal slice has zero
+  // thickness on that axis, and a box structuring element strips a
+  // one-slice-thin blob in a single erode iteration (both neighbors along
+  // that axis are background, so the entire slice reads as "boundary").
+  // Growth is just as meaningless there — it bleeds the shape onto empty
+  // adjacent slices instead of refining anything visible on the slice being
+  // edited. "thin" components are left untouched below; "thick" (genuinely
+  // 3D) components go through erode/dilate as normal, even when they share
+  // a segment class with a thin one elsewhere in the volume.
+  const { thick, thin } = _splitThinComponents(original, w, h, d);
+
+  let cur = thick;
+  for (let axis = 0; axis < 3; axis++) {
+    const iterations = iterationsPerAxis[axis];
+    if (iterations <= 0) continue;
+    cur = _morphDistanceMask(cur, w, h, d, _AXIS_OFFSETS[axis], iterations, mode);
+  }
+  // Thin components are never grown or shrunk — restore them verbatim.
+  for (let li = 0; li < cur.length; li++) if (thin[li]) cur[li] = 1;
+
+  const changes: Array<{ i: number; j: number; k: number; prev: number; next: number }> = [];
+  for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+    const li = idxLocal(i, j, k);
+    if (!maskFilter(i, j, k)) continue; // <-- global masking gate
+    const wantFg = cur[li] === 1;
+    const existing = vm.getAtIJK(i, j, k);
+    if (wantFg && existing !== activeSegment) {
+      if (existing !== 0) continue;
+      changes.push({ i, j, k, prev: existing, next: activeSegment });
+    } else if (!wantFg && existing === activeSegment) {
+      changes.push({ i, j, k, prev: existing, next: 0 });
+    }
+  }
+  if (!changes.length) return { changedVoxels: 0 };
+  for (const c of changes) vm.setAtIJK(c.i, c.j, c.k, c.next);
+  _pushFillHistory({
+    undo: () => { for (const c of changes) vm.setAtIJK(c.i, c.j, c.k, c.prev); _notifySegmentationChanged(); },
+    redo: () => { for (const c of changes) vm.setAtIJK(c.i, c.j, c.k, c.next); _notifySegmentationChanged(); },
+  });
+  _notifySegmentationChanged();
+  return { changedVoxels: changes.length };
 }
 // Actual physical margin size given the current pixel-space (for the "Actual: 2.5 x 2.5 x 2.4mm" readout).
 export function getActualMarginMm(marginMm: number): { mm: [number, number, number]; voxels: [number, number, number] } | null {
@@ -2894,21 +2985,29 @@ export function applyHollow(
   const iterations = Number.isFinite(rawIterations) ? Math.min(2000, Math.max(1, Math.round(rawIterations))) : 1;
 
   const margin = iterations + 1;
-  const tight = _segBBox(vmGlobal, activeSegment, 0);
-  const thinAxis = tight ? _tightExtentAxis(tight.i0, tight.i1, tight.j0, tight.j1, tight.k0, tight.k1) : null;
   const bbox = _segBBox(vmGlobal, activeSegment, margin);
   if (!bbox) return null;
   const { i0, i1, j0, j1, k0, k1 } = bbox;
   const w = i1 - i0 + 1, h = j1 - j0 + 1, d = k1 - k0 + 1;
   const idxLocal = (i: number, j: number, k: number) => (i - i0) + (j - j0) * w + (k - k0) * w * h;
 
-  const offsets = _filterOffsetsAxis(connectivity === 6 ? _OFFSETS6 : _OFFSETS26, thinAxis);
+  const offsets = connectivity === 6 ? _OFFSETS6 : _OFFSETS26;
 
   const orig = new Uint8Array(w * h * d);
   for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++)
     if (vmGlobal.getAtIJK(i, j, k) === activeSegment) orig[idxLocal(i, j, k)] = 1;
 
-  const shell = _hollowShellMask(orig, w, h, d, offsets, surface, iterations);
+  // Split by CONNECTED COMPONENT, not by the whole segment's bbox — see
+  // _splitThinComponents. Hollow is a shell-of-a-3D-volume operation:
+  // "inside"/"outside" turn a solid into a thin shell by eroding/dilating
+  // through the object's own thickness, which doesn't mean anything for a
+  // blob that's only one voxel thick on some axis. Thin components are left
+  // exactly as they are (no shell carved out of them); thick components are
+  // hollowed as normal, even when they share a class with a thin blob
+  // elsewhere in the volume.
+  const { thick, thin } = _splitThinComponents(orig, w, h, d);
+  const shell = _hollowShellMask(thick, w, h, d, offsets, surface, iterations);
+  for (let li = 0; li < shell.length; li++) if (thin[li]) shell[li] = 1;
 
   const changes: Array<{ i: number; j: number; k: number; prev: number; next: number }> = [];
   for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
@@ -2997,12 +3096,20 @@ export function applyIslandsOperation(
         if (selectedLabel !== -1 && label === selectedLabel) changes.push({ i, j, k, prev: existing, next: 0 });
         break;
       case "splitToSegments": {
+        // The largest island IS the original class — it keeps living under
+        // `activeSegment` (no voxel change needed for it), exactly like
+        // splitting a custom-made class does. Only the smaller islands are
+        // peeled off into fresh Class_N segments; without this check every
+        // component (largest included) got reassigned to a new id and the
+        // original class vanished entirely instead of just shedding its
+        // extra islands.
+        if (label === largestLabel) break;
         if (!newLabelForComponent.has(label)) {
           const nextIdx = _getNextAvailableSegmentIndex() + newLabelForComponent.size;
           newLabelForComponent.set(label, nextIdx);
         }
         const target = newLabelForComponent.get(label)!;
-        if (target !== activeSegment) changes.push({ i, j, k, prev: existing, next: target });
+        changes.push({ i, j, k, prev: existing, next: target });
         break;
       }
     }
@@ -3021,7 +3128,7 @@ export function applyIslandsOperation(
     newSegmentsCreated = newLabelForComponent.size;
     for (const newIdx of newLabelForComponent.values()) {
       const color = colorForNewClass(newIdx);
-      const label = `Segment_${newIdx}`;
+      const label = `Class_${newIdx}`;
       registerNewSegmentColor(newIdx, color);
       _customSegmentLabels[newIdx] = label;
       createdSegments.push({ id: newIdx, label, color });
@@ -3064,6 +3171,56 @@ function _segBBox(vm: any, segmentIndex: number, margin: number) {
     j0: Math.max(0, j0 - margin), j1: Math.min(dimY - 1, j1 + margin),
     k0: Math.max(0, k0 - margin), k1: Math.min(dimZ - 1, k1 + margin),
   };
+}
+
+// Splits a local (already-cropped-to-bbox) binary mask into "thick" and
+// "thin" halves by CONNECTED COMPONENT, not by the mask's overall bbox.
+// This is the fix for margin/smoothing/hollow deleting a one-slice
+// annotation that lives inside an otherwise-3D segment class: the old guards
+// measured the extent of the whole segment (every voxel sharing that
+// class/index anywhere in the volume), so a single-slice blob only got
+// protected when it happened to be the ONLY thing with that class index.
+// Any other paint elsewhere under the same class — even unrelated to what's
+// visible on screen — made the whole-segment extent >1 and silently
+// disabled the guard. Per-component extent is what "3D structure" actually
+// means: each connected blob is checked on its own, so a thin island is
+// protected even when it shares a class with a genuinely 3D blob elsewhere,
+// and a genuinely 3D blob is still fully eroded/smoothed/hollowed as normal.
+function _splitThinComponents(mask: Uint8Array, w: number, h: number, d: number): { thick: Uint8Array; thin: Uint8Array; hasThin: boolean } {
+  const n = w * h * d;
+  const labels = new Int32Array(n).fill(-1);
+  const thick = new Uint8Array(n);
+  const thin = new Uint8Array(n);
+  let hasThin = false;
+  for (let start = 0; start < n; start++) {
+    if (!mask[start] || labels[start] !== -1) continue;
+    labels[start] = start;
+    const stack = [start];
+    const comp: number[] = [start];
+    let i0 = w, i1 = -1, j0 = h, j1 = -1, k0 = d, k1 = -1;
+    while (stack.length) {
+      const lin = stack.pop()!;
+      const k = Math.floor(lin / (w * h));
+      const rem = lin - k * w * h;
+      const j = Math.floor(rem / w);
+      const i = rem - j * w;
+      if (i < i0) i0 = i; if (i > i1) i1 = i;
+      if (j < j0) j0 = j; if (j > j1) j1 = j;
+      if (k < k0) k0 = k; if (k > k1) k1 = k;
+      for (const [di, dj, dk] of _OFFSETS6) {
+        const ni = i + di, nj = j + dj, nk = k + dk;
+        if (ni < 0 || ni >= w || nj < 0 || nj >= h || nk < 0 || nk >= d) continue;
+        const nli = ni + nj * w + nk * w * h;
+        if (mask[nli] && labels[nli] === -1) { labels[nli] = start; stack.push(nli); comp.push(nli); }
+      }
+    }
+    const extX = i1 - i0 + 1, extY = j1 - j0 + 1, extZ = k1 - k0 + 1;
+    const isThin = extX === 1 || extY === 1 || extZ === 1;
+    if (isThin) hasThin = true;
+    const dest = isThin ? thin : thick;
+    for (const li of comp) dest[li] = 1;
+  }
+  return { thick, thin, hasThin };
 }
 
 function _tightExtentAxis(i0:number,i1:number,j0:number,j1:number,k0:number,k1:number): number | null {
@@ -4300,44 +4457,82 @@ export function applySmoothing(
     const { i0, i1, j0, j1, k0, k1 } = bbox;
     const w = i1 - i0 + 1, h = j1 - j0 + 1, d = k1 - k0 + 1;
     const idxLocal = (i: number, j: number, k: number) => (i - i0) + (j - j0) * w + (k - k0) * w * h;
-    let cur = new Uint8Array(w * h * d);
     let originalCount = 0;
-    // Track the segment's own TRUE extent (unpadded) per axis — this is what
-    // the kernel radius must be capped against, not the padded bbox below.
-    let ti0 = i1, ti1 = i0, tj0 = j1, tj1 = j0, tk0 = k1, tk1 = k0;
+    const wholeSegMask = new Uint8Array(w * h * d);
     for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++)
       if (vm.getAtIJK(i, j, k) === segmentIndex) {
-        cur[idxLocal(i, j, k)] = 1; originalCount++;
-        if (i < ti0) ti0 = i; if (i > ti1) ti1 = i;
-        if (j < tj0) tj0 = j; if (j > tj1) tj1 = j;
-        if (k < tk0) tk0 = k; if (k > tk1) tk1 = k;
+        wholeSegMask[idxLocal(i, j, k)] = 1; originalCount++;
       }
     if (originalCount === 0) continue;
+
+    // Split by CONNECTED COMPONENT, not by the whole segment's bbox — a
+    // segment confined to a single slice along any axis (an annotation
+    // drawn on just one axial/sagittal/coronal slice) is inherently 2D, and
+    // even a per-axis-capped 3D median filter still runs its in-plane
+    // radius across that thin sliver, wiping every voxel's majority vote.
+    // Checking the whole class's extent missed this whenever the class had
+    // ANY other voxels elsewhere in the volume (even a genuinely-3D blob
+    // unrelated to the thin one) — that made the whole-segment extent >1 and
+    // silently let the thin blob through to be wiped. Per-component extent
+    // fixes that: each connected blob is judged on its own. "thin"
+    // components are left untouched below; "thick" (genuinely 3D)
+    // components go through the median filter as normal.
+    const { thick, thin, hasThin } = _splitThinComponents(wholeSegMask, w, h, d);
+    if (!thick.some((v) => v)) continue; // whole segment (in this bbox) was thin — nothing to smooth
+
+    // Recompute the TRUE extent from the thick voxels only — this is what
+    // the kernel radius must be capped against, not the padded bbox above
+    // and not the (possibly thin-inflated) whole-segment extent.
+    let ti0 = i1, ti1 = i0, tj0 = j1, tj1 = j0, tk0 = k1, tk1 = k0;
+    for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      if (!thick[idxLocal(i, j, k)]) continue;
+      if (i < ti0) ti0 = i; if (i > ti1) ti1 = i;
+      if (j < tj0) tj0 = j; if (j > tj1) tj1 = j;
+      if (k < tk0) tk0 = k; if (k > tk1) tk1 = k;
+    }
+    const trueExtentX = ti1 - ti0 + 1;
+    const trueExtentY = tj1 - tj0 + 1;
+    const trueExtentZ = tk1 - tk0 + 1;
 
     // A box-kernel majority filter is inherently erosive on convex boundaries
     // (curvature means the true surface always sits at <50% local occupancy),
     // so an oversized kernel relative to the segment eats straight through it.
-    // Critically, this isn't just about overall size: a segment confined to a
-    // single slice has a true z-extent of 1 voxel, so ANY z-radius >= 1 means
-    // the kernel's z-neighbors are entirely empty (the segment doesn't exist
-    // off that slice) and every voxel loses its majority vote regardless of
-    // how large the segment is in-plane — guaranteed full erasure. Capping
-    // per axis against the segment's own true extent (allowing radius 0, i.e.
-    // "don't smooth across an axis the object doesn't extend into") fixes
-    // both the general over-smoothing case and this single-slice case.
-    const segRx = Math.min(rx, Math.floor((ti1 - ti0 + 1) / 2));
-    const segRy = Math.min(ry, Math.floor((tj1 - tj0 + 1) / 2));
-    const segRz = Math.min(rz, Math.floor((tk1 - tk0 + 1) / 2));
+    // Capping per axis against the segment's own true extent (allowing
+    // radius 0, i.e. "don't smooth across an axis the object doesn't extend
+    // into") fixes the general over-smoothing case for segments that do span
+    // multiple slices.
+    const segRx = Math.min(rx, Math.floor(trueExtentX / 2));
+    const segRy = Math.min(ry, Math.floor(trueExtentY / 2));
+    const segRz = Math.min(rz, Math.floor(trueExtentZ / 2));
 
-    cur = _medianFilter3D(cur, w, h, d, segRx, segRy, segRz);
+    // Filter only the thick component(s) — thin ones are restored verbatim
+    // after, never passed through the filter at all.
+    const original = thick;
+    let filtered = _medianFilter3D(original, w, h, d, segRx, segRy, segRz);
+    let survivingCount = 0;
+    for (let v = 0; v < filtered.length; v++) if (filtered[v]) survivingCount++;
 
     // Safety net: smoothing should refine a boundary, never delete the
-    // segment outright. If the filtered result came back empty while the
-    // segment started non-empty, skip this segment untouched rather than
-    // wiping it.
-    let survivingCount = 0;
-    for (let v = 0; v < cur.length; v++) if (cur[v]) survivingCount++;
-    if (survivingCount === 0) continue;
+    // segment outright. A majority filter is erosive on anything thinner
+    // than its kernel. Instead of either wiping the segment or leaving it
+    // completely untouched (both of which look like "nothing smoothed"),
+    // back the radius down in unison one step at a time and retry until
+    // something survives — still smooths the edges, just as gently as it
+    // takes. Radius (0,0,0) is an identity pass, so this always terminates
+    // with the segment intact.
+    let curRx = segRx, curRy = segRy, curRz = segRz;
+    while (survivingCount === 0 && (curRx > 0 || curRy > 0 || curRz > 0)) {
+      curRx = Math.max(0, curRx - 1);
+      curRy = Math.max(0, curRy - 1);
+      curRz = Math.max(0, curRz - 1);
+      filtered = _medianFilter3D(original, w, h, d, curRx, curRy, curRz);
+      survivingCount = 0;
+      for (let v = 0; v < filtered.length; v++) if (filtered[v]) survivingCount++;
+    }
+    if (survivingCount === 0 && !hasThin) continue; // segment was already empty — nothing to do
+    let cur = filtered;
+    // Thin components are never smoothed — restore them verbatim.
+    for (let li = 0; li < cur.length; li++) if (thin[li]) cur[li] = 1;
 
     for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
       if (!maskFilter(i, j, k)) continue; // <-- gate

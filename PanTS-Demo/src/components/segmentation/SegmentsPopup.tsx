@@ -72,11 +72,6 @@ const MAX_SEGMENT_NAME_LENGTH = 40;
 // JS timers gate the real state change at the right moment.
 const EXIT_ANIM_MS = 200;
 
-// Slower close for the "Add class" form and inline edit row specifically
-// (see their .is-closing rules in SegmentsPopup.css), kept separate from
-// EXIT_ANIM_MS so it doesn't affect other close animations.
-const FORM_EXIT_ANIM_MS = 380;
-
 type PopupTab = "existing" | "custom";
 
 // Small curated swatch set for the color popover — Hopkins palette first,
@@ -193,6 +188,101 @@ function ColorPickerPopover({ value, onChange, onClose, anchorRef }: ColorPicker
 	);
 }
 
+// Alternative to the old grid-template-rows(0fr/1fr) collapse trick, which
+// read as "stuck halfway then vanishes" — that approach animates a CSS grid
+// track, but the *content itself* wasn't clipped to match at every instant
+// (an error line appearing/disappearing changes the natural height out from
+// under the grid animation, and the two could visibly desync), and the
+// close was driven by a JS setTimeout guessing the transition's real
+// duration rather than the transition itself, so a slow frame or a
+// mid-flight re-render could unmount the row before (or well after) it had
+// actually finished animating.
+//
+// This instead measures the *real* pixel height of the content (via the
+// inner ref's scrollHeight) and animates `max-height` directly to that
+// number, then releases it to `none` once open so dynamic content (an
+// error message showing up, the character-count line, etc.) can still grow
+// freely without being clipped. Closing reverses that: pin the current
+// height to a concrete px first (you can't transition away from `none`),
+// then flip to 0 on the next frame. Either direction's completion is driven
+// by the transition's own `onTransitionEnd`, not a timer, so there's no
+// duration to keep in sync with the CSS and no way for it to fire early or
+// late.
+interface CollapseProps {
+	/** true = expanded/open, false = animate closed. The caller keeps this
+	 *  component mounted for a beat after flipping to false (see
+	 *  `onExited`) so the close transition is visible instead of the row
+	 *  just disappearing. */
+	in: boolean;
+	/** Fires once the close transition has genuinely finished — the right
+	 *  moment for the caller to actually unmount this row/form. */
+	onExited?: () => void;
+	children: React.ReactNode;
+	className?: string;
+}
+
+function Collapse({ in: open, onExited, children, className = "" }: CollapseProps) {
+	const innerRef = useRef<HTMLDivElement>(null);
+	const [maxHeight, setMaxHeight] = useState<number | "none">(open ? "none" : 0);
+	const rafRef = useRef<number | null>(null);
+	const mountedRef = useRef(false);
+
+	useEffect(() => {
+		const el = innerRef.current;
+		if (!el) return;
+
+		// First paint: just reflect the initial state, nothing to animate
+		// yet (avoids an unwanted transition from 0 the instant a row that
+		// starts out open first mounts).
+		if (!mountedRef.current) {
+			mountedRef.current = true;
+			return;
+		}
+
+		if (open) {
+			// Opening: animate from wherever we are (0, most commonly) up to
+			// the content's real measured height.
+			setMaxHeight(el.scrollHeight);
+		} else {
+			// Closing: if we're currently sitting at `none` (fully open,
+			// content free to grow), pin that down to today's actual pixel
+			// height first — `none` can't be transitioned away from
+			// directly — then let the next frame drop it to 0 so the
+			// browser has a real numeric start point to animate from.
+			setMaxHeight(el.scrollHeight);
+			rafRef.current = requestAnimationFrame(() => setMaxHeight(0));
+		}
+		return () => {
+			if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+		};
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open]);
+
+	const handleTransitionEnd = (e: React.TransitionEvent<HTMLDivElement>) => {
+		if (e.target !== e.currentTarget || e.propertyName !== "max-height") return;
+		if (open) {
+			// Release the cap so content that changes height while open
+			// (error text, char-count line) isn't clipped or fighting a
+			// stale measured number.
+			setMaxHeight("none");
+		} else {
+			onExited?.();
+		}
+	};
+
+	return (
+		<div
+			className={`segpop__collapse ${open ? "is-open" : "is-closing"} ${className}`}
+			style={{ maxHeight: maxHeight === "none" ? "none" : `${maxHeight}px` }}
+			onTransitionEnd={handleTransitionEnd}
+		>
+			<div ref={innerRef} className="segpop__collapse-inner">
+				{children}
+			</div>
+		</div>
+	);
+}
+
 // Single compact "this is the current target" indicator, shared by both the
 // custom-class rows and the existing-organ rows so the two tabs read the
 // same way. Icon-only (with a tooltip) so it costs as little row width as
@@ -274,12 +364,14 @@ export default function SegmentsPopup({
 		root.style.setProperty("--atb-segpanel-w", open ? `${width}px` : "0px");
 	}, [open, width]);
 
-	const [tab, setTab] = useState<PopupTab>("existing");
+const [tab, setTab] = useState<PopupTab>("existing");
+
+  // `adding` drives the Collapse's `in` prop (expanded vs. animating
+  // closed); `addFormMounted` stays true for the extra beat it takes the
+  // close transition to actually finish, cleared only by Collapse's own
+  // `onExited` — so the form is never yanked out mid-animation.
 	const [adding, setAdding] = useState(false);
-	// Mirrors `adding` but lags behind on close so the add-form can play its
-	// fade/collapse-out transition before actually unmounting, instead of
-	// vanishing the instant Cancel/Add is pressed.
-	const [addFormClosing, setAddFormClosing] = useState(false);
+	const [addFormMounted, setAddFormMounted] = useState(false);
 	const [draftName, setDraftName] = useState("");
 	const [draftColor, setDraftColor] = useState(NEXT_COLOR_POOL[segments.length % NEXT_COLOR_POOL.length]);
 	const [createError, setCreateError] = useState("");
@@ -288,11 +380,11 @@ export default function SegmentsPopup({
 	// Combined name+color editor, opened via the pen icon (replaces the old
 	// double-click-to-rename-only flow — both fields are changed and
 	// confirmed together, in one place).
+	// `editingId` drives Collapse's `in` prop; `editRowMountedId` stays set
+	// (same pattern as addFormMounted above) until Collapse's `onExited`
+	// confirms the close transition has actually finished.
 	const [editingId, setEditingId] = useState<number | null>(null);
-	// Row whose edit form is mid-close (Save/Cancel just pressed) — kept
-	// mounted for one more frame so it can animate away instead of the row
-	// snapping straight back to its normal state.
-	const [editClosingId, setEditClosingId] = useState<number | null>(null);
+	const [editRowMountedId, setEditRowMountedId] = useState<number | null>(null);
 	const [editNameDraft, setEditNameDraft] = useState("");
 	const [editColorDraft, setEditColorDraft] = useState("#ffffff");
 	const [renameError, setRenameError] = useState<number | null>(null);
@@ -348,31 +440,29 @@ export default function SegmentsPopup({
 	const switchTab = (next: PopupTab) => {
 		setTab(next);
 		setAdding(false);
-		setAddFormClosing(false);
+		setAddFormMounted(false);
 		setCreateError("");
 		setEditingId(null);
-		setEditClosingId(null);
+		setEditRowMountedId(null);
 		setConfirmDeleteId(null);
 	};
 
 	const startAdd = () => {
 		setAdding(true);
-		setAddFormClosing(false);
+		setAddFormMounted(true);
 		setDraftName("");
 		setCreateError("");
 		setDraftColor(NEXT_COLOR_POOL[segments.length % NEXT_COLOR_POOL.length]);
 	};
 
-	// Plays the add-form's fade/collapse-out transition, then actually
-	// unmounts it — shared by both Cancel and a successful Add so closing
-	// always reads the same way regardless of why it's closing.
+	// Kicks off the add-form's collapse-out transition — shared by both
+	// Cancel and a successful Add so closing always reads the same way
+	// regardless of why it's closing. The form stays mounted (see
+	// `addFormMounted`) until Collapse's `onExited` fires below, once the
+	// animation has genuinely finished.
 	const closeAddForm = () => {
 		setAddColorPopoverOpen(false);
-		setAddFormClosing(true);
-		window.setTimeout(() => {
-			setAdding(false);
-			setAddFormClosing(false);
-		}, FORM_EXIT_ANIM_MS);
+		setAdding(false);
 	};
 
 	const commitAdd = (): boolean => {
@@ -402,19 +492,18 @@ export default function SegmentsPopup({
 
 	const startEdit = (id: number, currentName: string, currentColor: string) => {
 		setEditingId(id);
-		setEditClosingId(null);
+		setEditRowMountedId(id);
 		setEditNameDraft(currentName);
 		setEditColorDraft(currentColor);
 		setRenameError(null);
 	};
-	// Plays the edit row's fade-out transition before actually dropping back
-	// to the normal (non-editing) row, shared by Save and Cancel so both
-	// close the same way.
+	// Kicks off the edit row's collapse-out transition, shared by Save and
+	// Cancel so both close the same way. The row stays mounted until
+	// Collapse's `onExited` fires (see the render below), once the close
+	// transition has actually finished — no more setTimeout guessing.
 	const closeEdit = (id: number) => {
 		setEditColorPopoverOpen(false);
-		setEditingId(null);
-		setEditClosingId(id);
-		window.setTimeout(() => setEditClosingId((cur) => (cur === id ? null : cur)), FORM_EXIT_ANIM_MS);
+		setEditingId((cur) => (cur === id ? null : cur));
 	};
 	const cancelEdit = () => {
 		if (editingId == null) return;
@@ -524,17 +613,21 @@ export default function SegmentsPopup({
 									const active = isCustomActive(s.id);
 									const hex = colors[s.id] ?? "#ffffff";
 									const isEditing = editingId === s.id;
-									const isEditClosing = editClosingId === s.id;
+									const isEditRowMounted = editRowMountedId === s.id;
 
-									if (isEditing || isEditClosing) {
+									if (isEditRowMounted) {
 										const remaining = MAX_SEGMENT_NAME_LENGTH - editNameDraft.length;
 										return (
-											<div
+											<Collapse
 												key={s.id}
-												className={`segpop__row segpop__row--editing ${isEditClosing ? "is-closing" : ""}`}
-												onClick={(e) => e.stopPropagation()}
+												in={isEditing}
+												onExited={() => setEditRowMountedId((cur) => (cur === s.id ? null : cur))}
+												className="segpop__row segpop__row--editing"
 											>
-												<div className="segpop__row--editing-inner">
+												<div
+													className="segpop__row--editing-inner"
+													onClick={(e) => e.stopPropagation()}
+												>
 												{/* Swatch button opens the gradual color popover instead of the
 												    OS's own abrupt native picker — same swatch look as the static
 												    row, just clickable while editing. */}
@@ -585,7 +678,7 @@ export default function SegmentsPopup({
 													</button>
 												</div>
 												</div>
-											</div>
+											</Collapse>
 										);
 									}
 
@@ -647,9 +740,13 @@ export default function SegmentsPopup({
 									/>
 								)}
 
-								{adding ? (
-									<div className={`segpop__add-form ${addFormClosing ? "is-closing" : ""}`} ref={addClassRef}>
-										<div className="segpop__add-form-inner">
+								{addFormMounted ? (
+									<Collapse
+										in={adding}
+										onExited={() => setAddFormMounted(false)}
+										className="segpop__add-form"
+									>
+										<div className="segpop__add-form-inner" ref={addClassRef}>
 										<div style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}>
 											<div className="segpop__color-anchor">
 												<button
@@ -697,7 +794,7 @@ export default function SegmentsPopup({
 											</button>
 										</div>
 										</div>
-									</div>
+									</Collapse>
 								) : (
 									<div ref={addClassRef}>
 										<button className="segpop__new" onClick={startAdd}>

@@ -76,6 +76,29 @@ export default function IslandsPanel({
 }: IslandsPanelProps) {
 	const [minimumSize, setMinimumSize] = useState(1000);
 
+	// The Apply button's label shows this instead of `minimumSize` directly,
+	// so scrubbing the slider doesn't make the number jump around in the
+	// button on every pixel of drag — it eases toward the real value over a
+	// few frames instead, and only stops chasing once it's essentially
+	// there, so it always settles on the exact number.
+	const [displayedSize, setDisplayedSize] = useState(minimumSize);
+	useEffect(() => {
+		let raf: number;
+		const tick = () => {
+			setDisplayedSize((prev) => {
+				const delta = minimumSize - prev;
+				if (Math.abs(delta) < 1) return minimumSize;
+				raf = requestAnimationFrame(tick);
+				// Ease by a fixed fraction of the remaining distance each
+				// frame — fast when far off, gentle as it converges, and
+				// never so slow it feels laggy behind a fast slider drag.
+				return prev + delta * 0.25;
+			});
+		};
+		raf = requestAnimationFrame(tick);
+		return () => cancelAnimationFrame(raf);
+	}, [minimumSize]);
+
 	// Which pick-dependent operation is being picked for (keep vs. remove).
 	const [pickingFor, setPickingFor] = useState<IslandsOperation | null>(null);
 
@@ -301,7 +324,14 @@ export default function IslandsPanel({
 						ariaLabel="Minimum island size"
 					/>
 					<MenuDivider />
-					<ApplyButton onApply={runRemoveSmall} onDone={finishRemoveSmall} disabled={removingSmall} applyingLabel="Removing…" successLabel="Removed" />
+					<ApplyButton
+					onApply={runRemoveSmall}
+					onDone={finishRemoveSmall}
+					disabled={removingSmall}
+					label={`Remove islands smaller than ${Math.round(displayedSize)} voxels`}
+					applyingLabel="Removing…"
+					successLabel="Removed"
+				/>
 				</GrandchildRow>
 			</MenuColumn>
 

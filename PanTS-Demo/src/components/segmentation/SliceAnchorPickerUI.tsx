@@ -32,6 +32,20 @@ export interface GuidedFlowControls {
 	 *  indicator instead, since there's nothing left to cancel or start
 	 *  over from at that point. */
 	busy?: boolean;
+	/** Optional "move to next step" action, rendered as a highlighted
+	 *  (blue, pulsing) button in the ribbon right alongside Start over /
+	 *  Exit — used by multi-click-scribble steps (currently only
+	 *  Grow-from-seeds) where the canvas has to stay interactive, so
+	 *  there's no blocking modal to host a primary action. Omit to render
+	 *  the ribbon without a Continue button (e.g. while a step's own
+	 *  blocking modal is up, or on the final step). */
+	continueLabel?: string;
+	onContinue?: () => void;
+	continueDisabled?: boolean;
+	/** Message shown as a brief orange warning if Continue is pressed while
+	 *  blocked (e.g. "Mark at least one point first") — not shown merely
+	 *  for being disabled, only on an actual press. */
+	continueHint?: string;
 }
 
 // Duration of the backdrop fade / card scale-in, played each time a new

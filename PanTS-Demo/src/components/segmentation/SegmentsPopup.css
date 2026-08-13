@@ -356,23 +356,44 @@
     color: #68ACE5;
 }
 
-.segpop__row--editing {
-    display: grid;
-    grid-template-rows: 1fr;
-    /* The base .segpop__row caps normal (single-line) rows at 64px, which
-       clipped the bottom of this form — it stacks the swatch+name line,
-       an optional "name in use"/character-count line, AND the Save/Cancel
-       row, easily past 64px. The 0fr/1fr grid-template-rows swap (with
-       overflow staying hidden below) already handles the open/close
-       collapse animation on its own, so there's no need for a max-height
-       cap here at all while open — let the row size to its real content. */
-    max-height: none;
+/* .segpop__collapse (shared by both the editing row and the add-form below)
+   is the Collapse component's own wrapper — its `max-height` is driven
+   directly from JS (see the Collapse component in SegmentsPopup.tsx),
+   measured off the content's real scrollHeight rather than guessed via a
+   CSS grid-track trick. That's what fixes the old "stuck halfway then
+   disappears" bug: the previous grid-template-rows(0fr/1fr) approach
+   animated a grid track's size independently of the content's actual
+   height, so an error line appearing/disappearing (or any other height
+   change) could desync the two, and the close was finalized by a JS
+   setTimeout guessing the transition's duration rather than the
+   transition's own completion — a slow frame could unmount the row well
+   before the animation had actually finished, reading as a stuck-then-gone
+   snap. Only `max-height` needs a transition here; opacity/transform ride
+   along on the same one shared curve so the fade and the collapse read as
+   one continuous motion instead of two racing animations. */
+.segpop__collapse {
+    overflow: hidden;
     opacity: 1;
     transform: none;
-    transition: grid-template-rows 0.38s cubic-bezier(0.22, 0.61, 0.36, 1),
-        opacity 0.3s ease,
-        transform 0.32s cubic-bezier(0.22, 0.61, 0.36, 1),
-        margin 0.38s cubic-bezier(0.22, 0.61, 0.36, 1);
+    transform-origin: top center;
+    transition: max-height 0.28s cubic-bezier(0.4, 0, 0.2, 1),
+        opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+        transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+        margin 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.segpop__collapse.is-closing {
+    opacity: 0;
+    /* Subtler than a bouncier scale — a barely-there shrink reads as
+       "settling away" rather than a visible pop, which suits a form
+       dismiss better than the treatment used for e.g. a toast or modal. */
+    transform: scale(0.98);
+    margin: 0;
+    pointer-events: none;
+}
+
+.segpop__collapse-inner {
+    min-height: 0;
 }
 
 .segpop__row--editing-inner {
@@ -384,21 +405,6 @@
     border-radius: 8px;
     background: rgba(255, 255, 255, 0.05);
     position: relative;
-    /* `hidden` here clipped the name input/Save-Cancel row along with the
-       outer max-height above; visible lets the color-popover swatch (which
-       renders past this box's edge) show fully. The outer
-       .segpop__row--editing keeps overflow:hidden so the collapse-to-0fr
-       closing animation still clips cleanly. */
-    overflow: visible;
-    min-height: 0;
-}
-
-.segpop__row--editing.is-closing {
-    opacity: 0;
-    transform: scale(0.96);
-    grid-template-rows: 0fr;
-    margin: 0;
-    pointer-events: none;
 }
 
 /* Shared action-row layout — used identically by the "Add class" form and
@@ -515,23 +521,14 @@
 }
 
 .segpop__add-form {
-    display: grid;
-    grid-template-rows: 1fr;
     margin-top: 4px;
-    opacity: 1;
-    transform: none;
-    transition: grid-template-rows 0.38s cubic-bezier(0.22, 0.61, 0.36, 1),
-        opacity 0.3s ease,
-        transform 0.32s cubic-bezier(0.22, 0.61, 0.36, 1),
-        margin 0.38s cubic-bezier(0.22, 0.61, 0.36, 1);
     animation: segpop-row-in 0.2s ease both;
 }
 
-/* grid-template-rows 1fr -> 0fr is what actually makes this collapse
-   smoothly regardless of the form's real content height (an error message
-   showing/hiding, etc) — a plain max-height transition has to guess a fixed
-   end height, and guessing wrong is exactly what made the close read as a
-   snap partway through rather than a continuous collapse. */
+.segpop__add-form.is-closing {
+    margin-top: 0;
+}
+
 .segpop__add-form-inner {
     display: flex;
     flex-direction: column;
@@ -540,16 +537,6 @@
     padding: 8px;
     border-radius: 8px;
     background: rgba(255, 255, 255, 0.04);
-    overflow: hidden;
-    min-height: 0;
-}
-
-.segpop__add-form.is-closing {
-    grid-template-rows: 0fr;
-    opacity: 0;
-    transform: scale(0.96);
-    margin-top: 0;
-    pointer-events: none;
 }
 
 /* Now rendered via the shared ApplyButton component (see SegmentsPopup.tsx)

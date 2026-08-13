@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { useSmartFill } from "../../helpers/viewer/useSmartFill";
-import { GuidedStepModal, GuidedContinuePill, type GuidedFlowControls } from "./SliceAnchorPickerUI";
+import { GuidedStepModal, type GuidedFlowControls } from "./SliceAnchorPickerUI";
 import { ActionButton, ActionList } from "../viewer/FlyoutPrimitives";
 import "../viewer/FlyoutPrimitives.css";
 
@@ -103,14 +103,23 @@ export default function GrowFromSeedsFlyout({
 		onCloseSettings?.();
 	};
 
-	// Publish Exit / Start over to the toolbar ribbon while the flow is
-	// alive, except during the success confirmation (nothing to cancel then).
+	// Publish Exit / Start over / Continue to the toolbar ribbon while the
+	// flow is alive, except during the success confirmation (nothing to
+	// cancel or continue past then). Continue is only offered on steps 1
+	// and 2, once that step's own blocking modal has been acknowledged —
+	// step 3 commits via its modal's own primary button instead.
 	useEffect(() => {
 		if (!active || successMessage) { onGuidedControlsChange?.(null); return; }
-		onGuidedControlsChange?.({ label: "Grow from seeds", onExit: handleExit, onStartOver: handleStartOver, busy: applying });
+		const continueForStep =
+			step === 1 && ackStep1
+				? { continueLabel: "Continue →", onContinue: () => setStep(2), continueDisabled: hasForegroundMarks === false, continueHint: hasForegroundMarks === false ? "Mark at least one point first" : undefined }
+				: step === 2 && ackStep2
+				? { continueLabel: "Continue →", onContinue: () => setStep(3) }
+				: {};
+		onGuidedControlsChange?.({ label: "Grow from seeds", onExit: handleExit, onStartOver: handleStartOver, busy: applying, ...continueForStep });
 		return () => onGuidedControlsChange?.(null);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [active, step, applying, successMessage]);
+	}, [active, step, applying, successMessage, ackStep1, ackStep2, hasForegroundMarks]);
 
 	if (successMessage) {
 		return (
@@ -141,14 +150,9 @@ export default function GrowFromSeedsFlyout({
 					onPrimary={() => setAckStep1(true)}
 				/>
 			)}
-			{active && step === 1 && ackStep1 && (
-				<GuidedContinuePill
-					label="Continue →"
-					disabled={hasForegroundMarks === false}
-					hint={hasForegroundMarks === false ? "Mark at least one point first" : undefined}
-					onClick={() => setStep(2)}
-				/>
-			)}
+			{/* Once step 1/2's modal is acknowledged, Continue is rendered by the
+			    toolbar ribbon (via onGuidedControlsChange above) — no floating
+			    UI here so the canvas stays fully clear for scribbling. */}
 
 			{active && step === 2 && !ackStep2 && (
 				<GuidedStepModal
@@ -160,10 +164,6 @@ export default function GrowFromSeedsFlyout({
 					onSecondary={() => { setAckStep2(true); setStep(3); }}
 				/>
 			)}
-			{active && step === 2 && ackStep2 && (
-				<GuidedContinuePill label="Continue →" onClick={() => setStep(3)} />
-			)}
-
 			{active && step === 3 && (
 				<GuidedStepModal
 					title="Ready to fill"
