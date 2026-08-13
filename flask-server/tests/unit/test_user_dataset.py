@@ -184,3 +184,38 @@ def test_admit_and_store_end_to_end(ud, tmp_path):
     assert os.path.exists(rej)
     reasons = [json.loads(l)["reason"] for l in open(rej)]
     assert "duplicate_exact" in reasons
+
+
+def test_noop_when_unset(tmp_path, monkeypatch):
+    """With USER_DATASET_PATH unset the feature is fully inert: no root, and the
+    async entry spawns nothing."""
+    monkeypatch.delenv("USER_DATASET_PATH", raising=False)
+    import services.user_dataset as m
+    importlib.reload(m)
+    assert m._root() is None
+    before = __import__("threading").active_count()
+    m.collect_user_scan_async("ct", "out", "ePAI", "u1", "ip", "s")
+    assert __import__("threading").active_count() == before  # no thread started
+
+
+def test_voxel_guard_blocks_oom(ud, tmp_path, monkeypatch):
+    """A volume whose decoded voxel count exceeds MAX_VOXELS is rejected BEFORE
+    np.asarray, so a decompression bomb can't allocate/OOM the worker."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("nibabel")
+    monkeypatch.setattr(ud, "MAX_VOXELS", 1000)  # tiny cap
+    vol = np.full((64, 64, 64), -1000.0, dtype="float32")
+    vol[20:40, 20:40, 20:40] = 60.0
+    ct = str(tmp_path / "big.nii.gz"); _write_nifti(ct, vol)
+    ok, reason = ud.validate_ct(ct)
+    assert not ok and reason.startswith("too_many_voxels")
+
+
+def test_rejects_non_finite(ud, tmp_path):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("nibabel")
+    vol = np.random.RandomState(2).uniform(-1000, 500, (64, 64, 64)).astype("float32")
+    vol[0, 0, 0] = np.inf
+    ct = str(tmp_path / "inf.nii.gz"); _write_nifti(ct, vol)
+    ok, reason = ud.validate_ct(ct)
+    assert not ok and reason == "non_finite_values"

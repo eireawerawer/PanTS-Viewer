@@ -1033,8 +1033,10 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
     if user is None:
         return jsonify({"error": "Sign in to run inference"}), 401
     # Captured in the request context so the background worker (which has none) can
-    # attribute the scan for per-IP quotas in the user-dataset gatekeeper.
-    _collector_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
+    # attribute the scan for per-IP quotas in the user-dataset gatekeeper. Use
+    # remote_addr (set by the trusted reverse proxy) rather than a client-supplied
+    # X-Forwarded-For, which an attacker could rotate per request to defeat the cap.
+    _collector_ip = request.remote_addr or ""
     blocked = plan_store.check_inference(user["id"], model_name)
     if blocked is not None:
         # 402 Payment Required: the request is well-formed and the user is

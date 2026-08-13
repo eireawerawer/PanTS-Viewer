@@ -31,6 +31,7 @@ this changes nothing until it is switched on in the environment.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -60,6 +61,11 @@ _LABEL_NAMES = {
 
 # --- tunables (all overridable via env) ---
 MAX_CT_BYTES = int(os.environ.get("USER_DATASET_MAX_CT_BYTES", str(600 * 1024 * 1024)))  # 600 MB
+# The .nii.gz cap is on the COMPRESSED bytes; a header can still declare a volume
+# that decodes to tens of GB (a near-constant "gzip bomb" fits well under 600 MB).
+# Bound the DECODED voxel count too, before any np.asarray, so a crafted scan
+# can't OOM-kill the worker. 400M voxels ~= 0.8 GB int16 / 1.6 GB float32.
+MAX_VOXELS = int(os.environ.get("USER_DATASET_MAX_VOXELS", str(400_000_000)))
 DAILY_PER_USER = int(os.environ.get("USER_DATASET_DAILY_PER_USER", "50"))
 DAILY_PER_IP = int(os.environ.get("USER_DATASET_DAILY_PER_IP", "50"))
 DAILY_GLOBAL = int(os.environ.get("USER_DATASET_DAILY_GLOBAL", "2000"))
@@ -69,6 +75,37 @@ NEAR_DUP_GRID = 24  # downsample edge for the perceptual (near-duplicate) finger
 
 _WINDOW_SECONDS = 24 * 3600
 _registry_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _locked(root: str):
+    """Serialize the registry read-modify-write across BOTH threads (in-process)
+    and processes. Prod is gunicorn --workers 1, where the threading lock alone
+    suffices; the fcntl file lock makes it correct even if that ever changes.
+    Falls back to threads-only where fcntl is unavailable (e.g. Windows/CI)."""
+    with _registry_lock:
+        lf = None
+        try:
+            import fcntl
+            lf = open(os.path.join(root, ".registry.lock"), "w")
+            fcntl.flock(lf, fcntl.LOCK_EX)
+        except Exception:
+            if lf is not None:
+                try:
+                    lf.close()
+                except Exception:
+                    pass
+            lf = None
+        try:
+            yield
+        finally:
+            if lf is not None:
+                try:
+                    import fcntl
+                    fcntl.flock(lf, fcntl.LOCK_UN)
+                    lf.close()
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -145,13 +182,23 @@ def validate_ct(ct_path: str):
         return False, f"not_3d:{list(shape)}"
     if any(d < 16 or d > 2048 for d in dims):
         return False, f"implausible_dims:{dims}"
+    # Reject on the DECODED size before materializing anything (anti-OOM, C1).
+    voxels = 1
+    for d in dims:
+        voxels *= int(d)
+    if voxels > MAX_VOXELS:
+        return False, f"too_many_voxels:{voxels}"
     try:
-        arr = np.asarray(img.dataobj, dtype="float32")
+        # Native dtype (usually int16) rather than forcing float32 -- half the
+        # memory, and CT intensities are integral anyway.
+        arr = np.asarray(img.dataobj)
     except Exception as e:
         return False, f"undecodable:{type(e).__name__}"
-    if not np.isfinite(arr).any():
-        return False, "no_finite_values"
-    lo, hi = float(np.nanmin(arr)), float(np.nanmax(arr))
+    # Require ALL values finite: nanmin/nanmax ignore NaN but not +/-inf, which
+    # would otherwise sail through the range check and poison the fingerprint.
+    if arr.dtype.kind == "f" and not np.isfinite(arr).all():
+        return False, "non_finite_values"
+    lo, hi = float(np.min(arr)), float(np.max(arr))
     if lo == hi:
         return False, "constant_volume"
     # CT signature: air present (well below 0) and tissue/bone present (above 0).
@@ -172,8 +219,13 @@ def fingerprints(ct_path: str):
             h.update(chunk)
     sha = h.hexdigest()
     try:
-        arr = np.asarray(nib.load(ct_path).dataobj, dtype="float32")
-        arr = np.squeeze(arr)
+        img = nib.load(ct_path)
+        vox = 1
+        for d in img.shape:
+            vox *= int(d)
+        if vox > MAX_VOXELS:      # defensive: validate_ct already rejects these
+            return sha, sha
+        arr = np.squeeze(np.asarray(img.dataobj))   # native dtype
         g = NEAR_DUP_GRID
         # block-average to a fixed GxGxG grid, quantize, hash
         idx = [np.linspace(0, s, g + 1).astype(int) for s in arr.shape[:3]]
@@ -252,25 +304,42 @@ def _write_sublabels(combined_labels_path: str, seg_dir: str, existing_seg_dir: 
     for lab in [int(v) for v in np.unique(data) if int(v) != 0]:
         name = _LABEL_NAMES.get(lab, f"label_{lab}")
         binary = (data == lab).astype("uint8")
-        nib.save(nib.Nifti1Image(binary, img.affine, img.header),
-                 os.path.join(seg_dir, f"{name}.nii.gz"))
+        # Fresh header (affine only) with an explicit uint8 dtype, so the source
+        # label map's datatype / scl_slope / scl_inter can't misencode the mask.
+        out = nib.Nifti1Image(binary, img.affine)
+        out.set_data_dtype(np.uint8)
+        nib.save(out, os.path.join(seg_dir, f"{name}.nii.gz"))
         written.append(name)
     return written
 
 
 def _promote(root: str, case_id: str, ct_path: str, combined_labels_path: str,
              existing_seg_dir: Optional[str], metadata: dict) -> None:
-    img_dir = os.path.join(root, "image_only", case_id)
-    mask_dir = os.path.join(root, "mask_only", case_id)
-    os.makedirs(img_dir, exist_ok=True)
-    os.makedirs(mask_dir, exist_ok=True)
-    shutil.copy2(ct_path, os.path.join(img_dir, "ct.nii.gz"))
-    shutil.copy2(combined_labels_path, os.path.join(mask_dir, "combined_labels.nii.gz"))
-    organs = _write_sublabels(combined_labels_path, os.path.join(mask_dir, "segmentations"),
-                              existing_seg_dir)
-    metadata = {**metadata, "case_id": case_id, "organs": organs}
-    with open(os.path.join(mask_dir, "metadata.json"), "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
+    """Write all of a case's files into `.partial` staging dirs, then publish each
+    with an atomic rename. A partial failure (disk full, bad NIfTI, killed thread)
+    leaves only staging dirs behind -- never a half-written case that the next
+    admission could merge into."""
+    img_final = os.path.join(root, "image_only", case_id)
+    mask_final = os.path.join(root, "mask_only", case_id)
+    img_stage, mask_stage = img_final + ".partial", mask_final + ".partial"
+    for d in (img_stage, mask_stage):
+        shutil.rmtree(d, ignore_errors=True)   # clear leftovers from a prior crash
+    try:
+        os.makedirs(img_stage, exist_ok=True)
+        os.makedirs(mask_stage, exist_ok=True)
+        shutil.copy2(ct_path, os.path.join(img_stage, "ct.nii.gz"))
+        shutil.copy2(combined_labels_path, os.path.join(mask_stage, "combined_labels.nii.gz"))
+        organs = _write_sublabels(combined_labels_path, os.path.join(mask_stage, "segmentations"),
+                                  existing_seg_dir)
+        meta = {**metadata, "case_id": case_id, "organs": organs}
+        with open(os.path.join(mask_stage, "metadata.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+        os.replace(img_stage, img_final)      # atomic publish (final can't pre-exist:
+        os.replace(mask_stage, mask_final)    # case_id is a freshly reserved counter)
+    except Exception:
+        shutil.rmtree(img_stage, ignore_errors=True)
+        shutil.rmtree(mask_stage, ignore_errors=True)
+        raise
 
 
 def _record_rejection(root: str, reason: str, ctx: dict) -> None:
@@ -309,34 +378,62 @@ def _admit_and_store(ct_path: str, output_mask_dir: str, model: str,
     root = _root()
     if not root:
         return  # feature off
+    if not os.path.isfile(ct_path):
+        return  # e.g. ShapeKit is handed a segmentation directory, not a CT file
     combined = os.path.join(output_mask_dir, "combined_labels.nii.gz")
     existing_seg = os.path.join(output_mask_dir, "segmentations")
     ctx = {"user_id": user_id, "ip": ip, "model": model, "session_id": session_id}
     try:
         os.makedirs(root, exist_ok=True)
         now = time.time()
-        with _registry_lock:
+
+        # 1) Quota + attempt accounting (cheap, under the lock). The attempt is
+        #    recorded regardless of the outcome below, so a flood of REJECTS is
+        #    rate-limited too -- not just accepted scans.
+        with _locked(root):
             reg = _load_registry(root)
             _prune_events(reg, now)
-            accepted, reason, extra = evaluate(ct_path, combined, reg, user_id, ip, now)
-            if not accepted:
-                _record_rejection(root, reason, {**ctx, **{k: v for k, v in extra.items() if k != "stats"}})
+            ok, qreason = check_quota(reg, user_id, ip, now)
+            reg["events"].append({"ts": now, "user_id": user_id, "ip": ip})
+            _save_registry(root, reg)
+        if not ok:
+            _record_rejection(root, qreason, ctx)
+            return
+
+        # 2) Expensive gates OUTSIDE the lock (they touch no registry state), so a
+        #    single large scan doesn't serialize every other collection thread.
+        ok, reason = validate_ct(ct_path)
+        if not ok:
+            _record_rejection(root, reason, ctx)
+            return
+        ok, reason, stats = segmentation_quality_ok(combined)
+        if not ok:
+            _record_rejection(root, reason, {**ctx, "stats": stats})
+            return
+        sha, ph = fingerprints(ct_path)
+
+        # 3) Dedup + reserve id + atomic promote + commit, under the lock (short).
+        with _locked(root):
+            reg = _load_registry(root)
+            if sha in reg["sha256"]:
+                _record_rejection(root, "duplicate_exact", {**ctx, "of": reg["sha256"][sha]})
+                return
+            if ph in reg["phash"]:
+                _record_rejection(root, "duplicate_near", {**ctx, "of": reg["phash"][ph]})
                 return
             case_id = "USER_%08d" % reg["next_id"]
             metadata = {
                 "user_id": user_id, "source_ip": ip, "model": model,
                 "session_id": session_id,
                 "collected_at": datetime.now(timezone.utc).isoformat(),
-                "sha256": extra.get("sha256"), "phash": extra.get("phash"),
-                "segmentation_stats": extra.get("stats", {}),
+                "sha256": sha, "phash": ph, "segmentation_stats": stats,
             }
             _promote(root, case_id, ct_path, combined,
                      existing_seg if os.path.isdir(existing_seg) else None, metadata)
-            # commit registry only after the files are on disk
+            # Commit only after the files are published (atomic renames done).
             reg["next_id"] += 1
-            reg["sha256"][extra["sha256"]] = case_id
-            reg["phash"][extra["phash"]] = case_id
-            reg["events"].append({"ts": now, "user_id": user_id, "ip": ip})
+            reg["sha256"][sha] = case_id
+            reg["phash"][ph] = case_id
             _save_registry(root, reg)
             print(f"[user_dataset] admitted {case_id} (model={model}, user={user_id})", flush=True)
     except Exception:
