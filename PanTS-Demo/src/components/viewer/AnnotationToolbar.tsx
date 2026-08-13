@@ -28,6 +28,11 @@ import type { GuidedFlowControls } from "../segmentation/SliceAnchorPickerUI";
 const OVERVIEW_WALKTHROUGH_SEEN_KEY = "mm_annotation_walkthrough_seen";
 const FIRST_TARGET_HINT_SEEN_KEY = "mm_annotation_first_target_hint_seen";
 const SHORTCUTS_INTRO_SEEN_KEY = "mm_annotation_shortcuts_intro_seen";
+// Guided-flow (Continue / Start over / Exit) explainer. Each guided tool
+// (Grow from Seeds, Copy across slices, Fill between slices, Islands) gets
+// its OWN "seen" flag — so seeing the explainer for one doesn't suppress it
+// for the others — even though several of them share the same wording.
+const GUIDED_HINT_SEEN_KEY_PREFIX = "mm_annotation_guided_hint_seen_";
 
 // Grouped keyboard shortcuts shown once, the moment the annotation toolbar
 // itself is opened (see SHORTCUTS_INTRO_SEEN_KEY below). Kept as plain data
@@ -165,6 +170,24 @@ const LIVE_COMMIT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["paint", "erase", "
 
 const MIN_DIAMETER_MM = 2;
 const MAX_DIAMETER_MM = 40;
+
+// Which "explain Continue / Start over / Exit" message a guided tool falls
+// under. Grow from Seeds gets its own copy; the slice-range tools (Copy/Fill
+// across slices) and Islands' pick-based ops (Remove picked/Keep picked)
+// all drive the exact same three controls, so they share one message keyed
+// off a single "seen" flag rather than repeating the popup three times.
+type GuidedHintGroup = "growSeeds" | "sliceOps";
+function guidedHintGroup(tool: PrimaryEditTool): GuidedHintGroup | null {
+	if (tool === "growFromSeeds") return "growSeeds";
+	if (tool === "copyAcrossSlices" || tool === "fillBetweenSlices" || tool === "islands") return "sliceOps";
+	return null;
+}
+const GUIDED_HINT_COPY: Record<GuidedHintGroup, string> = {
+	growSeeds:
+		"Continue moves on once you've placed your seed scribbles. Start over clears every seed and lets you begin again. Exit leaves Grow from Seeds without changing anything.",
+	sliceOps:
+		"Continue (labeled Remove picked/Keep picked/etc. depending on the tool) applies your picks. Start over clears them and lets you pick again. Exit leaves the tool without changing anything.",
+};
 
 // Ribbon height, matches --atb-ribbon-h in CSS. Exported so SegmentsPopup
 // can dock directly beneath the ribbon without duplicating the constant.
@@ -511,6 +534,14 @@ export default function AnnotationToolbar({
 	// ribbon is clicked (once a target class is already active, since a
 	// disabled icon click goes through pickClassHintOpen instead).
 	const [shortcutsIntroOpen, setShortcutsIntroOpen] = useState(false);
+	// "Explain Continue/Start over/Exit" — shown the first time a guided flow
+	// (Grow from Seeds, Copy/Fill-across-slices, Islands' pick ops) actually
+	// surfaces those controls, once per flow family per session.
+	const [guidedHintOpen, setGuidedHintOpen] = useState(false);
+	const [guidedHintRect, setGuidedHintRect] = useState<DOMRect | null>(null);
+	const [guidedHintText, setGuidedHintText] = useState<string>("");
+	const guidedControlsBoxRef = useRef<HTMLDivElement>(null);
+	const prevGuidedControlsRef = useRef<GuidedFlowControls | null>(null);
 	const [, setPanelRect] = useState<DOMRect | null>(null);
 	const [, setPanelDragRect] = useState<DOMRect | null>(null);
 	const [, setDockRect] = useState<DOMRect | null>(null);
@@ -828,6 +859,56 @@ export default function AnnotationToolbar({
 		if (!activeTool) setGuidedControls(null);
 	}, [activeTool]);
 
+	// Fires once, on the null -> present transition (not on every re-render
+	// while a flow is already running), the first time this session that a
+	// given guided-flow family actually shows its Continue/Start over/Exit
+	// controls. Skipped while `busy` — those controls aren't on screen yet
+	// (see the `guidedControls.busy` branch in the render below).
+	useEffect(() => {
+		const wasPresent = prevGuidedControlsRef.current;
+		prevGuidedControlsRef.current = guidedControls;
+		if (wasPresent || !guidedControls || guidedControls.busy) return;
+		const group = guidedHintGroup(activeTool);
+		if (!group || !activeTool) return;
+		// Per-tool key (not per-group) — Grow from Seeds having been seen
+		// shouldn't suppress the explainer for Copy across slices, Fill
+		// between slices, or Islands, and vice versa between those three.
+		const seenKey = `${GUIDED_HINT_SEEN_KEY_PREFIX}${activeTool}`;
+		let alreadySeen = false;
+		try {
+			alreadySeen = typeof window !== "undefined" && window.sessionStorage.getItem(seenKey) === "1";
+		} catch { /* sessionStorage unavailable — just show it */ }
+		if (alreadySeen) return;
+		setGuidedHintText(GUIDED_HINT_COPY[group]);
+		setGuidedHintOpen(true);
+		try {
+			if (typeof window !== "undefined") window.sessionStorage.setItem(seenKey, "1");
+		} catch { /* not worth blocking on */ }
+	}, [guidedControls, activeTool]);
+
+	// Once the flow's controls go away (tool exited/deselected) or flip into
+	// `busy` (buttons swap for the "Applying…" indicator), the hint no
+	// longer has anything to point at, so close it automatically.
+	useEffect(() => {
+		if (!guidedControls || guidedControls.busy) setGuidedHintOpen(false);
+	}, [guidedControls]);
+
+	useLayoutEffect(() => {
+		if (!guidedHintOpen) return;
+		const measure = () => setGuidedHintRect(guidedControlsBoxRef.current ? guidedControlsBoxRef.current.getBoundingClientRect() : null);
+		measure();
+		window.addEventListener("resize", measure);
+		window.addEventListener("scroll", measure, true);
+		const id = window.setInterval(measure, 200); // controls sit in a fixed ribbon, but keep parity with the other live-measured hints
+		return () => {
+			window.removeEventListener("resize", measure);
+			window.removeEventListener("scroll", measure, true);
+			window.clearInterval(id);
+		};
+	}, [guidedHintOpen]);
+
+	const dismissGuidedHint = useCallback(() => setGuidedHintOpen(false), []);
+
 	// Keeps the "Applying…" dot mounted for a beat after `isRendering` goes
 	// false so it can fade out via CSS instead of vanishing mid-pulse.
 	const [renderingDotMounted, setRenderingDotMounted] = useState(false);
@@ -982,9 +1063,12 @@ export default function AnnotationToolbar({
 			    (Grow-from-seeds, Copy/Fill-across-slices, Islands) — fixed in
 			    the ribbon, not floating over the canvas. No title/label text
 			    identifying which guided flow is running is shown here — just
-			    the controls themselves. */}
+			    the controls themselves (see guidedControlsBoxRef below, used
+			    only to anchor the one-time Continue/Start over/Exit explainer
+			    popup, not for a visible label). */}
 			{guidedControls && (
 				<div
+					ref={guidedControlsBoxRef}
 					style={{
 						flexShrink: 0,
 						display: "flex",
@@ -1360,6 +1444,68 @@ export default function AnnotationToolbar({
 
 
 		{shortcutsIntroOpen && <ShortcutsIntroPopup onDismiss={() => setShortcutsIntroOpen(false)} />}
+
+		{open && guidedHintOpen && guidedHintRect && (
+			<>
+				{/* Same dashed-spotlight treatment as the pick-class/first-target
+				    hints above, but wrapping the Continue/Start over/Exit cluster
+				    itself so it's obvious which controls the card is describing. */}
+				<div
+					aria-hidden="true"
+					style={{
+						position: "fixed",
+						top: guidedHintRect.top - 8,
+						left: guidedHintRect.left - 8,
+						width: guidedHintRect.width + 16,
+						height: guidedHintRect.height + 16,
+						border: "2px dashed var(--jhu-blue-light, #68ACE5)",
+						borderRadius: 12,
+						pointerEvents: "none",
+						zIndex: 120,
+						boxShadow: "0 0 0 4000px rgba(0,0,0,0.35)",
+					}}
+				/>
+				<div
+					role="dialog"
+					aria-label="Guided flow controls"
+					style={{
+						position: "fixed",
+						top: guidedHintRect.bottom + 10,
+						left: Math.max(12, Math.min(guidedHintRect.left, window.innerWidth - 292)),
+						width: 260,
+						background: "#16181d",
+						border: "1px solid rgba(255,255,255,0.14)",
+						borderRadius: 12,
+						boxShadow: "0 18px 44px -12px rgba(0,0,0,0.75)",
+						padding: "14px 16px",
+						zIndex: 121,
+						color: "#fff",
+					}}
+				>
+					<div style={{ fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.9)" }}>
+						{guidedHintText}
+					</div>
+					<button
+						type="button"
+						onClick={dismissGuidedHint}
+						style={{
+							marginTop: 12,
+							width: "100%",
+							background: "#fff",
+							color: "#08090b",
+							border: "none",
+							borderRadius: 8,
+							fontSize: 12.5,
+							fontWeight: 700,
+							padding: "8px 0",
+							cursor: "pointer",
+						}}
+					>
+						Got it
+					</button>
+				</div>
+			</>
+		)}
 
 		{/* Small blue rectangle pinned near the cursor when Continue is
 		    clicked while the guided flow still has nothing to continue
