@@ -1,0 +1,16 @@
+name: Brand guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  brand-guard:
+    name: Brand invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check brand invariants
+        run: node scripts/brand-guard.mjs
