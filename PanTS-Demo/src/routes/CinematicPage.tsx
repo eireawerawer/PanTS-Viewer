@@ -62,6 +62,12 @@ export default function CinematicPage() {
   const reveal = flag(params, "reveal", true);
   const isSession = flag(params, "session", false);
   const useLocal = flag(params, "local", false);
+  // Bounds fit leaves the body off-centre and small in frame at the default
+  // 1.2. Tunable here so framing can be dialled in against a real monitor
+  // without a rebuild — below ~1 the near plane starts cutting the geometry.
+  const margin = num(params, "margin", 1.2);
+  // Drop segmentation islands smaller than this many vertices (see below).
+  const minVertices = num(params, "minVertices", 0);
 
   const [manifest, setManifest] = useState<MeshManifest | null>(null);
   const [visibleIds, setVisibleIds] = useState<Set<number>>(new Set());
@@ -107,9 +113,13 @@ export default function CinematicPage() {
     return manifest.organs.filter(
       (o) =>
         !excluded.has((o.key ?? "").toLowerCase()) &&
-        !excluded.has((o.name ?? "").toLowerCase()),
+        !excluded.has((o.name ?? "").toLowerCase()) &&
+        // Tiny segmentation islands render as a speck of colour floating away
+        // from the body — on a full-bleed black frame that reads as a dead
+        // pixel or dust on the lens. Drop them rather than paint them out.
+        (o.vertices ?? Infinity) >= minVertices,
     );
-  }, [manifest, excluded]);
+  }, [manifest, excluded, minVertices]);
 
   const ordered = useMemo(
     () => (organs ? revealOrder(organs, start) : []),
@@ -180,6 +190,7 @@ export default function CinematicPage() {
           autoRotate={rotate}
           autoRotateSpeed={speed}
           cinematic
+          boundsMargin={margin}
           // Hand over the manifest we already have so the viewer doesn't refetch —
           // required in local mode, where there is no API to fetch from.
           manifestOverride={manifest}

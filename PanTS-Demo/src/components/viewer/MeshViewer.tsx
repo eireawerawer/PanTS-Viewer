@@ -33,6 +33,9 @@ type SegmentationMeshViewerProps = {
   // from public/meshes (see scripts/download-meshes.mjs) whose organ urls already
   // point at local GLBs, so the cold open shoots with no backend reachable.
   manifestOverride?: MeshManifest | null;
+  // Bounds fit margin. Larger pulls the camera back; below ~1 the near plane
+  // starts cutting through the geometry and the frame goes empty.
+  boundsMargin?: number;
 };
 
 /**
@@ -67,7 +70,7 @@ export async function fetchMeshManifest(caseId: string, isSession = false): Prom
   };
 }
 
-export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}, isSession = false, autoRotate = false, autoRotateSpeed = 0.6, cinematic = false, manifestOverride = null}: SegmentationMeshViewerProps) {
+export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}, isSession = false, autoRotate = false, autoRotateSpeed = 0.6, cinematic = false, manifestOverride = null, boundsMargin = 1.2}: SegmentationMeshViewerProps) {
   const [manifest, setManifest] = useState<MeshManifest | null>(null);
   const [loaded, setLoaded] = useState<Record<number, boolean>>({});
   // Bumped on every mask edit so editedSegments below is recomputed — the 3D pane
@@ -135,7 +138,7 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
             <directionalLight position={[-400, 200, -500]} intensity={1.8} color="#8ab6ff" />
           )}
           <Suspense fallback={null}>
-            <Bounds fit clip observe margin={1.2}>
+            <Bounds fit clip observe margin={boundsMargin}>
               <group>
                 {organs.map((organ) => {
                   if (!loaded[organ.id]) return null;
