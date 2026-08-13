@@ -67,6 +67,8 @@ const DicomPreview = lazy(() => import("../components/CtPreview/DicomPreview"));
 import { API_BASE } from "../helpers/constants";
 import {
   addRecentUpload,
+  friendlyScanName,
+  renameRecentUpload,
   formatRelativeTime,
   groupUploads,
   isGroupInFlight,
@@ -212,6 +214,18 @@ const UploadPage: React.FC = () => {
   const [recentUploads, setRecentUploads] = useState<RecentUpload[]>(() =>
     loadRecentUploads(),
   );
+  // Inline rename of a scan in the history list: which one is being edited and
+  // the working text.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const startRename = (u: RecentUpload) => {
+    setRenamingId(u.sessionId);
+    setRenameValue(u.label);
+  };
+  const commitRename = () => {
+    if (renamingId) setRecentUploads(renameRecentUpload(renamingId, renameValue));
+    setRenamingId(null);
+  };
   // Which batch's "View details" popup is open (null = none).
   const [detailsBatchId, setDetailsBatchId] = useState<string | null>(null);
   // Sub-state of each Active card: "waiting" | "uploading" | "queued" | "running".
@@ -962,15 +976,20 @@ const UploadPage: React.FC = () => {
     batch?: { batchId: string; batchLabel: string },
   ) => {
     const sid = crypto.randomUUID();
-    const label = (item.kind === "dicom" ? item.label : item.file.name) || sid;
+    const ts = Date.now();
+    // Keep the raw filename for reference, but name the scan meaningfully by
+    // default (model + date); the user can rename it later.
+    const sourceName = (item.kind === "dicom" ? item.label : item.file.name) || undefined;
+    const label = friendlyScanName(model, ts);
 
     setRecentUploads(
       addRecentUpload({
         sessionId: sid,
         label,
+        sourceName,
         model,
         status: "Processing",
-        timestamp: Date.now(),
+        timestamp: ts,
         isReconstruction: model === "OpenVAE",
         batchId: batch?.batchId,
         batchLabel: batch?.batchLabel,
@@ -1895,7 +1914,31 @@ const UploadPage: React.FC = () => {
               <div style={{ display: "flex", alignItems: "center", gap: "16px", minWidth: 0 }}>
                 <FileIcon />
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
+                  {renamingId === u.sessionId ? (
+                    <input
+                      autoFocus
+                      value={renameValue}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitRename();
+                        else if (e.key === "Escape") setRenamingId(null);
+                      }}
+                      style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", border: "1px solid rgba(0,45,114,0.3)", borderRadius: "6px", padding: "2px 6px", width: "100%", maxWidth: "260px" }}
+                    />
+                  ) : (
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0 }}>
+                      <span title={u.sourceName || undefined} style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.label}</span>
+                      <button
+                        title="Rename scan"
+                        onClick={(e) => { e.stopPropagation(); startRename(u); }}
+                        style={{ background: "none", border: "none", cursor: "pointer", padding: "2px", color: "#6a6a6a", flexShrink: 0, lineHeight: 0 }}
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                      </button>
+                    </div>
+                  )}
                   <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
                     {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}
                   </div>
