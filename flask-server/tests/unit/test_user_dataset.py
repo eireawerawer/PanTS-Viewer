@@ -211,6 +211,31 @@ def test_voxel_guard_blocks_oom(ud, tmp_path, monkeypatch):
     assert not ok and reason.startswith("too_many_voxels")
 
 
+def test_uncompressed_upload_stored_as_gzip(ud, tmp_path):
+    """A raw .nii upload must be gzipped on store, not copied under a .nii.gz name
+    (which would be uncompressed and unloadable)."""
+    np = pytest.importorskip("numpy")
+    nib = pytest.importorskip("nibabel")
+    vol = np.full((64, 64, 64), -1000.0, dtype="float32")
+    vol[20:40, 20:40, 20:40] = 60.0
+    vol[30:34, 30:34, 30:34] = 400.0
+    ct = str(tmp_path / "scan.nii")            # RAW, uncompressed upload
+    nib.save(nib.Nifti1Image(vol, np.eye(4)), ct)
+    with open(ct, "rb") as f:
+        assert f.read(2) != b"\x1f\x8b"        # confirm the source really is raw
+
+    out = tmp_path / "out"; out.mkdir()
+    mask = np.zeros((64, 64, 64), "uint8"); mask[10:30, 10:30, 10:30] = 14; mask[35:45, 35:45, 35:45] = 17
+    _write_nifti(str(out / "combined_labels.nii.gz"), mask)
+
+    ud._admit_and_store(ct, str(out), "ePAI", "u1", "1.2.3.4", "s")
+    stored = os.path.join(ud._root(), "image_only", "USER_00000001", "ct.nii.gz")
+    assert os.path.exists(stored)
+    with open(stored, "rb") as f:
+        assert f.read(2) == b"\x1f\x8b"        # stored file is genuinely gzip
+    assert np.asarray(nib.load(stored).dataobj).shape == (64, 64, 64)  # and loads back
+
+
 def test_rejects_non_finite(ud, tmp_path):
     np = pytest.importorskip("numpy")
     pytest.importorskip("nibabel")

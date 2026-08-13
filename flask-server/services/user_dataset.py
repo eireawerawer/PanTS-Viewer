@@ -313,6 +313,22 @@ def _write_sublabels(combined_labels_path: str, seg_dir: str, existing_seg_dir: 
     return written
 
 
+def _store_nifti_gz(src: str, dst: str) -> None:
+    """Store a NIfTI at dst as a genuinely gzip-compressed .nii.gz. If src is
+    already gzip (the usual .nii.gz upload) its bytes are preserved exactly; a raw
+    .nii is gzipped on the way in. Without this, copying an uncompressed upload to
+    a .nii.gz name would waste space AND write a file nibabel can't load (it
+    gunzips by extension)."""
+    with open(src, "rb") as f:
+        is_gzip = f.read(2) == b"\x1f\x8b"
+    if is_gzip:
+        shutil.copy2(src, dst)
+    else:
+        import gzip
+        with open(src, "rb") as fin, gzip.open(dst, "wb") as fout:
+            shutil.copyfileobj(fin, fout)
+
+
 def _promote(root: str, case_id: str, ct_path: str, combined_labels_path: str,
              existing_seg_dir: Optional[str], metadata: dict) -> None:
     """Write all of a case's files into `.partial` staging dirs, then publish each
@@ -327,8 +343,8 @@ def _promote(root: str, case_id: str, ct_path: str, combined_labels_path: str,
     try:
         os.makedirs(img_stage, exist_ok=True)
         os.makedirs(mask_stage, exist_ok=True)
-        shutil.copy2(ct_path, os.path.join(img_stage, "ct.nii.gz"))
-        shutil.copy2(combined_labels_path, os.path.join(mask_stage, "combined_labels.nii.gz"))
+        _store_nifti_gz(ct_path, os.path.join(img_stage, "ct.nii.gz"))
+        _store_nifti_gz(combined_labels_path, os.path.join(mask_stage, "combined_labels.nii.gz"))
         organs = _write_sublabels(combined_labels_path, os.path.join(mask_stage, "segmentations"),
                                   existing_seg_dir)
         meta = {**metadata, "case_id": case_id, "organs": organs}
