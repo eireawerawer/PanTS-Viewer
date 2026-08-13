@@ -1032,6 +1032,9 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
     user = current_user()
     if user is None:
         return jsonify({"error": "Sign in to run inference"}), 401
+    # Captured in the request context so the background worker (which has none) can
+    # attribute the scan for per-IP quotas in the user-dataset gatekeeper.
+    _collector_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
     blocked = plan_store.check_inference(user["id"], model_name)
     if blocked is not None:
         # 402 Payment Required: the request is well-formed and the user is
@@ -1118,6 +1121,20 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
             _set_inference_job(session_id, status="completed", error=None,
                                zip_path=zip_path, output_mask_dir=output_mask_dir)
             print(f"✅ Finished segmentation and zipping for session {session_id}")
+
+            # Non-blocking: offer this scan+mask to the user-dataset gatekeeper,
+            # which decides (async) whether it's worth keeping. The result is
+            # already delivered above; this never affects the user, and is a no-op
+            # unless USER_DATASET_PATH is configured.
+            try:
+                from services.user_dataset import collect_user_scan_async
+                collect_user_scan_async(
+                    ct_path=input_path, output_mask_dir=output_mask_dir,
+                    model=model_name, user_id=user.get("id"), ip=_collector_ip,
+                    session_id=session_id,
+                )
+            except Exception as _ude:
+                print(f"[user_dataset] hook error (non-fatal): {_ude}")
         except Exception as e:
             # A killed subprocess surfaces here as CalledProcessError/RuntimeError;
             # if the user cancelled, keep "cancelled" rather than reporting failure.
