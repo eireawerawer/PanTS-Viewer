@@ -100,6 +100,7 @@ import {
   type PendingUpload,
 } from "../helpers/pendingUploads";
 import { postWithRetry, resolveResumeStart } from "../helpers/chunkUpload";
+import SiteFooter from "../components/SiteFooter";
 
 const parseApiResponse = async (res: Response): Promise<any> => {
   const contentType = res.headers.get("content-type") || "";
@@ -2012,6 +2013,7 @@ const UploadPage: React.FC = () => {
           );
         })()}
       </div>
+      <SiteFooter />
     </div>
   );
 };

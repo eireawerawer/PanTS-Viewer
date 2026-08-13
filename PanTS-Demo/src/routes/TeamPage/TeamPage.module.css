@@ -3,9 +3,14 @@
 .page {
   min-height: 100vh;
   background: #ffffff;
+  display: flex;
+  flex-direction: column;
 }
 
 .main {
+  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
   max-width: 1100px;
   margin: 0 auto;
   padding: 64px 24px 100px;

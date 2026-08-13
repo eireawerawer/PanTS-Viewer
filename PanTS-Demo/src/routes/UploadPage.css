@@ -15,6 +15,8 @@
   font-family: 'Space Grotesk', sans-serif;
   position: relative;
   overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ── Ambient glow orbs ── */
@@ -46,6 +48,9 @@
 
 /* ── Main content area ── */
 .upload-main {
+  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
   max-width: 1152px;
   margin: 0 auto;
   padding: 36px 24px 60px;
