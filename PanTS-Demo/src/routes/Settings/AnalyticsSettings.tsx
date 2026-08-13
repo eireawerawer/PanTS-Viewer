@@ -6,7 +6,9 @@ import {
 	DashboardDisabled, DashboardForbidden, fetchMeta, fetchOverview,
 	type Audience, type Filters, type Meta, type Overview,
 } from "./analytics/api";
-import { count, dateInput, duration, eventArea, eventLabel } from "./analytics/format";
+import {
+	count, dateInput, duration, eventArea, eventLabel, titleCase,
+} from "./analytics/format";
 import "./analytics/dashboard.css";
 
 // Usage: what people do in BodyMaps, and how long they spend doing it.
@@ -36,8 +38,6 @@ const AUDIENCE_LABELS: Record<Audience, string> = {
 // How many of the quietest features to name. All of them would be the whole
 // vocabulary listed twice, most of it at zero.
 const LEAST_USED_SHOWN = 8;
-
-const titleCase = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 const AnalyticsSettings: React.FC = () => {
 	const { user } = useAuth();

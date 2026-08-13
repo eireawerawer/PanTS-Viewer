@@ -18,10 +18,6 @@
 	--dash-track: rgba(0, 45, 114, 0.08);
 }
 
-.dash-header {
-	margin-bottom: 22px;
-}
-
 /* ── Filters: one row, above everything they affect ── */
 .dash-filters {
 	display: flex;

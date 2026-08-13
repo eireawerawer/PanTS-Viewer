@@ -13,6 +13,9 @@ export const duration = (ms: number): string => {
 
 export const count = (n: number): string => n.toLocaleString();
 
+/** First letter up, rest untouched — for plan names, account types, roles. */
+export const titleCase = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
 // Event names are stored as they're fired ("upload_start_inference") because
 // that's the string the code uses and the one to grep for. They're only
 // prettified at the last moment, here.
@@ -23,8 +26,7 @@ const WORDS: Record<string, string> = {
 
 export const eventLabel = (name: string): string => {
 	const words = name.split("_").map((w) => WORDS[w] ?? w);
-	const first = words[0];
-	return [first.charAt(0).toUpperCase() + first.slice(1), ...words.slice(1)].join(" ");
+	return [titleCase(words[0]), ...words.slice(1)].join(" ");
 };
 
 /** The area of the app an event belongs to, from its prefix. */

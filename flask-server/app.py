@@ -113,11 +113,8 @@ def create_app():
     # and would let any site make authenticated requests as a logged-in user).
     # Set ALLOWED_ORIGINS on the server (comma-separated); defaults to local dev.
     allowed_origins = [
-        # 5174 is the local analytics dashboard (analytics/), which is a
-        # dev-only tool — it is never part of a deploy, where ALLOWED_ORIGINS is
-        # set explicitly anyway.
         o.strip() for o in os.environ.get(
-            "ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174"
+            "ALLOWED_ORIGINS", "http://localhost:5173"
         ).split(",")
         if o.strip()
     ]

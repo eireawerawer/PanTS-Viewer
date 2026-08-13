@@ -3,6 +3,7 @@ import { useAuth } from "../../contexts/authContext";
 import { API_BASE } from "../../helpers/constants";
 import { track } from "../../helpers/analytics";
 import { useSettings } from "./context";
+import { titleCase } from "./analytics/format";
 import "./analytics/dashboard.css";
 
 // People: every account, and the roles they hold.
@@ -163,7 +164,7 @@ const PeopleSettings: React.FC = () => {
 						{person.email}
 						{person.id === user?.id && <span className="dash-you"> you</span>}
 						<span className="set-row-note">
-							{[person.name, titleCasePlan(person.plan), joined(person.created_at)]
+							{[person.name, titleCase(person.plan), joined(person.created_at)]
 								.filter(Boolean)
 								.join(" · ")}
 						</span>
@@ -201,7 +202,5 @@ const PeopleSettings: React.FC = () => {
 		</div>
 	);
 };
-
-const titleCasePlan = (plan: string) => plan.charAt(0).toUpperCase() + plan.slice(1);
 
 export default PeopleSettings;

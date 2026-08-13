@@ -46,10 +46,6 @@ class RoleError(ValueError):
         self.reason = reason
 
 
-def _normalize_email(email: str) -> str:
-    return (email or "").strip().lower()
-
-
 # ---- reading ---------------------------------------------------------------
 
 def roles_for(user_id: str) -> list[str]:
@@ -188,8 +184,9 @@ def search_people(query: str | None = None, limit: int = 25, offset: int = 0) ->
 # ---- bootstrap -------------------------------------------------------------
 
 def bootstrap_emails() -> list[str]:
+    """ADMIN_EMAILS, normalised the way user_account.email is stored."""
     raw = os.environ.get("ADMIN_EMAILS", "")
-    return [e for e in (_normalize_email(p) for p in raw.split(",")) if e]
+    return [e for e in (p.strip().lower() for p in raw.split(",")) if e]
 
 
 def ensure_bootstrap_admins() -> list[str]:

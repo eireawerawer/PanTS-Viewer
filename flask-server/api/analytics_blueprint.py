@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 
-from api.auth import current_roles, current_user
+from api.auth import current_user, refuse_unless_role
 from models.job import utcnow
 from services import analytics_store, role_store
 
@@ -40,19 +40,6 @@ def _dashboard_enabled() -> bool:
     """Read live rather than at import: tests flip it per-case, and it means a
     restart is enough to turn the dashboard off."""
     return os.environ.get("ANALYTICS_DASHBOARD", "false").lower() == "true"
-
-
-def _refuse_unless_admin():
-    """None when the caller may read the dashboard, else the response to send.
-
-    Called as the first line of each read endpoint, after the flag check, so the
-    two locks are applied in the order the module docstring describes.
-    """
-    if current_user() is None:
-        return jsonify({"error": "Authentication required"}), 401
-    if role_store.ROLE_ADMIN not in current_roles():
-        return jsonify({"error": "You don't have access to this."}), 403
-    return None
 
 
 @analytics_blueprint.route("/analytics/collect", methods=["POST"])
@@ -112,7 +99,7 @@ def _parse_range():
 def overview():
     if not _dashboard_enabled():
         return jsonify({"error": "Not found"}), 404
-    refusal = _refuse_unless_admin()
+    refusal = refuse_unless_role(role_store.ROLE_ADMIN)
     if refusal:
         return refusal
 
@@ -142,7 +129,7 @@ def meta():
     server's idea of the world rather than a second hardcoded copy."""
     if not _dashboard_enabled():
         return jsonify({"error": "Not found"}), 404
-    refusal = _refuse_unless_admin()
+    refusal = refuse_unless_role(role_store.ROLE_ADMIN)
     if refusal:
         return refusal
 
