@@ -112,7 +112,18 @@ export default function WallPage() {
     if (!tiles.length) return [];
     const rest = tiles.filter((t) => String(t.id) !== heroId);
     const hero = tiles.find((t) => String(t.id) === heroId);
-    if (!hero) return tiles;
+    // Falling back silently means the pull-back opens on an arbitrary case and the
+    // shot still looks fine on a monitor — you only find out in the edit that the
+    // film's one case never appears in its own closing reveal. Say so out loud.
+    if (!hero) {
+      if (heroId) {
+        console.warn(
+          `wall: no tile for hero "${heroId}" — the pull-back will start on some other case. ` +
+            `Fetch it with: node scripts/download-thumbs.mjs --api <API> --ids ${heroId}`,
+        );
+      }
+      return tiles;
+    }
 
     const rows = Math.ceil(tiles.length / cols);
     const centerIndex = Math.floor(rows / 2) * cols + Math.floor(cols / 2);

@@ -10,7 +10,7 @@
 // picks up where it left off. Writes manifest.json (id -> { file, tumor }), which
 // /wall reads when given ?local=1 — including the tumor flag, so the closing
 // filter re-flow works with no API call at all.
-import { mkdir, writeFile, readdir } from "node:fs/promises";
+import { mkdir, writeFile, readdir, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,6 +26,18 @@ function arg(name, fallback) {
 const API = String(arg("api", "http://localhost:5001")).replace(/\/$/, "");
 const COUNT = Number(arg("n", 1200));
 
+// --ids fetches named cases instead of running the search. The search sorts by
+// quality and takes the top --n, so a case outside that cut never gets a tile —
+// which is silent, because /wall drops an unknown ?hero= and just centres some
+// other case. That is exactly how the hero of this film ended up missing from
+// the closing shot. Use --ids to pull one in by hand.
+const IDS = String(arg("ids", ""))
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+// The search supplies the tumor flag; a hand-fetched id has to be told.
+const TUMOR = arg("tumor", null);
+
 const EXT_BY_TYPE = {
   "image/jpeg": "jpg",
   "image/png": "png",
@@ -39,6 +51,14 @@ function itemToId(it) {
   if (raw.toUpperCase().startsWith("CV")) return raw;
   const digits = raw.match(/\d+/);
   return digits ? String(Number(digits[0])) : null;
+}
+
+async function readManifest() {
+  try {
+    return JSON.parse(await readFile(join(OUT_DIR, "manifest.json"), "utf8"));
+  } catch {
+    return {};
+  }
 }
 
 async function fetchCases() {
@@ -77,10 +97,14 @@ async function main() {
     if (dot > 0 && file !== "manifest.json") existing.set(file.slice(0, dot), file);
   }
 
-  const cases = await fetchCases();
+  const cases = IDS.length
+    ? IDS.map((id) => ({ id, tumor: TUMOR === null ? 0 : Number(TUMOR) }))
+    : await fetchCases();
   console.log(`${cases.length} ids from ${API} · ${existing.size} already on disk`);
 
-  const manifest = {};
+  // Start from what is already on disk rather than an empty object, so fetching a
+  // single id merges into the wall instead of replacing all 1199 tiles with it.
+  const manifest = await readManifest();
   let done = 0;
   let failed = 0;
 

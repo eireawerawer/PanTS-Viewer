@@ -1,0 +1,181 @@
+<!doctype html>
+<!--
+  Capture-only title/stat/closing cards for the launch video.
+  Branch: demo/cinematic-capture. Not linked from the app.
+
+  Open http://localhost:5173/cards.html and go fullscreen (Cmd-Ctrl-F) so there
+  is no chrome in frame. Background is #050505 — the same black CinematicPage
+  uses — so a cut from the cold open to the title card has no seam.
+
+    1 / 2 / 3   jump to title / stats / closing
+    R           replay the current card's animation
+    → ←         step between cards
+
+  Nothing animates until a card is shown, so you can arm the recording, then
+  press R and get a clean run every take.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>BodyMaps — launch cards</title>
+<style>
+  :root {
+    --ink: #f5f5f7;
+    --dim: #86868b;
+    --bg: #050505;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    cursor: none;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .card {
+    position: fixed;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .card.on { display: flex; }
+
+  /* Title + closing ------------------------------------------------------ */
+  .wordmark {
+    font-size: clamp(48px, 9.5vw, 190px);
+    font-weight: 600;
+    letter-spacing: -0.045em;
+    line-height: 1;
+    opacity: 0;
+  }
+  .institution {
+    margin-top: clamp(12px, 1.7vh, 26px);
+    font-size: clamp(13px, 1.55vw, 31px);
+    font-weight: 400;
+    letter-spacing: 0.02em;
+    color: var(--dim);
+    opacity: 0;
+  }
+  .on .wordmark { animation: rise 1200ms cubic-bezier(.22,.61,.36,1) 120ms forwards; }
+  .on .institution { animation: rise 1000ms cubic-bezier(.22,.61,.36,1) 620ms forwards; }
+
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(0.42em); filter: blur(7px); }
+    to   { opacity: 1; transform: none; filter: none; }
+  }
+
+  /* Stats ---------------------------------------------------------------- */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, auto);
+    gap: clamp(28px, 5.4vw, 118px);
+    align-items: end;
+  }
+  .stat { text-align: center; opacity: 0; }
+  .on .stat { animation: rise 900ms cubic-bezier(.22,.61,.36,1) forwards; }
+  .on .stat:nth-child(1) { animation-delay: 200ms; }
+  .on .stat:nth-child(2) { animation-delay: 550ms; }
+  .on .stat:nth-child(3) { animation-delay: 900ms; }
+  .on .stat:nth-child(4) { animation-delay: 1250ms; }
+
+  .num {
+    font-size: clamp(34px, 5.6vw, 112px);
+    font-weight: 600;
+    letter-spacing: -0.035em;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .label {
+    margin-top: clamp(8px, 1.3vh, 20px);
+    font-size: clamp(11px, 1.02vw, 21px);
+    font-weight: 400;
+    letter-spacing: 0.055em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+</style>
+</head>
+<body>
+
+<section class="card" id="c1">
+  <div class="wordmark">BodyMaps</div>
+  <div class="institution">Johns Hopkins University</div>
+</section>
+
+<section class="card" id="c2">
+  <div class="stats">
+    <div class="stat"><div class="num" data-to="36390" data-fmt="comma">0</div><div class="label">Scans</div></div>
+    <div class="stat"><div class="num" data-to="145">0</div><div class="label">Hospitals</div></div>
+    <div class="stat"><div class="num" data-to="993" data-suffix="K">0</div><div class="label">Structures</div></div>
+    <div class="stat"><div class="num" data-to="32">0</div><div class="label">Classes per scan</div></div>
+  </div>
+</section>
+
+<section class="card" id="c3">
+  <div class="wordmark">BodyMaps</div>
+  <div class="institution">Johns Hopkins University</div>
+</section>
+
+<script>
+  const cards = [...document.querySelectorAll('.card')];
+  let index = 0;
+
+  // Count-ups are driven off the same delays as the CSS reveal so a number starts
+  // climbing exactly as its column fades up, rather than racing ahead of it.
+  const DELAYS = [200, 550, 900, 1250];
+  const RUN = 900;
+  let timers = [];
+
+  function countUp(el, delay) {
+    const to = Number(el.dataset.to);
+    const comma = el.dataset.fmt === 'comma';
+    const suffix = el.dataset.suffix ?? '';
+    const render = (v) => {
+      el.textContent = (comma ? v.toLocaleString('en-US') : String(v)) + suffix;
+    };
+    render(0);
+    timers.push(setTimeout(() => {
+      const t0 = performance.now();
+      const tick = (now) => {
+        const p = Math.min(1, (now - t0) / RUN);
+        // Same ease as the CSS reveal, so motion and type settle together.
+        const eased = 1 - Math.pow(1 - p, 3);
+        render(Math.round(to * eased));
+        if (p < 1) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }, delay));
+  }
+
+  function show(i) {
+    timers.forEach(clearTimeout);
+    timers = [];
+    index = (i + cards.length) % cards.length;
+    cards.forEach((c) => c.classList.remove('on'));
+
+    const card = cards[index];
+    // Reflow between removing and re-adding .on so the CSS animations restart
+    // from frame zero on a replay instead of being treated as already finished.
+    void card.offsetWidth;
+    card.classList.add('on');
+
+    card.querySelectorAll('.num').forEach((el, n) => countUp(el, DELAYS[n] ?? 0));
+  }
+
+  addEventListener('keydown', (e) => {
+    if (e.key === '1') show(0);
+    else if (e.key === '2') show(1);
+    else if (e.key === '3') show(2);
+    else if (e.key === 'r' || e.key === 'R') show(index);
+    else if (e.key === 'ArrowRight' || e.key === ' ') show(index + 1);
+    else if (e.key === 'ArrowLeft') show(index - 1);
+  });
+
+  show(0);
+</script>
+</body>
+</html>
