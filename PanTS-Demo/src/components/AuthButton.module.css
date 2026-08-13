@@ -1,31 +1,31 @@
 /* Account control for both nav bars. Monochrome to match the BodyMaps header;
-   the JHU Heritage Blue (#002D72) is reused for the primary "Sign in" action to
+   BodyMaps ink is used for the primary "Sign in" action to
    match the landing page's active tab / primary button. */
 
 .signInBtn {
 	padding: 8px 20px;
 	border-radius: 22px;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 12px;
 	font-weight: 600;
 	letter-spacing: 0.06em;
 	cursor: pointer;
-	background: #002d72;
+	background: var(--ink);
 	color: #ffffff;
-	border: 1px solid #002d72;
+	border: 1px solid var(--ink);
 	transition: background 0.2s ease, transform 0.2s ease;
 	white-space: nowrap;
 }
 .signInBtn:hover {
-	background: #00399a;
-	border-color: #00399a;
+	background: var(--ink-2);
+	border-color: var(--ink-2);
 	transform: translateY(-1px);
 }
 
 /* ── Signed-in trigger ── */
 .accountRoot {
 	position: relative;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 }
 
 .accountTrigger {
@@ -50,13 +50,13 @@
 	height: 26px;
 	flex-shrink: 0;
 	border-radius: 50%;
-	background: #002d72;
+	background: var(--ink);
 	color: #ffffff;
 	display: flex;
 	align-items: center;
 	justify-content: center;
 	font-size: 12px;
-	font-weight: 700;
+	font-weight: 600;
 }
 
 .accountEmail {
@@ -98,7 +98,7 @@
 	color: #111111;
 }
 .menuEmail {
-	font-family: 'JetBrains Mono', monospace;
+	font-family: "IBM Plex Mono", ui-monospace, monospace;
 	font-size: 11px;
 	color: #8f8f8f;
 	margin-top: 2px;
@@ -115,7 +115,7 @@
 	border: none;
 	background: transparent;
 	border-radius: 8px;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 13px;
 	color: #111111;
 	cursor: pointer;

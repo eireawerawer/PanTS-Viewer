@@ -2,7 +2,6 @@
    (AuthModal.css) so a plan wall doesn't look like it came from a different
    product than the sign-in it sits next to. */
 
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
 .upg-backdrop {
 	position: fixed;
@@ -24,7 +23,7 @@
 	border-radius: 18px;
 	box-shadow: 0 24px 60px rgba(0, 0, 0, 0.2);
 	padding: 30px 28px 24px;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	color: #111111;
 }
 
@@ -46,7 +45,7 @@
 
 .upg-title {
 	font-size: 19px;
-	font-weight: 700;
+	font-weight: 600;
 	margin: 0 0 8px;
 	padding-right: 20px;
 	line-height: 1.3;
@@ -68,7 +67,7 @@
 }
 .upg-plan-name {
 	font-size: 14px;
-	font-weight: 700;
+	font-weight: 600;
 	margin-bottom: 10px;
 }
 .upg-plan-points {
@@ -94,7 +93,7 @@
 	width: 5px;
 	height: 5px;
 	border-radius: 50%;
-	background: #002d72;
+	background: var(--ink);
 }
 
 .upg-actions {
@@ -107,8 +106,8 @@
 	width: 100%;
 	padding: 11px;
 	border-radius: 10px;
-	background: #002d72;
-	border: 1px solid #002d72;
+	background: var(--ink);
+	border: 1px solid var(--ink);
 	color: #ffffff;
 	font-family: inherit;
 	font-size: 14px;
@@ -117,7 +116,7 @@
 	transition: background 0.15s;
 }
 .upg-primary:hover {
-	background: #00399a;
+	background: var(--ink-2);
 }
 .upg-secondary {
 	width: 100%;

@@ -8,9 +8,9 @@
 }
 
 .filterLabel {
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: rgba(0, 0, 0, 0.75);
@@ -18,7 +18,7 @@
 
 .facetsLoading {
   align-self: center;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 11px;
   color: rgba(0, 0, 0, 0.35);
 }
@@ -26,7 +26,7 @@
 .pill {
   padding: 7px 16px;
   border-radius: 8px;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -37,14 +37,14 @@
   outline: none;
 }
 .pillActive {
-  border-color: #002D72;
-  background: #002D72;
+  border-color: var(--ink);
+  background: var(--ink);
   color: #ffffff;
 }
 
 .countBadge {
   margin-left: 7px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 10px;
   opacity: 0.6;
 }

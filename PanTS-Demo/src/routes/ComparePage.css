@@ -2,7 +2,7 @@
   min-height: 100vh;
   background: #08090b;
   color: #f4f5f7;
-  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   padding: 20px clamp(16px, 5vw, 64px) 64px;
   box-sizing: border-box;
 }
@@ -62,14 +62,14 @@
 .cmp__viewerlink {
   padding: 8px 12px;
   border-radius: 8px;
-  background: #2563eb;
-  color: #fff;
+  background: var(--accent);
+  color: var(--ink);
   text-decoration: none;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
 }
-.cmp__viewerlink:hover { background: #1d4ed8; }
+.cmp__viewerlink:hover { background: var(--accent-tint); }
 
 .cmp__cases {
   display: grid;
@@ -106,19 +106,19 @@
   justify-content: center;
   font-size: 10px;
   color: rgba(255, 255, 255, 0.35);
-  font-family: "Space Mono", monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 .cmp-case__meta { display: flex; flex-direction: column; gap: 6px; }
 .cmp-case__id { font-size: 15px; font-weight: 600; }
 .cmp-case__demo {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.62);
-  font-family: "Space Mono", monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 .cmp-case__open {
   margin-top: auto;
   font-size: 12px;
-  color: #7aa2ff;
+  color: var(--accent-tint);
   text-decoration: none;
 }
 .cmp-case__open:hover { text-decoration: underline; }
@@ -148,7 +148,7 @@
 .cmp__rowgroup:last-child { border-bottom: none; }
 .cmp__row--head {
   background: rgba(255, 255, 255, 0.05);
-  font-family: "Space Mono", monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -163,7 +163,7 @@
   font-size: 16px;
 }
 .cmp__cell {
-  font-family: "Space Mono", monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   color: rgba(255, 255, 255, 0.9);
   display: flex;
   flex-direction: column;
@@ -222,13 +222,13 @@
   display: grid;
   grid-template-columns: 1.3fr 1fr 1fr 1fr;
   gap: 18px;
-  font-family: "Space Mono", monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 13px;
 }
 .cmp__detail-row span:not(:first-child) { text-align: right; color: rgba(255, 255, 255, 0.85); }
 .cmp__detail-row span:first-child {
   color: rgba(255, 255, 255, 0.55);
-  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
 }
 .cmp__detail-row--head span:not(:first-child) {
   color: rgba(255, 255, 255, 0.42);

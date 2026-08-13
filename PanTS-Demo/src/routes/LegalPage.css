@@ -1,11 +1,10 @@
 /* Terms / Privacy placeholder pages. Matches the sign-up page's vocabulary. */
 
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
 
 .legal-wrapper {
 	min-height: 100vh;
 	background: #fafafa;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	color: #111111;
 }
 
@@ -25,7 +24,6 @@
 .legal-logo {
 	width: 30px;
 	height: 30px;
-	border-radius: 8px;
 }
 
 .legal-main {
@@ -36,7 +34,7 @@
 
 .legal-title {
 	font-size: 30px;
-	font-weight: 700;
+	font-weight: 600;
 	margin: 0 0 20px;
 }
 
@@ -80,7 +78,7 @@
 }
 .legal-footer a,
 .legal-body a {
-	color: #002d72;
+	color: var(--accent-deep);
 	font-weight: 600;
 }
 
