@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/authContext";
-import { ACCOUNT_TYPES, type AccountType } from "../../helpers/accountProfile";
+import { ACCOUNT_TYPES, accountTypeLabel, type AccountType } from "../../helpers/accountProfile";
+import { track } from "../../helpers/analytics";
 import { useSettings } from "./context";
 
 // Profile: who you are, one preference, and the way out.
@@ -11,8 +12,8 @@ import { useSettings } from "./context";
 // fewer for the same result.
 //
 // The account type used to be a required signup step with four descriptive
-// cards. Nothing reads it, so it's an optional select here — asking a question
-// that changes nothing is worse than not asking it.
+// cards. It's an optional select here: it still gates nothing, it's just
+// reported on. It lives on the account, so it follows the user between browsers.
 const ProfileSettings: React.FC = () => {
 	const navigate = useNavigate();
 	const {
@@ -87,11 +88,18 @@ const ProfileSettings: React.FC = () => {
 						id="set-role"
 						className="set-select"
 						value={user.profile.accountType ?? ""}
-						onChange={(e) =>
-							updateAccountProfile({
-								accountType: (e.target.value || null) as AccountType | null,
-							})
-						}
+						onChange={(e) => {
+							const accountType = (e.target.value || null) as AccountType | null;
+							run(async () => {
+								track("account_set_account_type");
+								await updateAccountProfile({ accountType });
+								notify(
+									accountType
+										? `Your role is set to ${accountTypeLabel(accountType)}.`
+										: "Your role has been cleared."
+								);
+							});
+						}}
 					>
 						<option value="">Not set</option>
 						{ACCOUNT_TYPES.map((t) => (

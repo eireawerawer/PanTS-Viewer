@@ -90,7 +90,7 @@ describe("model access", () => {
     // The free model is offered; the rest are shown but marked.
     expect(screen.getByText("LesionSegmenter")).toBeInTheDocument();
     expect(screen.getByText("ePAI")).toBeInTheDocument();
-    expect(screen.getAllByText("Upgrade").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Donate").length).toBeGreaterThan(0);
   });
 
   it("explains the lock instead of selecting the model", async () => {
@@ -122,7 +122,7 @@ describe("model access", () => {
     await settled();
     await openModelMenu(user);
     await user.click(screen.getByText("ePAI"));
-    await user.click(await screen.findByRole("button", { name: "See plans" }));
+    await user.click(await screen.findByRole("button", { name: "See donation options" }));
 
     expect(await screen.findByText("Plan settings")).toBeInTheDocument();
   });
@@ -278,6 +278,6 @@ describe("signed out", () => {
     await screen.findByText(/to run inference\./);
     await openModelMenu(user);
 
-    expect(screen.queryByText("Upgrade")).not.toBeInTheDocument();
+    expect(screen.queryByText("Donate")).not.toBeInTheDocument();
   });
 });

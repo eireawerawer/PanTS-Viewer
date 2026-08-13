@@ -41,6 +41,7 @@ import { createPortal } from "react-dom";
 import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
 import { useLocation, useParams } from "react-router-dom";
 import AISidebar from "../components/AIAssistant/AISidebar";
+import { track } from "../helpers/analytics";
 import { buildViewerActions } from "../components/AIAssistant/assistantActions";
 import MeasurementPanel from "../components/MeasurementPanel/MeasurementPanel";
 import { SegmentationMeshViewer } from "../components/viewer/MeshViewer";
@@ -626,6 +627,12 @@ function VisualizationPage() {
 	
 	const [outlineOpacityValue, setOutlineOpacityValue] = useState(0);
 	// Current/total slice per MPR pane, for the "245/519" caption + drag scrollbar.
+	// One event per case actually opened in the viewer — not per re-render, and
+	// not for a viewer opened on a local file, which has no case behind it.
+	useEffect(() => {
+		if (pantsCase || sessionId) track("viewer_open_case");
+	}, [pantsCase, sessionId]);
+
 	// Populated by subscribeToSliceChanges once the volume is ready; null until then.
 	const [sliceInfo, setSliceInfo] = useState<Record<CinePane, SliceInfo | null>>({
 		axial: null,
@@ -875,6 +882,7 @@ function VisualizationPage() {
 	};
 
 	const handleToggleSegmentVisibility = (id: number) => {
+	track("viewer_toggle_organ");
 	setSegmentVisibility((prev) => {
 		const next = { ...prev, [id]: prev[id] === false ? true : false };
 		setCheckState((cs) => {
@@ -1568,6 +1576,7 @@ function VisualizationPage() {
 		const unsubscribe = subscribeToMeasurementChanges((kind, m) => {
 			if (!sessionRef.current) return;
 			if (kind === "completed") {
+				track("viewer_measure");
 				sessionRef.current.log("measure", `${toolDisplayName(m.tool)} measured: ${m.value}`);
 				requestAnimationFrame(() => {
 					void takeSnapshot(`${toolDisplayName(m.tool)} — ${m.value}`);
@@ -2464,6 +2473,7 @@ function VisualizationPage() {
 	const handleToggleAISidebar = () => {
 		const opening = !showAISidebar;
 
+		if (opening) track("assistant_open");
 		setShowAISidebar(opening);
 
 		if (opening) {
@@ -2782,7 +2792,7 @@ const aiAvailableOrgans = useMemo(() => {
 												{LAYOUT_PRESETS.map(({ id, label }) => (
 													<button
 														key={id}
-														onClick={() => setLayoutPreset(id)}
+														onClick={() => { track("viewer_change_layout"); setLayoutPreset(id); }}
 														className={`vp-seg__btn ${layoutPreset === id ? "vp-seg__btn--active" : ""}`}
 													>{label}</button>
 												))}
@@ -3360,7 +3370,7 @@ const aiAvailableOrgans = useMemo(() => {
 											{!isLocal && (
 												<button
 													className="vp-tool"
-													onClick={() => setShowReportScreen(true)}
+													onClick={() => { track("report_open"); setShowReportScreen(true); }}
 													aria-label="Open report"
 												>
 													<IconReport size={20} color="white" />

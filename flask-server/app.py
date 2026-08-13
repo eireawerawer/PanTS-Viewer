@@ -13,6 +13,8 @@ from flask_cors import CORS
 from constants import Constants
 #print("DEBUG_CONSTANT:", Constants.SESSIONS_DIR_NAME)
 
+from api.admin_blueprint import admin_blueprint
+from api.analytics_blueprint import analytics_blueprint
 from api.api_blueprint import api_blueprint
 from api.auth_blueprint import auth_blueprint
 from api.oauth_blueprint import init_oauth, oauth_blueprint
@@ -41,6 +43,11 @@ def create_app():
     app.register_blueprint(api_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(auth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(oauth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
+    # /analytics/collect is always live; the dashboard's read endpoints inside
+    # this blueprint 404 unless ANALYTICS_DASHBOARD=true, and then need admin.
+    app.register_blueprint(analytics_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
+    # Admin-only throughout (role checks are per-route, not on the blueprint).
+    app.register_blueprint(admin_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
 
     app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB, for overcoming size limits in file uploads
 
@@ -72,8 +79,13 @@ def create_app():
     # it, and job.user_id is NOT NULL with an FK), then import any pre-DB
     # job.json, then fail jobs orphaned by the restart.
     try:
-        from services import auth_store, job_store
+        from services import auth_store, job_store, role_store
         auth_store.ensure_system_user()
+        # ADMIN_EMAILS -> the admin role, so a fresh or wiped database still has
+        # someone who can grant roles. Additive: it never takes admin away.
+        bootstrapped = role_store.ensure_bootstrap_admins()
+        if bootstrapped:
+            print(f"[boot] ensured admin for {len(bootstrapped)} account(s) from ADMIN_EMAILS")
         imported = job_store.import_legacy_job_json(Constants.SESSIONS_DIR_NAME)
         if imported:
             print(f"[boot] imported {imported} legacy job.json record(s)")
@@ -101,7 +113,9 @@ def create_app():
     # and would let any site make authenticated requests as a logged-in user).
     # Set ALLOWED_ORIGINS on the server (comma-separated); defaults to local dev.
     allowed_origins = [
-        o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+        o.strip() for o in os.environ.get(
+            "ALLOWED_ORIGINS", "http://localhost:5173"
+        ).split(",")
         if o.strip()
     ]
     CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True)

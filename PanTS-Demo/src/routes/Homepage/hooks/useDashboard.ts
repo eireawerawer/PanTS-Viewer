@@ -23,6 +23,7 @@ import type { PreviewType } from "../../../types";
 import { API_BASE } from "../../../helpers/constants";
 import { CARD_COUNT, PER_PAGE } from "../constants";
 import type { FacetData } from "../types";
+import { track } from "../../../helpers/analytics";
 
 export function useDashboard() {
   const [previewIds, setPreviewIds] = useState<CaseId[]>([]);
@@ -293,6 +294,7 @@ export function useDashboard() {
   };
 
   const handleSearch = () => {
+    track("dataset_search");
     if (searchId) {
       const clamped = Math.max(1, Math.min(9901, searchId));
       navigation("/case/" + clamped);
@@ -302,6 +304,7 @@ export function useDashboard() {
   };
 
   const handleCompare = () => {
+    track("dataset_open_compare");
     navigation(`/compare?a=${compareIds[0]}&b=${compareIds[1]}`);
   };
 
