@@ -78,18 +78,9 @@ const RULES = [
     // Hex forms plus rgb()/rgba() triplet of #002D72.
     pattern: /#002d72|#00399a|#68ace5|rgba?\(\s*0\s*,\s*45\s*,\s*114/i,
     why: "JHU Heritage/Spirit Blue is not a BodyMaps color. CTAs/links on light: var(--accent-deep); accents on dark: var(--accent) / var(--accent-tint).",
-    allow: [
-      "PanTS-Demo/src/components/segmentation/SegmentEffectPanel.css",
-      "PanTS-Demo/src/components/segmentation/SegmentsPopup.css",
-      "PanTS-Demo/src/components/segmentation/SegmentsPopup.tsx",
-      "PanTS-Demo/src/components/segmentation/SliceAnchorPickerUI.tsx",
-      "PanTS-Demo/src/components/viewer/AnnotationToolbar.css",
-      "PanTS-Demo/src/components/viewer/AnnotationToolbar.tsx",
-      "PanTS-Demo/src/components/viewer/FlyoutPrimitives.css",
-      "PanTS-Demo/src/routes/UploadPage.css",
-      "PanTS-Demo/src/routes/UploadPage.tsx",
-      "PanTS-Demo/src/routes/VisualizationPage.tsx",
-    ],
+    // Emptied: every file that was deferred here has been migrated off
+    // Heritage/Spirit Blue, so the rule is now enforced everywhere.
+    allow: [],
   },
   {
     name: "no-off-brand-blue-accents",
