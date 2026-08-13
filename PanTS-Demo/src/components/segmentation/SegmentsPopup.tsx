@@ -274,8 +274,7 @@ export default function SegmentsPopup({
 		root.style.setProperty("--atb-segpanel-w", open ? `${width}px` : "0px");
 	}, [open, width]);
 
-	const [tab, setTab] = useState<PopupTab>(activeCatalogOrganId != null ? "existing" : "custom");
-
+	const [tab, setTab] = useState<PopupTab>("existing");
 	const [adding, setAdding] = useState(false);
 	// Mirrors `adding` but lags behind on close so the add-form can play its
 	// fade/collapse-out transition before actually unmounting, instead of
