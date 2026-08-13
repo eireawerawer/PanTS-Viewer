@@ -1,0 +1,380 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { ReactElement } from "react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import AuthModal from "../components/AuthModal";
+import { AuthProvider } from "../contexts/authContext";
+import SettingsPage from "../routes/Settings";
+import HistorySettings from "../routes/Settings/HistorySettings";
+import PlanSettings from "../routes/Settings/PlanSettings";
+import PrivacySettings from "../routes/Settings/PrivacySettings";
+import ProfileSettings from "../routes/Settings/ProfileSettings";
+import { RECENT_UPLOADS_KEY, type RecentUpload } from "../helpers/recentUploads";
+
+// Settings against a stubbed API. Each section is its own URL now, so the tests
+// navigate to one rather than scrolling one long page. Assertions are on the
+// requests the server would actually receive — that's the contract that matters.
+
+const USER = {
+	id: "u1",
+	email: "test.user@example.com",
+	name: null as string | null,
+	plan: "free",
+};
+
+const USAGE = {
+	plan: "free",
+	limits: { daily_scans: 3, daily_ai_messages: 10 },
+	scans: { used: 2, limit: 3, in_flight: 0, resets_at: null },
+	ai_messages: { used: 0, limit: 10, resets_at: null },
+};
+
+let calls: { method: string; url: string; body?: unknown }[] = [];
+
+const json = (body: unknown, ok = true, status = 200) => ({
+	ok,
+	status,
+	json: async () => body,
+	text: async () => "",
+	blob: async () => new Blob([JSON.stringify(body)], { type: "application/json" }),
+	headers: { get: () => "application/json" },
+});
+
+beforeEach(() => {
+	calls = [];
+	localStorage.clear();
+	USER.name = null;
+	USER.plan = "free";
+	URL.createObjectURL = vi.fn(() => "blob:stub");
+	URL.revokeObjectURL = vi.fn();
+
+	global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+		const u = String(url);
+		const method = init?.method ?? "GET";
+		calls.push({ method, url: u, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+
+		if (u.includes("/api/auth/me") && method === "PATCH") {
+			USER.name = (JSON.parse(String(init?.body)) as { name: string }).name || null;
+			return json({ user: { ...USER } });
+		}
+		if (u.includes("/api/auth/me")) return json({ user: { ...USER } });
+		if (u.includes("/api/me/plan")) {
+			USER.plan = (JSON.parse(String(init?.body)) as { plan: string }).plan;
+			return json({ user: { ...USER } });
+		}
+		if (u.includes("/api/me/usage")) return json({ ...USAGE, plan: USER.plan });
+		if (u.includes("/api/me/export")) return json({ account: USER, jobs: [] });
+		if (u.includes("/api/me/jobs") && method === "DELETE") {
+			return json({ deleted: { jobs: 3, files: 5 } });
+		}
+		if (u.endsWith("/api/me") && method === "DELETE") {
+			return json({
+				deletion_requested_at: "2026-08-02T00:00:00",
+				restore_by: "2026-09-01T00:00:00",
+				grace_days: 30,
+			});
+		}
+		if (u.includes("/api/auth/oauth/providers")) return json({ google: true, github: true });
+		return json({ items: [], total: 0, ids: [] });
+	}) as unknown as typeof fetch;
+});
+
+afterEach(() => vi.restoreAllMocks());
+
+/** Renders the settings shell at one of its sections. */
+const renderAt = (path = "/account", signedOutElement: ReactElement = <div>Landing</div>) =>
+	render(
+		<AuthProvider>
+			<MemoryRouter initialEntries={[path]}>
+				<Routes>
+					<Route path="/account" element={<SettingsPage />}>
+						<Route index element={<ProfileSettings />} />
+						<Route path="plan" element={<PlanSettings />} />
+						<Route path="history" element={<HistorySettings />} />
+							<Route path="privacy" element={<PrivacySettings />} />
+					</Route>
+					<Route path="/" element={signedOutElement} />
+				</Routes>
+			</MemoryRouter>
+		</AuthProvider>
+	);
+
+const lastCall = (method: string, fragment: string) =>
+	[...calls].reverse().find((c) => c.method === method && c.url.includes(fragment));
+
+describe("navigation", () => {
+	it("offers a section per URL", async () => {
+		const user = userEvent.setup();
+		renderAt();
+		await screen.findByRole("heading", { name: "Profile" });
+
+		for (const [link, heading] of [
+			["Plan", "Usage"],
+			["History", "History"],
+			["Privacy", "Your data"],
+		] as const) {
+			await user.click(screen.getByRole("link", { name: link }));
+			expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
+		}
+	});
+
+	it("opens straight at a deep-linked section", async () => {
+		renderAt("/account/privacy");
+		expect(await screen.findByRole("heading", { name: "Your data" })).toBeInTheDocument();
+	});
+});
+
+describe("display name", () => {
+	it("shows the email-derived name as a placeholder, not a value to delete", async () => {
+		renderAt();
+		const field = await screen.findByLabelText("Name");
+		expect(field).toHaveValue("");
+		expect(field).toHaveAttribute("placeholder", "Test User");
+	});
+
+	it("saves on blur without an edit mode", async () => {
+		const user = userEvent.setup();
+		renderAt();
+
+		await user.type(await screen.findByLabelText("Name"), "Ada Lovelace");
+		await user.tab();
+
+		await waitFor(() =>
+			expect(lastCall("PATCH", "/api/auth/me")?.body).toEqual({ name: "Ada Lovelace" })
+		);
+		expect(await screen.findByText(/Your name has been updated/i)).toBeInTheDocument();
+	});
+
+	it("does not fire a request when the field is left unchanged", async () => {
+		const user = userEvent.setup();
+		renderAt();
+
+		await user.click(await screen.findByLabelText("Name"));
+		await user.tab();
+
+		expect(lastCall("PATCH", "/api/auth/me")).toBeUndefined();
+	});
+
+	it("surfaces a save failure instead of silently doing nothing", async () => {
+		const user = userEvent.setup();
+		global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes("/api/auth/me") && init?.method === "PATCH") {
+				return json({ error: "Name must be text" }, false, 400);
+			}
+			if (u.includes("/api/auth/me")) return json({ user: { ...USER } });
+			return json({});
+		}) as unknown as typeof fetch;
+
+		renderAt();
+		await user.type(await screen.findByLabelText("Name"), "x");
+		await user.tab();
+
+		expect(await screen.findByText("Name must be text")).toBeInTheDocument();
+	});
+
+	it("keeps the notification switch on Profile rather than a page of its own", async () => {
+		renderAt();
+		expect(await screen.findByText("Email me when a scan finishes")).toBeInTheDocument();
+		expect(screen.queryByRole("link", { name: "Notifications" })).not.toBeInTheDocument();
+	});
+});
+
+describe("plan", () => {
+	it("shows the current plan and what's been used of it", async () => {
+		renderAt("/account/plan");
+		expect(await screen.findByRole("heading", { name: "Free plan" })).toBeInTheDocument();
+		expect(await screen.findByText("2 of 3")).toBeInTheDocument();
+		expect(screen.getByText("0 of 10")).toBeInTheDocument();
+	});
+
+	it("splits the plans into Individual and Team like the reference sites", async () => {
+		const user = userEvent.setup();
+		renderAt("/account/plan");
+		await screen.findByRole("heading", { name: "Change plan" });
+
+		expect(screen.getByRole("heading", { name: "Free" })).toBeInTheDocument();
+		expect(screen.getByRole("heading", { name: "Pro" })).toBeInTheDocument();
+		expect(screen.queryByRole("heading", { name: "Team" })).not.toBeInTheDocument();
+
+		await user.click(screen.getByRole("tab", { name: "Team and Enterprise" }));
+		expect(await screen.findByRole("heading", { name: "Team" })).toBeInTheDocument();
+		expect(screen.getByRole("heading", { name: "Enterprise" })).toBeInTheDocument();
+		expect(screen.queryByRole("heading", { name: "Pro" })).not.toBeInTheDocument();
+	});
+
+	it("marks the plan you're on and won't let you re-pick it", async () => {
+		renderAt("/account/plan");
+		await screen.findByRole("heading", { name: "Change plan" });
+		expect(screen.getByRole("button", { name: "Current plan" })).toBeDisabled();
+	});
+
+	it("upgrades through the server, not local state", async () => {
+		const user = userEvent.setup();
+		renderAt("/account/plan");
+
+		await user.click(await screen.findByRole("button", { name: "Upgrade to Pro" }));
+
+		await waitFor(() => expect(lastCall("POST", "/api/me/plan")?.body).toEqual({ plan: "pro" }));
+		expect(await screen.findByText("You're on Pro.")).toBeInTheDocument();
+	});
+
+	it("shows each plan's price with the period it covers", async () => {
+		renderAt("/account/plan");
+		await screen.findByRole("heading", { name: "Change plan" });
+		expect(screen.getByText("$0")).toBeInTheDocument();
+		expect(screen.getByText("$1.99")).toBeInTheDocument();
+		expect(screen.getAllByText("per month").length).toBe(2);
+	});
+});
+
+describe("history", () => {
+	const day = 24 * 60 * 60 * 1000;
+	const entry = (over: Partial<RecentUpload>): RecentUpload => ({
+		sessionId: "s", label: "ct.nii.gz", model: "LesionSegmenter",
+		status: "Completed", timestamp: Date.now(), ...over,
+	});
+
+	it("lists only scans older than a day", async () => {
+		localStorage.setItem(RECENT_UPLOADS_KEY, JSON.stringify([
+			entry({ sessionId: "new", label: "today.nii.gz", timestamp: Date.now() - 60_000 }),
+			entry({ sessionId: "old", label: "lastweek.nii.gz", timestamp: Date.now() - 7 * day }),
+		]));
+
+		renderAt("/account/history");
+		expect(await screen.findByText("lastweek.nii.gz")).toBeInTheDocument();
+		expect(screen.queryByText("today.nii.gz")).not.toBeInTheDocument();
+	});
+
+	it("says so when there's nothing old enough yet", async () => {
+		localStorage.setItem(RECENT_UPLOADS_KEY, JSON.stringify([
+			entry({ sessionId: "new", timestamp: Date.now() - 60_000 }),
+		]));
+		renderAt("/account/history");
+		expect(await screen.findByText("Nothing here yet.")).toBeInTheDocument();
+	});
+});
+
+describe("export", () => {
+	it("downloads from the server rather than rebuilding from local state", async () => {
+		const user = userEvent.setup();
+		renderAt("/account/privacy");
+
+		await user.click(await screen.findByRole("button", { name: "Export" }));
+
+		await waitFor(() => expect(lastCall("GET", "/api/me/export")).toBeTruthy());
+		expect(URL.createObjectURL).toHaveBeenCalled();
+		expect(await screen.findByText(/Your data has been downloaded/i)).toBeInTheDocument();
+	});
+});
+
+describe("delete scan history", () => {
+	it("needs CLEAR typed, then reports how many scans went", async () => {
+		const user = userEvent.setup();
+		renderAt("/account/privacy");
+
+		await user.click(
+			(await screen.findAllByRole("button", { name: "Delete" }))[0]
+		);
+		const confirm = screen.getByRole("button", { name: "Confirm" });
+		expect(confirm).toBeDisabled();
+		expect(lastCall("DELETE", "/api/me/jobs")).toBeUndefined();
+
+		await user.type(screen.getByLabelText(/Type CLEAR to confirm/i), "CLEAR");
+		await user.click(confirm);
+
+		await waitFor(() => expect(lastCall("DELETE", "/api/me/jobs")).toBeTruthy());
+		expect(await screen.findByText(/Deleted 3 scans and their results/i)).toBeInTheDocument();
+	});
+
+	it("keeps you signed in", async () => {
+		const user = userEvent.setup();
+		renderAt("/account/privacy");
+
+		await user.click((await screen.findAllByRole("button", { name: "Delete" }))[0]);
+		await user.type(screen.getByLabelText(/Type CLEAR to confirm/i), "CLEAR");
+		await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+		await waitFor(() => expect(lastCall("DELETE", "/api/me/jobs")).toBeTruthy());
+		expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+	});
+});
+
+describe("delete account", () => {
+	// The warning lives in the confirmation rather than on the page, so it has to
+	// appear on the way through — not before, and not never.
+	it("explains itself only once you start, and needs DELETE not CLEAR", async () => {
+		const user = userEvent.setup();
+		renderAt("/account/privacy");
+		await screen.findByRole("heading", { name: "Your data" });
+		expect(screen.queryByText(/30 days to change your mind/i)).not.toBeInTheDocument();
+
+		await user.click(screen.getAllByRole("button", { name: "Delete" })[1]);
+		expect(await screen.findByText(/30 days to change your mind/i)).toBeInTheDocument();
+
+		await user.type(screen.getByLabelText(/Type DELETE to confirm/i), "CLEAR");
+		expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
+	});
+
+	it("calls the endpoint and leaves settings once confirmed", async () => {
+		const user = userEvent.setup();
+		renderAt("/account/privacy");
+
+		await user.click((await screen.findAllByRole("button", { name: "Delete" }))[1]);
+		await user.type(screen.getByLabelText(/Type DELETE to confirm/i), "DELETE");
+		await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+		await waitFor(() => expect(lastCall("DELETE", "/api/me")).toBeTruthy());
+		expect(await screen.findByText("Landing")).toBeInTheDocument();
+	});
+
+	it("does not carry a deletion message onto the sign-in popup", async () => {
+		const user = userEvent.setup();
+		renderAt("/account/privacy", <AuthModal />);
+
+		await user.click((await screen.findAllByRole("button", { name: "Delete" }))[1]);
+		await user.type(screen.getByLabelText(/Type DELETE to confirm/i), "DELETE");
+		await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+		await waitFor(() => expect(lastCall("DELETE", "/api/me")).toBeTruthy());
+		expect(screen.queryByText(/scheduled for deletion/i)).not.toBeInTheDocument();
+		expect(screen.queryByText(/Sign back in before/i)).not.toBeInTheDocument();
+	});
+});
+
+describe("success notices", () => {
+	it("clear themselves instead of staying pinned to the page", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true });
+		const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+		renderAt("/account/privacy");
+
+		await user.click(await screen.findByRole("button", { name: "Export" }));
+		expect(await screen.findByText(/Your data has been downloaded/i)).toBeInTheDocument();
+
+		await vi.advanceTimersByTimeAsync(6500);
+		await waitFor(() =>
+			expect(screen.queryByText(/Your data has been downloaded/i)).not.toBeInTheDocument()
+		);
+		vi.useRealTimers();
+	});
+
+	it("leaves errors up, since those still need acting on", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true });
+		const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+		global.fetch = vi.fn(async (url: RequestInfo | URL) => {
+			const u = String(url);
+			if (u.includes("/api/me/export")) return json({ error: "Storage is offline" }, false, 503);
+			if (u.includes("/api/auth/me")) return json({ user: { ...USER } });
+			return json({});
+		}) as unknown as typeof fetch;
+
+		renderAt("/account/privacy");
+		await user.click(await screen.findByRole("button", { name: "Export" }));
+		expect(await screen.findByText(/Couldn't prepare your data/i)).toBeInTheDocument();
+
+		await vi.advanceTimersByTimeAsync(10000);
+		expect(screen.getByText(/Couldn't prepare your data/i)).toBeInTheDocument();
+		vi.useRealTimers();
+	});
+});

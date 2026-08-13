@@ -1,5 +1,6 @@
 import os
 import uuid
+import signal
 import subprocess
 import re
 import csv
@@ -13,6 +14,86 @@ load_dotenv()
 
 # Only one model inference runs at a time to avoid GPU OOM
 _gpu_lock = threading.Lock()
+
+# ── Per-session subprocess tracking (for user-initiated cancel) ──
+# Each session's worker thread binds its session id thread-locally; _tracked_run
+# then registers the live Popen under that id so /api/cancel-inference/<sid>
+# can kill exactly that session's process group and nobody else's.
+_session_procs = {}
+_session_procs_lock = threading.Lock()
+_thread_session = threading.local()
+
+
+def bind_session(session_id):
+    """Associate the calling worker thread with a session id."""
+    _thread_session.sid = session_id
+
+
+def _tracked_run(cmd, check=False, capture_output=False, **kwargs):
+    """Drop-in for subprocess.run that makes the child killable per-session.
+
+    Starts the child in its own process group (start_new_session) and registers
+    it under the thread's bound session id for cancel_session(). Mirrors the
+    subprocess.run semantics used in this module (check / capture_output /
+    shell / executable / cwd / stdout / stderr / text).
+    """
+    if capture_output:
+        kwargs.setdefault("stdout", subprocess.PIPE)
+        kwargs.setdefault("stderr", subprocess.PIPE)
+    kwargs.setdefault("start_new_session", True)
+    sid = getattr(_thread_session, "sid", None)
+    proc = subprocess.Popen(cmd, **kwargs)
+    if sid:
+        with _session_procs_lock:
+            _session_procs[sid] = proc
+    try:
+        stdout, stderr = proc.communicate()
+    finally:
+        if sid:
+            with _session_procs_lock:
+                if _session_procs.get(sid) is proc:
+                    _session_procs.pop(sid, None)
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def cancel_session(session_id):
+    """Best-effort kill of one session's inference subprocess (SIGTERM the
+    process group, SIGKILL 5s later if it ignores that). Returns True if a
+    live process was signalled. Safe to call for queued/unknown sessions."""
+    with _session_procs_lock:
+        proc = _session_procs.get(session_id)
+    if not proc or proc.poll() is not None:
+        return False
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGTERM)
+
+        def _force_kill():
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_force_kill, daemon=True).start()
+        return True
+    except Exception as e:
+        print(f"[cancel] failed to kill process for session {session_id}: {e}")
+        return False
+
+
+def cancel_all_inference():
+    """Kill every tracked inference subprocess (admin 'stop everything').
+    Prefer cancel_session() for a single user's job; this is the blunt
+    kill-all kept for the global /cancel-inference endpoint."""
+    with _session_procs_lock:
+        sids = list(_session_procs.keys())
+    for sid in sids:
+        cancel_session(sid)
 
 def get_least_used_gpu(default_gpu=None):
     if default_gpu is None:
@@ -52,13 +133,27 @@ def _resolve_conda_activate_path():
     return ""
 
 
-def run_auto_segmentation(input_path, session_dir, model):
+def run_auto_segmentation(input_path, session_dir, model, session_id=None, on_start=None):
     """
     Dispatch to the appropriate model inference function.
     Serialized via _gpu_lock so concurrent requests queue instead of OOM-ing.
     Returns the output directory path on success, raises on failure.
+
+    session_id: binds this worker thread so _tracked_run/cancel_session can
+        target its subprocesses. on_start: called once the GPU slot is
+        acquired (i.e. the job leaves the queue); returning False aborts the
+        run (used when the user cancelled while the job was still queued) and
+        makes this function return None.
     """
     with _gpu_lock:
+        if on_start is not None:
+            try:
+                if on_start() is False:
+                    return None
+            except Exception as e:
+                print(f"[on_start] callback error for {session_id}: {e}")
+        if session_id:
+            bind_session(session_id)
         if model == 'ePAI':
             conda_path = _resolve_conda_activate_path()
             return _run_epai_inference(
@@ -84,6 +179,16 @@ def run_auto_segmentation(input_path, session_dir, model):
                 conda_path=conda_path,
                 atlasnet_env_name=os.getenv("CONDA_ENV_ATLASNET", "epai"),
             )
+        elif model == 'ShapeKit':
+            return _run_shapekit_inference(input_dir=input_path, session_dir=session_dir)
+        elif model == 'LesionSegmenter':
+            conda_path = _resolve_conda_activate_path()
+            return _run_lesionsegmenter_inference(
+                input_path=input_path,
+                session_dir=session_dir,
+                conda_path=conda_path,
+                lesionseg_env_name=os.getenv("CONDA_ENV_LESIONSEG", "epai"),
+            )
         else:
             raise ValueError(f"Unknown model: {model}")
 
@@ -99,28 +204,36 @@ _VIEWER_LABELS = {
     "pancreatic_duct": 21, "pancreatic_lesion": 22, "postcava": 23,
     "prostate": 24, "spleen": 25, "stomach": 26,
     "superior_mesenteric_artery": 27, "veins": 28,
+    # extended labels for full ePAI output
+    "intestine": 29, "renal_vein_left": 30, "renal_vein_right": 31, "cbd_stent": 32,
+    # LesionSegmenter extra lesion classes (pancreatic_lesion already at 22)
+    "liver_lesion": 33, "kidney_lesion": 34, "colon_lesion": 35,
 }
 
-# ePAI model label → viewer label
+# ePAI model label → viewer label (all 25 classes from dataset.json)
 _EPAI_TO_VIEWER = {
-    1: _VIEWER_LABELS["aorta"],
-    2: _VIEWER_LABELS["adrenal_gland_left"],
-    3: _VIEWER_LABELS["adrenal_gland_right"],
-    4: _VIEWER_LABELS["common_bile_duct"],
-    5: _VIEWER_LABELS["celiac_artery"],
-    6: _VIEWER_LABELS["colon"],
-    7: _VIEWER_LABELS["duodenum"],
-    8: _VIEWER_LABELS["gall_bladder"],
-    9: _VIEWER_LABELS["postcava"],
+    1:  _VIEWER_LABELS["aorta"],
+    2:  _VIEWER_LABELS["adrenal_gland_left"],
+    3:  _VIEWER_LABELS["adrenal_gland_right"],
+    4:  _VIEWER_LABELS["common_bile_duct"],
+    5:  _VIEWER_LABELS["celiac_artery"],
+    6:  _VIEWER_LABELS["colon"],
+    7:  _VIEWER_LABELS["duodenum"],
+    8:  _VIEWER_LABELS["gall_bladder"],
+    9:  _VIEWER_LABELS["postcava"],
     10: _VIEWER_LABELS["kidney_left"],
     11: _VIEWER_LABELS["kidney_right"],
     12: _VIEWER_LABELS["liver"],
     13: _VIEWER_LABELS["pancreas"],
     14: _VIEWER_LABELS["pancreatic_duct"],
     15: _VIEWER_LABELS["superior_mesenteric_artery"],
+    16: _VIEWER_LABELS["intestine"],
     17: _VIEWER_LABELS["spleen"],
     18: _VIEWER_LABELS["stomach"],
     19: _VIEWER_LABELS["veins"],
+    20: _VIEWER_LABELS["renal_vein_left"],
+    21: _VIEWER_LABELS["renal_vein_right"],
+    22: _VIEWER_LABELS["cbd_stent"],
     23: _VIEWER_LABELS["pancreatic_lesion"],  # pancreatic_pdac
     24: _VIEWER_LABELS["pancreatic_lesion"],  # pancreatic_cyst
     25: _VIEWER_LABELS["pancreatic_lesion"],  # pancreatic_pnet
@@ -177,6 +290,44 @@ _SUPREM_TO_VIEWER = {
     23: _VIEWER_LABELS["femur_left"],
     24: _VIEWER_LABELS["femur_right"],
     25: _VIEWER_LABELS["celiac_artery"],
+}
+
+# LesionSegmenter model label -> viewer label (43-class PanTS label space).
+# Only classes with a confident 1:1 match in the viewer's scheme are mapped.
+# NOT mapped (no viewer category exists yet, left as background rather than
+# guessing at a slot and risking a mislabeled structure): esophagus, rectum,
+# vertebrae_* (10 classes), trachea, heart, hip_left, hip_right, sacrum,
+# uterus. pancreatic_lesion maps onto the same viewer slot ePAI and Atlas-Net
+# use for their PDAC/cyst/PNET subtypes. liver_lesion/kidney_lesion/colon_lesion
+# get their own viewer slots (33/34/35) -- this single model already computes all
+# four lesions in one forward pass, so surfacing the other three is free at
+# runtime. NOTE: only pancreatic_lesion has ground-truth validation on PanTS;
+# the other three are surfaced but flagged experimental in the UI.
+_LESIONSEG_TO_VIEWER = {
+    1: _VIEWER_LABELS["aorta"],
+    2: _VIEWER_LABELS["gall_bladder"],
+    3: _VIEWER_LABELS["kidney_left"],
+    4: _VIEWER_LABELS["kidney_right"],
+    5: _VIEWER_LABELS["liver"],
+    6: _VIEWER_LABELS["pancreas_body"],
+    7: _VIEWER_LABELS["pancreas_head"],
+    8: _VIEWER_LABELS["pancreas_tail"],
+    9: _VIEWER_LABELS["postcava"],
+    10: _VIEWER_LABELS["spleen"],
+    11: _VIEWER_LABELS["stomach"],
+    12: _VIEWER_LABELS["adrenal_gland_left"],
+    13: _VIEWER_LABELS["adrenal_gland_right"],
+    14: _VIEWER_LABELS["bladder"],
+    15: _VIEWER_LABELS["celiac_artery"],  # celiac_trunk -> celiac_artery
+    16: _VIEWER_LABELS["colon"],
+    17: _VIEWER_LABELS["duodenum"],
+    19: _VIEWER_LABELS["prostate"],
+    21: _VIEWER_LABELS["lung_left"],
+    22: _VIEWER_LABELS["lung_right"],
+    39: _VIEWER_LABELS["liver_lesion"],
+    40: _VIEWER_LABELS["pancreatic_lesion"],
+    41: _VIEWER_LABELS["kidney_lesion"],
+    42: _VIEWER_LABELS["colon_lesion"],
 }
 
 
@@ -301,7 +452,6 @@ def _run_epai_inference(input_path: str, session_dir: str, conda_path: str, epai
                 f"--input_csv {shlex.quote(input_csv_path)} "
                 f"--output_csv {shlex.quote(output_csv_path)} "
                 f"--continue_prediction "
-                f"--save_probabilities "
                 f"-npp {shlex.quote(os.getenv('EPAI_NPP', '3'))} "
                 f"-nps {shlex.quote(os.getenv('EPAI_NPS', '3'))} "
                 f"-num_parts 1 "
@@ -346,7 +496,6 @@ def _run_epai_inference(input_path: str, session_dir: str, conda_path: str, epai
                     f"--input_csv {shlex.quote(input_csv_path)} "
                     f"--output_csv {shlex.quote(output_csv_path)} "
                     f"--continue_prediction "
-                    f"--save_probabilities "
                     f"-npp {shlex.quote(os.getenv('EPAI_NPP', '3'))} "
                     f"-nps {shlex.quote(os.getenv('EPAI_NPS', '3'))} "
                     f"-num_parts 1 "
@@ -357,7 +506,7 @@ def _run_epai_inference(input_path: str, session_dir: str, conda_path: str, epai
         print(f"[INFO] Running ePAI command for case {case_id}")
         print(full_cmd)
         try:
-            subprocess.run(
+            _tracked_run(
                 full_cmd,
                 shell=True,
                 executable="/bin/bash",
@@ -423,15 +572,17 @@ def _run_suprem_inference(input_path: str, session_dir: str) -> str:
         f"python -W ignore {shlex.quote(os.path.join(suprem_src, 'inference.py'))} "
         f"--data_root_path {shlex.quote(inputs_dir)} "
         f"--save_dir {shlex.quote(output_dir)} "
-        f"--resume {shlex.quote(checkpoint)} "
+        f"--checkpoint {shlex.quote(checkpoint)} "
+        f"--backbone unet "
+        f"--suprem "
         f"--store_result"
     )
 
     print(f"[INFO] Running SuPreM native inference")
     print(full_cmd)
     try:
-        subprocess.run(full_cmd, shell=True, executable="/bin/bash", check=True,
-                       cwd=suprem_src)
+        _tracked_run(full_cmd, shell=True, executable="/bin/bash", check=True,
+                     cwd=suprem_src)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             f"SuPreM inference failed\nCommand: {full_cmd}\nExit code: {e.returncode}"
@@ -490,7 +641,7 @@ def _run_openvae_inference(input_path: str, session_dir: str) -> str:
     )
     print(f"[INFO] Running OpenVAE inference\n{full_cmd}")
     try:
-        subprocess.run(full_cmd, shell=True, executable="/bin/bash", check=True, cwd=openvae_src)
+        _tracked_run(full_cmd, shell=True, executable="/bin/bash", check=True, cwd=openvae_src)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             f"OpenVAE inference failed\nCommand: {full_cmd}\nExit code: {e.returncode}"
@@ -582,7 +733,7 @@ def _run_medformer_inference(input_path: str, session_dir: str) -> str:
     )
     print(f"[INFO] Running MedFormer inference\n{full_cmd}")
     try:
-        subprocess.run(
+        _tracked_run(
             full_cmd, shell=True, executable="/bin/bash", check=True, cwd=rsuper_src,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
@@ -645,7 +796,7 @@ def _run_rsuper_inference(input_path: str, session_dir: str) -> str:
     )
     print(f"[INFO] Running R-Super inference\n{full_cmd}")
     try:
-        subprocess.run(
+        _tracked_run(
             full_cmd, shell=True, executable="/bin/bash", check=True, cwd=rsuper_src,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
@@ -708,7 +859,7 @@ def _run_atlasnet_inference(input_path: str, session_dir: str, conda_path: str, 
     print(f"[INFO] Running Atlas-Net command for case {case_id}")
     print(full_cmd)
     try:
-        subprocess.run(full_cmd, shell=True, executable="/bin/bash", check=True)
+        _tracked_run(full_cmd, shell=True, executable="/bin/bash", check=True)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             f"Atlas-Net inference command failed\nCommand: {full_cmd}\nExit code: {e.returncode}"
@@ -727,12 +878,106 @@ def _run_atlasnet_inference(input_path: str, session_dir: str, conda_path: str, 
     return output_ct_dir
 
 
+def _run_lesionsegmenter_inference(input_path: str, session_dir: str, conda_path: str, lesionseg_env_name: str) -> str:
+    """LesionSegmenter: nnU-Net ResidualEncoderUNet-L, 43-class PanTS label space
+    including pancreatic/liver/kidney/colon lesion.
+
+    -step_size 0.7 and --disable_tta are not defaults elsewhere in this file --
+    they're here because they were validated end-to-end against real ground
+    truth on 229 held-out lesion-positive cases: 1x (no mirror-TTA) at step 0.7
+    is statistically indistinguishable from the slow 8x-TTA/step-0.5 default
+    (paired Dice delta not significant, 95% CI crosses zero) while running
+    roughly 5x faster. Dropping either flag trades speed for nothing -- do not
+    remove them to "be safe", the safety case is what's cited above.
+
+    Runs scripts/lesionseg_predict.py instead of the bare nnUNetv2_predict_from_modelfolder
+    CLI every other model here uses -- that CLI has no flag for GPU-accelerated export
+    resampling, and this wrapper applies it (~26-42s -> ~1-6s on the export stage, no
+    accuracy cost, see the script's own docstring). Directly measured on identical
+    case/flags/environment: 2m18s (bare CLI) -> 1m5s (this wrapper) end to end. Still a
+    fresh subprocess per request -- NOT the warm-predictor optimization, that's separate.
+    """
+    case_id = _normalize_case_id(input_path)
+
+    lesionseg_workspace = os.path.join(session_dir, "lesionsegmenter")
+    input_dir = os.path.join(lesionseg_workspace, "eval")
+    save_dir = os.path.join(lesionseg_workspace, "out")
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
+
+    nnunet_input = os.path.join(input_dir, f"{case_id}_0000.nii.gz")
+    if os.path.lexists(nnunet_input):
+        os.remove(nnunet_input)
+    os.symlink(input_path, nnunet_input)
+
+    ckpt_path = os.getenv(
+        "LESIONSEG_CKPT_PATH",
+        "/home/visitor/lesionsegmenter/model/nnUNet_results/Dataset_LesionSegmenter/nnUNetTrainer__nnUNetPlans__3d_fullres",
+    )
+    nnunet_raw = os.getenv("LESIONSEG_NNUNET_RAW", "/home/visitor/lesionsegmenter/nnUNet/raw")
+    nnunet_preprocessed = os.getenv("LESIONSEG_NNUNET_PREPROCESSED", "/home/visitor/lesionsegmenter/nnUNet/preprocessed")
+    nnunet_results = os.getenv("LESIONSEG_NNUNET_RESULTS", "/home/visitor/lesionsegmenter/nnUNet/results")
+
+    selected_gpu = get_least_used_gpu()
+    predict_script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "lesionseg_predict.py")
+
+    # `conda run -n <env> python ...` re-resolves and activates the environment on every
+    # single request -- measured at ~1.75s of pure overhead versus calling that env's
+    # python binary directly (0.013s). Paid once per request just like the cold model
+    # load, so it's worth skipping. Falls back to `conda run` if the env's binary isn't
+    # where conda envs conventionally live (e.g. a differently-configured deployment),
+    # so this degrades to the previous behavior rather than breaking outright.
+    direct_python = os.path.expanduser(f"~/.conda/envs/{lesionseg_env_name}/bin/python")
+    if os.path.exists(direct_python):
+        run_prefix = shlex.quote(direct_python)
+    else:
+        conda_exe = shutil.which("conda")
+        if not conda_exe:
+            raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
+        run_prefix = f"{shlex.quote(conda_exe)} run -n {shlex.quote(lesionseg_env_name)} python"
+
+    full_cmd = (
+        f"nnUNet_raw={shlex.quote(nnunet_raw)} "
+        f"nnUNet_preprocessed={shlex.quote(nnunet_preprocessed)} "
+        f"nnUNet_results={shlex.quote(nnunet_results)} "
+        f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
+        f"{run_prefix} {shlex.quote(predict_script)} "
+        f"-i {shlex.quote(input_dir)} "
+        f"-o {shlex.quote(save_dir)} "
+        f"-m {shlex.quote(ckpt_path)} "
+        f"-step_size 0.7 "
+        f"--disable_tta "
+        f"-chk checkpoint_final.pth"
+    )
+
+    print(f"[INFO] Running LesionSegmenter command for case {case_id}")
+    print(full_cmd)
+    try:
+        _tracked_run(full_cmd, shell=True, executable="/bin/bash", check=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"LesionSegmenter inference command failed\nCommand: {full_cmd}\nExit code: {e.returncode}"
+        ) from e
+
+    case_pred = os.path.join(save_dir, f"{case_id}.nii.gz")
+    if not os.path.exists(case_pred):
+        raise RuntimeError(f"Expected LesionSegmenter output not found: {case_pred}")
+
+    output_ct_dir = os.path.join(session_dir, "outputs", "ct")
+    os.makedirs(output_ct_dir, exist_ok=True)
+    combined_label_path = os.path.join(output_ct_dir, "combined_labels.nii.gz")
+    shutil.copy2(case_pred, combined_label_path)
+    _remap_combined_labels(combined_label_path, _LESIONSEG_TO_VIEWER)
+
+    return output_ct_dir
+
+
 def _is_truthy(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _run_checked_process(cmd: list[str], error_prefix: str):
-    process = subprocess.run(cmd, text=True, capture_output=True)
+    process = _tracked_run(cmd, text=True, capture_output=True)
     if process.returncode != 0:
         raise RuntimeError(
             f"{error_prefix}"
@@ -817,7 +1062,6 @@ def _run_epai_remote_inference(
         f"--input_csv {shlex.quote(remote_input_csv)} "
         f"--output_csv {shlex.quote(remote_output_csv)} "
         f"--continue_prediction "
-        f"--save_probabilities "
         f"-npp {shlex.quote(os.getenv('EPAI_NPP', '3'))} "
         f"-nps {shlex.quote(os.getenv('EPAI_NPS', '3'))} "
         f"-num_parts 1 "
@@ -857,3 +1101,126 @@ def _run_epai_remote_inference(
             ["ssh", "-p", remote_port, remote_target, f"rm -rf {shlex.quote(remote_job_dir)}"],
             "Failed to clean up remote ePAI workspace",
         )
+
+
+def _run_shapekit_inference(input_dir: str, session_dir: str) -> str:
+    """
+    Run ShapeKit post-processing on a segmentation output directory.
+
+    ShapeKit expects: input_folder/case_id/segmentations/<organ>.nii.gz
+    We receive:       input_dir/combined_labels.nii.gz  (viewer label values)
+
+    Steps:
+      1. Split combined_labels.nii.gz into per-organ files in ShapeKit's layout
+      2. Run ShapeKit
+      3. Reassemble refined organs back into combined_labels.nii.gz with viewer label values
+    """
+    import numpy as np
+    import nibabel as nib
+
+    output_dir = os.path.join(session_dir, "shapekit")
+    log_dir    = os.path.join(session_dir, "shapekit_logs")
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+
+    shapekit_src = os.getenv("SHAPEKIT_SRC_PATH", "/home/visitor/ShapeKit")
+    conda_env    = os.getenv("CONDA_ENV_SHAPEKIT", "shapekit")
+    conda_exe    = shutil.which("conda") or "/home/apps/anaconda3/condabin/conda"
+    cpu_count    = os.getenv("SHAPEKIT_CPU_NUM", "16")
+
+    if not os.path.isdir(shapekit_src):
+        raise RuntimeError(
+            f"ShapeKit source not found at {shapekit_src}. "
+            "Install it with:\n"
+            f"  git clone https://github.com/BodyMaps/ShapeKit.git {shapekit_src}\n"
+            f"  conda create -n {conda_env} python=3.10 -y\n"
+            f"  conda run -n {conda_env} pip install -r {shapekit_src}/requirements.txt\n"
+            "Or set SHAPEKIT_SRC_PATH and CONDA_ENV_SHAPEKIT env vars to the correct paths."
+        )
+
+    # --- Step 1: split combined_labels.nii.gz into per-organ files ---
+    combined_path = os.path.join(input_dir, "combined_labels.nii.gz")
+    if not os.path.isfile(combined_path):
+        raise RuntimeError(
+            f"ShapeKit requires combined_labels.nii.gz but it was not found in: {input_dir}"
+        )
+
+    # Organs that ShapeKit's config.yaml knows how to process
+    _SHAPEKIT_ORGANS = {
+        "adrenal_gland_left", "adrenal_gland_right", "aorta", "bladder",
+        "colon", "duodenum", "femur_left", "femur_right", "gall_bladder",
+        "intestine", "kidney_left", "kidney_right", "liver",
+        "lung_left", "lung_right", "pancreas", "postcava", "prostate",
+        "spleen", "stomach",
+    }
+    # viewer label value → organ name
+    _label_to_name = {v: k for k, v in _VIEWER_LABELS.items()}
+
+    case_id      = "case001"
+    sk_input_dir = os.path.join(session_dir, "shapekit_input")
+    seg_dir      = os.path.join(sk_input_dir, case_id, "segmentations")
+    os.makedirs(seg_dir, exist_ok=True)
+
+    combined_img  = nib.load(combined_path)
+    combined_data = np.asarray(combined_img.dataobj, dtype=np.int16)
+    affine, header = combined_img.affine, combined_img.header
+
+    for label_val, organ_name in _label_to_name.items():
+        if organ_name not in _SHAPEKIT_ORGANS:
+            continue
+        mask = (combined_data == label_val).astype(np.int16)
+        if not np.any(mask):
+            continue
+        nib.save(
+            nib.Nifti1Image(mask, affine, header),
+            os.path.join(seg_dir, f"{organ_name}.nii.gz"),
+        )
+    print(f"[INFO] Split {len(os.listdir(seg_dir))} organ files into {seg_dir}")
+
+    # --- Step 2: run ShapeKit ---
+    sk_raw_output = os.path.join(session_dir, "shapekit_raw")
+    os.makedirs(sk_raw_output, exist_ok=True)
+
+    full_cmd = (
+        f"{shlex.quote(conda_exe)} run -n {shlex.quote(conda_env)} "
+        f"python -W ignore {shlex.quote(os.path.join(shapekit_src, 'main.py'))} "
+        f"--input_folder {shlex.quote(os.path.abspath(sk_input_dir))} "
+        f"--output_folder {shlex.quote(os.path.abspath(sk_raw_output))} "
+        f"--cpu_count {cpu_count} "
+        f"--log_folder {shlex.quote(os.path.abspath(log_dir))} "
+        f"--continue_prediction"
+    )
+    print(f"[INFO] Running ShapeKit post-processing\n{full_cmd}")
+    try:
+        _tracked_run(full_cmd, shell=True, executable="/bin/bash", check=True, cwd=shapekit_src)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"ShapeKit post-processing failed\nCommand: {full_cmd}\nExit code: {e.returncode}"
+        ) from e
+
+    # --- Step 3: reassemble combined_labels.nii.gz with viewer label values ---
+    refined_seg_dir = os.path.join(sk_raw_output, case_id, "segmentations")
+    if not os.path.isdir(refined_seg_dir):
+        raise RuntimeError(f"ShapeKit produced no segmentation output in: {refined_seg_dir}")
+
+    # Start from the original combined labels (preserves labels ShapeKit doesn't touch)
+    result_data = combined_data.copy()
+
+    for organ_file in os.listdir(refined_seg_dir):
+        if not organ_file.endswith(".nii.gz"):
+            continue
+        organ_name   = organ_file[: -len(".nii.gz")]
+        viewer_label = _VIEWER_LABELS.get(organ_name)
+        if viewer_label is None:
+            continue
+        organ_data = np.asarray(nib.load(os.path.join(refined_seg_dir, organ_file)).dataobj)
+        # Clear old pixels for this organ, write refined mask
+        result_data[result_data == viewer_label] = 0
+        result_data[organ_data > 0] = viewer_label
+
+    nib.save(
+        nib.Nifti1Image(result_data, affine, header),
+        os.path.join(output_dir, "combined_labels.nii.gz"),
+    )
+    print(f"[INFO] ShapeKit refined combined_labels saved to {output_dir}")
+    return output_dir

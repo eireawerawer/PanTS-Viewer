@@ -1,17 +1,21 @@
+from werkzeug.datastructures import MultiDict, FileStorage
 from flask import Blueprint, send_file, make_response, request, jsonify
 from services.nifti_processor import NiftiProcessor
 from services.session_manager import SessionManager, generate_uuid
 from services.auto_segmentor import run_auto_segmentation
+from services.case_quality import load_case_quality_manifest, merge_case_quality
+from services.manufacturer_normalization import canonicalize_manufacturer
+from services.site_normalization import split_site_codes
 from models.application_session import ApplicationSession
 from models.combined_labels import CombinedLabels
 from models.base import db
 from constants import Constants
 
+
 from io import BytesIO
 from datetime import datetime
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
-
 from typing import Any, Dict, Optional, Set, List, Tuple
 
 import os
@@ -44,12 +48,61 @@ def combine_label_npz(index: int):
     npz_processor.combine_labels(index)
     return
 def get_panTS_id(index):
-    cur_case_id = str(index)
-    iter = max(0, 8 - len(str(index)))
+    index_str = re.sub(r"^PanTS_?", "", str(index).strip(), flags=re.IGNORECASE)
+    if not re.fullmatch(r"\d+", index_str):
+        raise ValueError("Invalid case id: numeric value expected")
+
+    cur_case_id = index_str
+    iter = max(0, 8 - len(index_str))
     for _ in range(iter):
         cur_case_id = "0" + cur_case_id
-    cur_case_id = "PanTS_" + cur_case_id    
+    cur_case_id = "PanTS_" + cur_case_id
     return cur_case_id
+
+def get_cancerverse_id(index):
+    """CV_%08d id from a numeric index (accepts an optional 'CV_' prefix)."""
+    index_str = re.sub(r"^CV_?", "", str(index).strip(), flags=re.IGNORECASE)
+    if not re.fullmatch(r"\d+", index_str):
+        raise ValueError("Invalid case id: numeric value expected")
+    return "CV_" + index_str.zfill(8)
+
+def get_dataset_from_case_id(case_str):
+    """Dispatch on the id prefix: 'CancerVerse' for CV ids, else 'PanTS'."""
+    return "CancerVerse" if str(case_str).strip().upper().startswith("CV") else "PanTS"
+
+def get_folder_id(case_id):
+    """Canonical on-disk folder id for either dataset from an incoming request id."""
+    if get_dataset_from_case_id(case_id) == "CancerVerse":
+        return get_cancerverse_id(case_id)
+    return get_panTS_id(case_id)
+
+def get_case_nifti_paths(case_id):
+    """Resolve the CT / mask / low-res paths for a case, dispatching on dataset.
+
+    CancerVerse is CT-only (no masks yet), so ``mask`` is None and
+    ``masks_available`` is False for CV cases.
+    """
+    dataset = get_dataset_from_case_id(case_id)
+    if dataset == "CancerVerse":
+        folder = get_cancerverse_id(case_id)
+        return {
+            "dataset": dataset,
+            "folder_id": folder,
+            "image": f"{Constants.CANCERVERSE_PATH}/{folder}/{Constants.MAIN_NIFTI_FILENAME}",
+            "lowres_image": f"{Constants.CANCERVERSE_LOWRES_PATH}/image_only/{folder}/ct_lowres.nii.gz",
+            "mask": None,
+            "masks_available": False,
+        }
+    folder = get_panTS_id(case_id)
+    pants_lowres = os.environ.get("PANTS_LOWRES_PATH", "/home/visitor/pants_lowres")
+    return {
+        "dataset": dataset,
+        "folder_id": folder,
+        "image": f"{Constants.PANTS_PATH}/image_only/{folder}/{Constants.MAIN_NIFTI_FILENAME}",
+        "lowres_image": f"{pants_lowres}/image_only/{folder}/ct_lowres.nii.gz",
+        "mask": f"{Constants.PANTS_PATH}/mask_only/{folder}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}",
+        "masks_available": True,
+    }
 
 def clean_nan(obj):
     """Recursively replace NaN with None for JSON serialization."""
@@ -71,25 +124,44 @@ def organname_to_name(filename):
     name = filename.replace(".nii.gz", "").replace("_", " ")
     return name.title()
 
+def create_nifti_multi_dict(seg_filenames: list[str], segmentation_path: str):
+    
+    nifti_multi_dict = MultiDict()
+    for filename in seg_filenames:
+        path = os.path.join(segmentation_path, filename)
+        
+        with open(path, 'rb') as file_stream:
+            file_storage = FileStorage(stream=BytesIO(file_stream.read()), filename=filename, content_type='application/gzip')
+            nifti_multi_dict.add(key=filename, value=file_storage)
+    
+    return nifti_multi_dict
+
+
 def get_mask_data_internal(id, fallback=False):
     """Retrieve or compute organ metadata from NIfTI and mask paths for a session."""
     try:
-        subfolder = "ImageTr" if int(id) < 9000 else "ImageTe"
-        label_subfolder = "LabelTr" if int(id) < 9000 else "LabelTe"
-        main_nifti_path = f"{Constants.PANTS_PATH}/data/{subfolder}/{get_panTS_id(id)}/{Constants.MAIN_NIFTI_FILENAME}"
-        combined_labels_path = f"{Constants.PANTS_PATH}/data/{label_subfolder}/{get_panTS_id(id)}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
+        main_nifti_path = f"{Constants.PANTS_PATH}/image_only/{get_panTS_id(id)}/{Constants.MAIN_NIFTI_FILENAME}"
+        combined_labels_path = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(id)}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
         print(f"[INFO] Processing NIFTI for id {id}")
         organ_intensities = None
         
-        organ_intensities_path = f"{Constants.PANTS_PATH}/data/{label_subfolder}/{get_panTS_id(id)}/{Constants.ORGAN_INTENSITIES_FILENAME}"
-        if not os.path.exists(organ_intensities_path) or not os.path.exists(combined_labels_path):
-            npz_processor = NpzProcessor()
-            labels, organ_intensities = npz_processor.combine_labels(int(id), keywords={"pancrea": "pancreas"}, save=True)
-        else: 
-            with open(organ_intensities_path, "r") as f:
-                organ_intensities = json.load(f)
+        organ_intensities_path = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(id)}/{Constants.ORGAN_INTENSITIES_FILENAME}"
         
         nifti_processor = NiftiProcessor(main_nifti_path, combined_labels_path)
+        if not os.path.exists(organ_intensities_path) or not os.path.exists(combined_labels_path):
+            segmentation_path = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(id)}/segmentations"
+            seg_filenames = os.listdir(segmentation_path)
+            
+            print(f"[INFO] Creating organ intesities at {organ_intensities_path} for id {id}")
+            
+            nifti_multi_dict = create_nifti_multi_dict(seg_filenames, segmentation_path)
+            combined_labels, organ_intensities = nifti_processor.combine_labels(seg_filenames, nifti_multi_dict, save=False)
+
+            with open(organ_intensities_path, "w") as f:
+                json.dump(organ_intensities, f)
+        with open(organ_intensities_path, "r") as f:
+            organ_intensities = json.load(f)
+        
         nifti_processor.set_organ_intensities(organ_intensities)
         organ_metadata = nifti_processor.calculate_metrics()
         organ_metadata = clean_nan(organ_metadata)
@@ -326,7 +398,7 @@ def generate_pdf_with_template(
                 return "N/A" if pd.isna(val) else val
             return default
         
-        wb = load_workbook(os.path.join(Constants.PANTS_PATH, "data", "metadata.xlsx"))
+        wb = load_workbook(os.path.join(Constants.PANTS_PATH, "metadata.xlsx"))
         sheet = wb["PanTS_metadata"]
         age = None
         sex = "-"
@@ -341,12 +413,24 @@ def generate_pdf_with_template(
                 break
 
         # Title
-        temp_pdf.setFont("Helvetica-Bold", 26)
-        title_text = "MEDICAL REPORT"
-        title_width = temp_pdf.stringWidth(title_text, "Helvetica-Bold", 26)
-        temp_pdf.drawString((width - title_width) / 2, height - 70, title_text)
-        y_position = height - 100
-
+        # JHU Header
+        temp_pdf.setFillColorRGB(0, 0.18, 0.45)
+        temp_pdf.rect(0, height - 80, width, 80, fill=1, stroke=0)
+        temp_pdf.setFillColorRGB(1, 1, 1)
+        temp_pdf.setFont("Helvetica-Bold", 18)
+        title_text = "JOHNS HOPKINS UNIVERSITY"
+        title_width = temp_pdf.stringWidth(title_text, "Helvetica-Bold", 18)
+        temp_pdf.drawString((width - title_width) / 2, height - 35, title_text)
+        temp_pdf.setFont("Helvetica", 10)
+        sub_text = "Department of Radiology — AI-Generated Medical Report"
+        sub_width = temp_pdf.stringWidth(sub_text, "Helvetica", 10)
+        temp_pdf.drawString((width - sub_width) / 2, height - 52, sub_text)
+        temp_pdf.setFont("Helvetica", 8)
+        date_text = datetime.now().strftime("%B %d, %Y")
+        temp_pdf.drawString(left_margin, height - 68, f"Report Date: {date_text}")
+        temp_pdf.drawString(width - 150, height - 68, f"Case ID: {folder_name}")
+        temp_pdf.setFillColorRGB(0, 0, 0)
+        y_position = height - 95
         # Patient info
         temp_pdf.setFont("Helvetica-Bold", 12)
         temp_pdf.drawString(left_margin, y_position, "PATIENT INFORMATION")
@@ -359,6 +443,13 @@ def generate_pdf_with_template(
         write_wrapped_text(left_margin, y_position, f"Age: {age}")
         
         y_position = min(left_y, right_y) - section_spacing
+
+        # Technique
+        temp_pdf.setFont("Helvetica-Bold", 12)
+        temp_pdf.drawString(left_margin, y_position, "TECHNIQUE")
+        y_position -= line_height
+        y_position = write_wrapped_text(left_margin, y_position, f"Multiple axial CT images were obtained. Study type: {study_detail}. Contrast: {contrast}.")
+        y_position -= section_spacing
 
         # Imaging detail
         temp_pdf.setFont("Helvetica-Bold", 12)
@@ -375,7 +466,8 @@ def generate_pdf_with_template(
             scanner_info = "N/A"
 
 
-        y_position = write_wrapped_text(left_margin, y_position, f"Spacing: {spacing}")
+        spacing_clean = ", ".join([f"{float(s):.3f}" for s in spacing])
+        y_position = write_wrapped_text(left_margin, y_position, f"Spacing: {spacing_clean}")
         y_position = write_wrapped_text(left_margin, y_position, f"Shape: {shape}")
         y_position = write_wrapped_text(left_margin, y_position, f"Study type: {study_detail}")
         y_position = write_wrapped_text(left_margin, y_position, f"Contrast: {contrast}")
@@ -523,9 +615,82 @@ def generate_pdf_with_template(
             #     print('521')
             #     y_position -= 220
 
-        temp_pdf.save()
+        # COMMENTS section
+        y_position -= section_spacing
+        temp_pdf.setFont("Helvetica-Bold", 12)
+        temp_pdf.drawString(left_margin, y_position, "COMMENTS")
+        y_position -= line_height
 
+        # Build organ data string for LLM
+        organ_data_str = ""
+        for organ, label_id in LABELS.items():
+            if organ in NAME_TO_ORGAN and NAME_TO_ORGAN[organ] != organ:
+                continue
+            if label_id == 0:
+                continue
+            mask = (mask_array == label_id)
+            if not np.any(mask):
+                continue
+            volume = np.sum(mask) * voxel_volume
+            mean_hu = np.mean(ct_array[mask])
+            organ_data_str += f"{organ.replace('_', ' ')}: volume={volume:.2f}cc, mean HU={mean_hu:.1f}\n"
+
+        # Generate clinical comments using Ollama
+        try:
+            import ollama
+            prompt = f"""You are an expert radiologist writing a formal CT scan report COMMENTS section. Based on these AI organ measurements, write concise clinical observations in professional radiology language. Do NOT mention specific volume numbers or HU values — instead interpret them clinically. Keep it to 3-4 sentences total. Normal organs: one brief mention. Flag abnormal findings with possible diagnosis. Style: formal radiology prose, no bullet points.
+
+Organ measurements for clinical interpretation:
+{organ_data_str}
+
+Write only the clinical observations, 3-4 sentences, no headings:"""
+            
+            response = ollama.chat(model='llama3.2', messages=[
+                {'role': 'user', 'content': prompt}
+            ])
+            clinical_comments = response['message']['content']
+            y_position = write_wrapped_text(left_margin, y_position, clinical_comments)
+        except Exception as e:
+            print(f"[LLM ERROR] {e}")
+            y_position = write_wrapped_text(left_margin, y_position, "Clinical comments unavailable.")
+
+        # IMPRESSION section
+        # Generate clinical impression using LLM
+        try:
+            impression_data = ""
+            for organ, data in lession_volume_dict.items():
+                impression_data += f"{organ.replace('_', ' ')}: {data['number']} lesion(s), total volume {data['volume']:.2f} cc\n"
+            y_position -= section_spacing
+            temp_pdf.setFont("Helvetica-Bold", 12)
+            temp_pdf.drawString(left_margin, y_position, "IMPRESSION")
+            y_position -= line_height
+            if impression_data:
+                impression_prompt = f"""You are an expert radiologist. Based on these findings, write a formal IMPRESSION section for a CT report. Use numbered list format. Each item should be a concise clinical statement with recommendation if appropriate. Maximum 4 items. Professional radiology language only.
+
+Findings:
+{impression_data}
+Patient age: {age}, sex: {sex}
+
+Write numbered impression items only:"""
+                
+                imp_response = ollama.chat(model='llama3.2', messages=[
+                    {'role': 'user', 'content': impression_prompt}
+                ])
+                impression_text = imp_response['message']['content']
+                for line in impression_text.split('\n'):
+                    line = line.strip()
+                    if line:
+                        y_position = write_wrapped_text(left_margin, y_position, line)
+                        y_position -= 4
+            else:
+                y_position = write_wrapped_text(left_margin, y_position, "1. No significant lesions identified on AI segmentation.\n2. Clinical correlation recommended.")
+        except Exception as e:
+            print(f"[LLM IMPRESSION ERROR] {e}")
+            y_position = write_wrapped_text(left_margin, y_position, "1. No significant lesions identified.")
         # Merge with template
+        print("DEBUG: Saving temp PDF now")
+        temp_pdf.save()
+        print("DEBUG: Temp PDF saved!")
         template_reader =  PdfReader(template_pdf)
         content_reader = PdfReader(temp_pdf_path)
         writer = PdfWriter()
@@ -683,10 +848,8 @@ def zoom_into_labeled_area(ct_path, mask_path, output_path, color="red"):
 
 def get_pdac_staging(clabel_id):
     try:
-        subfolder = "ImageTr" if int(clabel_id) < 9000 else "ImageTe"
-        label_subfolder = "LabelTr" if int(clabel_id) < 9000 else "LabelTe"
-        main_nifti_path = f"{Constants.PANTS_PATH}/data/{subfolder}/{get_panTS_id(clabel_id)}/{Constants.MAIN_NIFTI_FILENAME}"
-        combined_labels_path = f"{Constants.PANTS_PATH}/data/{label_subfolder}/{get_panTS_id(clabel_id)}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
+        main_nifti_path = f"{Constants.PANTS_PATH}/image_only/{get_panTS_id(clabel_id)}/{Constants.MAIN_NIFTI_FILENAME}"
+        combined_labels_path = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(clabel_id)}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
         
         nifti_processor = NiftiProcessor(main_nifti_path, combined_labels_path)
         staging_result = nifti_processor.calculate_pdac_sma_staging()
@@ -748,8 +911,6 @@ def download_clean_folder(root):
         print("ℹ️ Folder content does not match the expected file set. Skipping cleanup and split.")
         
 async def store_files(combined_labels_id):
-    subfolder = "LabelTr" if int(combined_labels_id) < 9000 else "LabelTe" 
-    image_subfolder = "ImageTr" if int(combined_labels_id) < 9000 else "ImageTe"
 
     def download(url, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -765,16 +926,16 @@ async def store_files(combined_labels_id):
 
     # main CT
     image_url = f"https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/image_only/{get_panTS_id(combined_labels_id)}/ct.nii.gz"
-    image_path = f"{Constants.PANTS_PATH}/data/{image_subfolder}/{get_panTS_id(combined_labels_id)}/ct.nii.gz"
+    image_path = f"{Constants.PANTS_PATH}/image_only/{get_panTS_id(combined_labels_id)}/ct.nii.gz"
     download(image_url, image_path)
 
     # labels
     for label in list(Constants.PREDEFINED_LABELS.values()):
         mask_url = f"https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/mask_only/{get_panTS_id(combined_labels_id)}/segmentations/{label}.nii.gz"
-        mask_path = f"{Constants.PANTS_PATH}/data/{subfolder}/{get_panTS_id(combined_labels_id)}/segmentations/{label}.nii.gz"
+        mask_path = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(combined_labels_id)}/segmentations/{label}.nii.gz"
         download(mask_url, mask_path)
         
-META_FILE = f"{Constants.PANTS_PATH}/data/metadata.xlsx"
+META_FILE = f"{Constants.PANTS_PATH}/metadata.xlsx"
 # ---------------------------
 # Helpers
 # ---------------------------
@@ -859,7 +1020,7 @@ def _norm_cols(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.copy()
 
     # ---- Case ID ----
-    case_cols = ["PanTS ID", "PanTS_ID", "case_id", "id", "case", "CaseID"]
+    case_cols = ["PanTS ID", "PanTS_ID", "CancerVerse ID", "case_id", "id", "case", "CaseID"]
     def _first_nonempty(row, cols):
         for c in cols:
             if c in row.index and pd.notna(row[c]) and str(row[c]).strip():
@@ -926,7 +1087,7 @@ def _norm_cols(df_raw: pd.DataFrame) -> pd.DataFrame:
         keyword_sets=[["manufactur"],["vendor"],["brand"],["maker"]],
     )
     if mfr_col:
-        df["__mfr"] = df[mfr_col].astype(str).str.strip()
+        df["__mfr"] = df[mfr_col].map(canonicalize_manufacturer)
         df["__mfr_lc"] = df["__mfr"].str.lower()
         df["_orig_cols"] = [{**(df["_orig_cols"].iat[i] or {}), "manufacturer": mfr_col} for i in range(len(df))]
     else:
@@ -1004,6 +1165,7 @@ def _norm_cols(df_raw: pd.DataFrame) -> pd.DataFrame:
     )
     if sn_col:
         df["site_nationality"] = df[sn_col].astype(str)
+        df["__sn_tokens"] = df["site_nationality"].map(split_site_codes)
         df["__sn_lc"] = df["site_nationality"].astype(str).str.strip().str.lower()
         df["_orig_cols"] = [
             {**(df["_orig_cols"].iat[i] or {}), "site_nationality": sn_col}
@@ -1011,6 +1173,7 @@ def _norm_cols(df_raw: pd.DataFrame) -> pd.DataFrame:
         ]
     else:
         df["site_nationality"] = ""
+        df["__sn_tokens"] = [()] * len(df)
         df["__sn_lc"] = ""
 
     return df
@@ -1076,6 +1239,17 @@ def _shape_sum(row) -> Optional[float]:
     if any(v is None for v in vals): return None
     return float(vals[0] + vals[1] + vals[2])
 
+def _tuple_product(row, name_candidates: List[str]) -> Optional[float]:
+    vals = _parse_3tuple_from_row(row, name_candidates)
+    if any(v is None or v <= 0 for v in vals): return None
+    return float(vals[0] * vals[1] * vals[2])
+
+def _voxel_count(row) -> Optional[float]:
+    return _tuple_product(row, ["shape","dim","size","image_shape","resolution"])
+
+def _spacing_volume(row) -> Optional[float]:
+    return _tuple_product(row, ["spacing","voxel_spacing","voxel_size","pixel_spacing"])
+
 def ensure_sort_cols(df: pd.DataFrame) -> pd.DataFrame:
     if "__case_sortkey" not in df.columns:
         df["__case_sortkey"] = df.apply(_case_key, axis=1)
@@ -1083,8 +1257,12 @@ def ensure_sort_cols(df: pd.DataFrame) -> pd.DataFrame:
         df["__spacing_sum"] = df.apply(_spacing_sum, axis=1)
     if "__shape_sum" not in df.columns:
         df["__shape_sum"] = df.apply(_shape_sum, axis=1)
+    if "__voxel_count" not in df.columns:
+        df["__voxel_count"] = df.apply(_voxel_count, axis=1)
+    if "__spacing_volume" not in df.columns:
+        df["__spacing_volume"] = df.apply(_spacing_volume, axis=1)
 
-    # 完整度：Browse 與 top 排序會用到
+    # Completeness remains useful to keep shuffle candidates fully described.
     need_cols = ["__spacing_sum", "__shape_sum", "__sex", "__age"]
     complete = pd.Series(True, index=df.index)
     for c in need_cols:
@@ -1097,11 +1275,61 @@ def ensure_sort_cols(df: pd.DataFrame) -> pd.DataFrame:
     df["__complete"] = complete
     return df
 
-# load meta
-if not os.path.exists(META_FILE):
-    raise FileNotFoundError(f"metadata not found: {META_FILE}")
-DF_RAW = pd.read_excel(META_FILE)
-DF = _norm_cols(DF_RAW)
+# load meta — OPTIONAL in local dev. metadata.xlsx powers the case library and
+# search; without it those simply return nothing. The viewer (loads a case by
+# id) and the AI assistant (organ volumes come straight from the NIfTI masks /
+# HuggingFace) both still work, so a missing file must NOT crash the backend.
+if os.path.exists(META_FILE):
+    try:
+        DF_RAW = pd.read_excel(META_FILE)
+    except Exception as _meta_err:
+        print(f"[WARN] Could not read metadata {META_FILE}: {_meta_err} — case library will be empty.")
+        DF_RAW = pd.DataFrame()
+else:
+    print(f"[WARN] metadata not found: {META_FILE} — case library/search will be empty. "
+          "Set PANTS_PATH in flask-server/.env to your dataset to enable it.")
+    DF_RAW = pd.DataFrame()
+
+_CASE_QUALITY = load_case_quality_manifest(Constants.CASE_QUALITY_MANIFEST)
+try:
+    DF = merge_case_quality(_norm_cols(DF_RAW), _CASE_QUALITY)
+except Exception as _norm_err:
+    print(f"[WARN] metadata normalization failed: {_norm_err} — using empty catalog.")
+    DF = pd.DataFrame()
+
+# CancerVerse metadata (CT-only second dataset). Loaded through the SAME _norm_cols
+# so search/sort/row_to_item work unchanged. Optional: if the path/CSV is absent
+# (e.g. local dev) DF_CV stays None and CV search returns empty — never raises.
+# The CSV sits NEXT TO the CancerVerse image folder, not inside it:
+#   <parent>/CancerVerse_dataset_metadata.csv   +   <parent>/CancerVerse/CV_########/
+CANCERVERSE_META_FILE = (
+    os.path.join(os.path.dirname(os.path.normpath(Constants.CANCERVERSE_PATH)),
+                 "CancerVerse_dataset_metadata.csv")
+    if Constants.CANCERVERSE_PATH else None
+)
+DF_CV = None
+if CANCERVERSE_META_FILE and os.path.exists(CANCERVERSE_META_FILE):
+    try:
+        DF_CV = merge_case_quality(
+            _norm_cols(pd.read_csv(CANCERVERSE_META_FILE)),
+            _CASE_QUALITY,
+        )
+    except Exception as _cv_err:
+        print(f"[WARN] Could not load CancerVerse metadata: {_cv_err}")
+        DF_CV = None
+
+def select_dataset_df() -> pd.DataFrame:
+    """Pick the base DataFrame for search by the ?dataset= query param.
+
+    'pants' (default) → PanTS only (unchanged behaviour); 'cancerverse'/'cv' → CV;
+    'all'/'both' → union of both. Falls back to PanTS when CV isn't loaded.
+    """
+    ds = (request.args.get("dataset") or "").strip().lower()
+    if ds in ("cancerverse", "cv"):
+        return DF_CV if DF_CV is not None else DF.iloc[0:0]
+    if ds in ("all", "both"):
+        return pd.concat([DF, DF_CV], ignore_index=True) if DF_CV is not None else DF
+    return DF
 
 def apply_filters(base: pd.DataFrame, exclude: Optional[Set[str]] = None) -> pd.DataFrame:
     exclude = exclude or set()
@@ -1209,7 +1437,8 @@ def apply_filters(base: pd.DataFrame, exclude: Optional[Set[str]] = None) -> pd.
     if m_raw and not m_list:
         m_list = [p.strip() for p in m_raw.split(",") if p.strip()]
     if m_list and "__mfr_lc" in df.columns:
-        m_lc = [s.lower() for s in m_list]
+        m_lc = [canonicalize_manufacturer(value) for value in m_list]
+        m_lc = [value.lower() for value in m_lc if value]
         df = df[df["__mfr_lc"].isin(m_lc)]
 
     # --- Model（canonical；可 fuzzy）---
@@ -1242,10 +1471,18 @@ def apply_filters(base: pd.DataFrame, exclude: Optional[Set[str]] = None) -> pd.
     nat_raw = (_arg("site_nationality", "") or _arg("site_nat", "") or "").strip()
     if nat_raw and not nat_list:
         nat_list = [p.strip() for p in re.split(r"[;,/|]+", nat_raw) if p.strip()]
-    if nat_list and "__sn_lc" in df.columns and "site_nationality" not in exclude:
-        parts = [p.lower() for p in nat_list]
-        patt = "|".join(re.escape(p) for p in parts)
-        df = df[df["__sn_lc"].str.contains(patt, na=False)]
+    if nat_list and "__sn_tokens" in df.columns and "site_nationality" not in exclude:
+        wanted_codes = {
+            code
+            for value in nat_list
+            for code in split_site_codes(value)
+        }
+        if wanted_codes:
+            df = df[
+                df["__sn_tokens"].map(
+                    lambda codes: bool(wanted_codes.intersection(codes))
+                )
+            ]
 
     # --- Year（新增）---
     # 支援 year / year[]（多選精確）、year_from / year_to（範圍）與 year_is_null（Unknown）

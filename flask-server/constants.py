@@ -9,6 +9,15 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 class Constants:
     # app variables
     SESSIONS_DIR_NAME = os.environ.get('SESSIONS_DIR_PATH', 'sessions')
+
+    # Full SQLAlchemy URL, so SQLite -> Postgres later is an env change, not code.
+    # Defaults to a local file; prod sets DATABASE_URL outside the repo (.env.example).
+    DATABASE_URL = os.environ.get(
+        'DATABASE_URL',
+        'sqlite:///' + os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pants-dev.db'),
+    )
+
+    # Legacy Postgres parts, unused; superseded by DATABASE_URL.
     DB_USER = os.environ.get('DB_USER')
     DB_PASS = os.environ.get('DB_PASS')
     DB_HOST = os.environ.get('DB_HOST')
@@ -19,6 +28,21 @@ class Constants:
     # api_blueprint variables
     BASE_PATH = os.environ.get('BASE_PATH', '/')
     PANTS_PATH = os.environ.get('PANTS_PATH')
+    # Second dataset (CT-only, no masks yet). CV_%08d ids, CSV metadata.
+    # Low-res copies live under CANCERVERSE_LOWRES_PATH/image_only/<case>/ct_lowres.nii.gz.
+    CANCERVERSE_PATH = os.environ.get('CANCERVERSE_PATH')
+    CANCERVERSE_LOWRES_PATH = os.environ.get('CANCERVERSE_LOWRES_PATH', '/home/visitor/cancerverse_lowres')
+    DATASET_PREFIXES = {'PanTS': 'PanTS', 'CancerVerse': 'CV'}
+    PERMISSIONS_DIR = os.environ.get('PERMISSIONS_DIR', "/home/visitor/data")
+    MESH_PATH = PERMISSIONS_DIR + "/render_only"
+    CASE_QUALITY_MANIFEST = os.environ.get('BODYMAPS_CASE_QUALITY_MANIFEST')
+    THUMBNAIL_VISION_MODEL = os.environ.get(
+        'BODYMAPS_THUMBNAIL_VISION_MODEL',
+        'qwen3-vl:4b',
+    )
+    THUMBNAIL_VISION_TIMEOUT_SECONDS = float(
+        os.environ.get('BODYMAPS_THUMBNAIL_VISION_TIMEOUT_SECONDS', '120')
+    )
     MAIN_NIFTI_FORM_NAME = 'MAIN_NIFTI'
     MAIN_NPZ_FILENAME = 'ct.npz'
     MAIN_NIFTI_FILENAME = 'ct.nii.gz'

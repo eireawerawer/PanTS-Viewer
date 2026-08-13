@@ -44,38 +44,59 @@ export const API_BASE = configuredApiBase
 //   26: [229, 117, 68, 128],
 //   27: [229, 68, 68, 128],
 //   28: [229, 213, 68, 128]
-// }
+//55
 
 export const segmentation_category_colors: { [key: number]: Color } = {
-	1: [255, 140, 0, 255], // Dark orange
-	2: [255, 165, 0, 255], // Orange
-	3: [255, 0, 0, 255], // Artery (red)
-	4: [0, 191, 255, 255], // Urinary system (sky blue)
-	5: [220, 20, 60, 255], // Artery (crimson red)
-	6: [255, 160, 202, 255], // Digestive (salmon)
-	7: [34, 139, 34, 255], // Green (bile duct)
-	8: [255, 127, 80, 255], // Coral (GI tract)
-	9: [245, 245, 245, 255], // Bone (light gray)
-	10: [220, 220, 220, 255], // Bone (gray)
-	11: [0, 128, 0, 255], // Dark green
-	12: [68, 229, 133, 255],
-	13: [68, 229, 181, 255],
-	14: [178, 34, 34, 255], // Liver (brownish red)
-	15: [68, 181, 229, 255],
-	16: [68, 133, 229, 255],
-	17: [255, 182, 193, 255], // Pancreas (light pink)
-	18: [255, 105, 180, 255], // Pancreas (hot pink)
-	19: [219, 112, 147, 255], // Pancreas (pale violet red)
-	20: [255, 160, 122, 255], // Pancreas general (salmon)
-	21: [255, 228, 181, 255], // Light tan (duct)
-	22: [139, 0, 0, 255], // Dark red (lesion)
-	23: [72, 61, 139, 255], // Vein (dark slate blue)
-	24: [255, 105, 180, 255], // Magenta/pink
-	25: [138, 43, 226, 255], // Purple
-	26: [255, 99, 71, 255], // Tomato red
-	27: [255, 69, 0, 255], // Bright red-orange artery
-	28: [106, 90, 205, 255], // Medium slate blue
+	1: [255, 140, 0, 254], // Dark orange
+	2: [255, 165, 0, 254], // Orange
+	3: [255, 0, 0, 254], // Artery (red)
+	4: [0, 191, 255, 254], // Urinary system (sky blue)
+	5: [220, 20, 60, 254], // Artery (crimson red)
+	6: [255, 160, 255, 254], // Digestive (salmon)
+	7: [34, 139, 34, 254], // Green (bile duct)
+	8: [255, 127, 80, 254], // Coral (GI tract)
+	9: [245, 245, 245, 254], // Bone (light gray)
+	10: [220, 220, 220, 254], // Bone (gray)
+	11: [0, 128, 0, 254], // Dark green
+	12: [68, 229, 133, 254],
+	13: [68, 229, 181, 254],
+	14: [178, 34, 34, 254], // Liver (brownish red)
+	15: [68, 181, 229, 254],
+	16: [68, 133, 229, 254],
+	17: [255, 182, 193, 254], // Pancreas (light pink)
+	18: [255, 105, 180, 254], // Pancreas (hot pink)
+	19: [219, 112, 147, 254], // Pancreas (pale violet red)
+	20: [255, 160, 122, 254], // Pancreas general (salmon)
+	21: [255, 228, 181, 254], // Light tan (duct)
+	22: [80, 0, 0, 254], // Dark red (lesion)
+	23: [72, 61, 139, 254], // Vein (dark slate blue)
+	24: [255, 105, 180, 254], // Magenta/pink
+	25: [138, 43, 226, 254], // Purple
+	26: [255, 99, 71, 254], // Tomato red
+	27: [255, 69, 0, 254], // Bright red-orange artery
+	28: [106, 90, 205, 254], // Medium slate blue
+	29: [255, 200, 120, 254], // Intestine (warm yellow-orange)
+	30: [100, 149, 237, 254], // Renal vein left (cornflower blue)
+	31: [70, 130, 180, 254],  // Renal vein right (steel blue)
+	32: [192, 192, 192, 254], // CBD stent (silver-gray)
+	33: [255, 140, 0, 254],   // Liver lesion (dark orange)
+	34: [255, 215, 0, 254],   // Kidney lesion (gold)
+	35: [220, 20, 60, 254],   // Colon lesion (crimson)
 };
+
+// Rotating palette of colours to hand out to new classes.
+// No colour clash with existing organ palette above.
+// Kept seperate from segmentation_category_colors, as these are assigned dynamically, not per-organ.
+export const NEW_CLASS_PALETTE: Color[] = [
+	[255, 99, 132, 255],  // pink
+	[54, 162, 235, 255],  // blue
+	[255, 206, 86, 255],  // yellow
+	[75, 192, 192, 255],  // teal
+	[153, 102, 255, 255], // purple
+	[255, 159, 64, 255],  // orange
+	[46, 204, 113, 255],  // green
+	[231, 76, 60, 255],   // red
+  ];
 
 export const segmentation_categories: SegmentationCategories[] = [
 	"adrenal_gland_left",
@@ -106,6 +127,13 @@ export const segmentation_categories: SegmentationCategories[] = [
 	"stomach",
 	"superior_mesenteric_artery",
 	"veins",
+	"intestine",
+	"renal_vein_left",
+	"renal_vein_right",
+	"cbd_stent",
+	"liver_lesion",
+	"kidney_lesion",
+	"colon_lesion",
 ];
 
 export const OrganSystemsArray: Systems[] = [
@@ -142,9 +170,11 @@ export const OrganSystems: OrganSystemsType = {
 		"superior_mesenteric_artery",
 		"postcava",
 		"veins",
+		"renal_vein_left",
+		"renal_vein_right",
 	],
 	"Endocrine System": ["adrenal_gland_left", "adrenal_gland_right"],
-	"Urinary System": [{ Kidneys: ["kidney_left", "kidney_right"] }, "bladder"],
+	"Urinary System": [{ Kidneys: ["kidney_left", "kidney_right", "kidney_lesion"] }, "bladder"],
 	// bladder
 	"Skeletal System": ["femur_left", "femur_right"],
 
@@ -160,11 +190,15 @@ export const OrganSystems: OrganSystemsType = {
 			],
 		},
 		"colon",
+		"colon_lesion",
 		"duodenum",
+		"intestine",
 		"stomach",
 		"liver",
+		"liver_lesion",
 		"common_bile_duct",
 		"gall_bladder",
+		"cbd_stent",
 	],
 	"Respiratory System": ["lung_left", "lung_right"],
 	"Reproductive System": ["prostate"],
