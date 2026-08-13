@@ -107,6 +107,64 @@ def test_a_signed_in_batch_is_attributed_to_that_account(client, monkeypatch):
     assert data["by_account_type"][0]["account_type"] == "researcher"
 
 
+# ---- rate limiting ---------------------------------------------------------
+
+def test_collect_refuses_a_caller_past_the_limit(client, monkeypatch):
+    monkeypatch.setenv("ANALYTICS_RATE_LIMIT_PER_MIN", "3")
+
+    for _ in range(3):
+        assert client.post(
+            "/api/analytics/collect", json={"events": [an_action()]}
+        ).status_code == 200
+
+    r = client.post("/api/analytics/collect", json={"events": [an_action()]})
+    assert r.status_code == 429
+    assert r.get_json()["stored"] == 0
+
+
+def test_a_refused_batch_is_not_stored(client, monkeypatch):
+    monkeypatch.setenv("ANALYTICS_RATE_LIMIT_PER_MIN", "1")
+    client.post("/api/analytics/collect", json={"events": [an_action()]})
+    client.post("/api/analytics/collect", json={"events": [an_action("viewer_measure")]})
+
+    sign_up_admin(client)
+    monkeypatch.setenv("ANALYTICS_DASHBOARD", "true")
+    # The sign-up above is a different endpoint, so it doesn't spend the budget.
+    names = [r["name"] for r in client.get("/api/analytics/overview").get_json()["top_actions"]]
+    assert names == ["viewer_open_case"]
+
+
+def test_the_limit_is_per_ip(client, monkeypatch):
+    monkeypatch.setenv("ANALYTICS_RATE_LIMIT_PER_MIN", "1")
+    body = {"events": [an_action()]}
+
+    assert client.post(
+        "/api/analytics/collect", json=body, environ_overrides={"REMOTE_ADDR": "10.0.0.1"}
+    ).status_code == 200
+    assert client.post(
+        "/api/analytics/collect", json=body, environ_overrides={"REMOTE_ADDR": "10.0.0.1"}
+    ).status_code == 429
+    # A different caller still has its own budget.
+    assert client.post(
+        "/api/analytics/collect", json=body, environ_overrides={"REMOTE_ADDR": "10.0.0.2"}
+    ).status_code == 200
+
+
+def test_the_limit_can_be_turned_off(client, monkeypatch):
+    monkeypatch.setenv("ANALYTICS_RATE_LIMIT_PER_MIN", "0")
+    for _ in range(50):
+        assert client.post(
+            "/api/analytics/collect", json={"events": [an_action()]}
+        ).status_code == 200
+
+
+def test_collect_dedupes_a_replayed_request(client):
+    """The endpoint-level version of the store's dedup: the same body twice."""
+    body = {"events": [an_action(id="evt-1"), an_action("viewer_measure", id="evt-2")]}
+    assert client.post("/api/analytics/collect", json=body).get_json() == {"stored": 2}
+    assert client.post("/api/analytics/collect", json=body).get_json() == {"stored": 0}
+
+
 # ---- the gate --------------------------------------------------------------
 
 def test_the_dashboard_endpoints_are_404_by_default(client):
