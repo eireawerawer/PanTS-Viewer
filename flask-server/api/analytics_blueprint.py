@@ -6,12 +6,15 @@ Routes (registered under <BASE_PATH>/api):
   GET  /analytics/overview?from&to&... -> aggregates for the dashboard
   GET  /analytics/meta                 -> the filter values the UI offers
 
-**The read endpoints are off unless ANALYTICS_DASHBOARD=true.** They report on
-every account's activity, and the dashboard that reads them has no login of its
-own, so shipping them enabled would put per-user behaviour behind a plain GET.
-Off by default means a normal deploy of this server does not expose them at all;
-turning them on is a deliberate local act. When disabled they 404 rather than
-403 — a 403 confirms the endpoint exists.
+**The read endpoints need two things: ANALYTICS_DASHBOARD=true, and an admin.**
+They report on every account's activity, so one lock is the deploy opting in at
+all, and the other is who is asking.
+
+Order matters, and it's why the flag is checked inside the handler rather than
+by a decorator above it: with @require_role on top, a deploy that never enabled
+analytics would answer 401/403 and confirm the endpoints are there. Flag first
+means off is indistinguishable from absent — a 404, because a 403 confirms the
+endpoint exists.
 
 Collecting is deliberately NOT gated: the main site should keep recording
 whether or not anyone is looking at the dashboard, and the events it writes are
@@ -23,9 +26,9 @@ from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 
-from api.auth import current_user
+from api.auth import current_roles, current_user
 from models.job import utcnow
-from services import analytics_store
+from services import analytics_store, role_store
 
 analytics_blueprint = Blueprint("analytics", __name__)
 
@@ -37,6 +40,19 @@ def _dashboard_enabled() -> bool:
     """Read live rather than at import: tests flip it per-case, and it means a
     restart is enough to turn the dashboard off."""
     return os.environ.get("ANALYTICS_DASHBOARD", "false").lower() == "true"
+
+
+def _refuse_unless_admin():
+    """None when the caller may read the dashboard, else the response to send.
+
+    Called as the first line of each read endpoint, after the flag check, so the
+    two locks are applied in the order the module docstring describes.
+    """
+    if current_user() is None:
+        return jsonify({"error": "Authentication required"}), 401
+    if role_store.ROLE_ADMIN not in current_roles():
+        return jsonify({"error": "You don't have access to this."}), 403
+    return None
 
 
 @analytics_blueprint.route("/analytics/collect", methods=["POST"])
@@ -62,10 +78,18 @@ def _parse_range():
 
     `to` is inclusive of the whole day: a range picker that says 1st-8th should
     include everything that happened on the 8th.
+
+    ?range=all is "ever": it starts at the oldest event rather than at a made-up
+    epoch, so the range echoed back in the response describes real data, and it
+    skips the MAX_DAYS clamp — that clamp exists to bound an accidental huge
+    range, not to refuse a deliberate one.
     """
     now = utcnow()
     end = now
     start = now - timedelta(days=DEFAULT_DAYS)
+
+    if request.args.get("range") == "all":
+        return (analytics_store.earliest_event() or start), end
 
     raw_from = request.args.get("from")
     raw_to = request.args.get("to")
@@ -88,6 +112,9 @@ def _parse_range():
 def overview():
     if not _dashboard_enabled():
         return jsonify({"error": "Not found"}), 404
+    refusal = _refuse_unless_admin()
+    if refusal:
+        return refusal
 
     start, end = _parse_range()
     if start is None:
@@ -115,6 +142,9 @@ def meta():
     server's idea of the world rather than a second hardcoded copy."""
     if not _dashboard_enabled():
         return jsonify({"error": "Not found"}), 404
+    refusal = _refuse_unless_admin()
+    if refusal:
+        return refusal
 
     from services.plan_store import PLAN_IDS
     return jsonify({

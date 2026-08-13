@@ -48,6 +48,8 @@ ACTION_NAMES = frozenset({
     "auth_open_modal", "auth_sign_in", "auth_sign_up", "auth_sign_out",
     # plan limits
     "plan_limit_hit", "plan_limit_dialog_cta",
+    # admin
+    "admin_grant_role", "admin_revoke_role",
 })
 
 # Route patterns, never raw URLs — "/case/:caseId", not "/case/BDMAP_00000123".
@@ -57,6 +59,7 @@ ROUTE_PATTERNS = frozenset({
     "/reconstruction/:reconstructionId", "/dicom", "/local-nifti",
     "/upload", "/compare", "/compare-viewer", "/team", "/signup",
     "/account", "/account/plan", "/account/history", "/account/privacy",
+    "/account/analytics", "/account/people",
     "/terms", "/privacy",
 })
 
@@ -181,6 +184,16 @@ def _apply_filters(stmt, start, end, plan, account_type, audience):
 
 def _rows(s, stmt):
     return list(s.execute(stmt).all())
+
+
+def earliest_event():
+    """When the oldest stored event happened, or None if there are none.
+
+    Backs the dashboard's "all time" range: the alternative is an arbitrary
+    epoch, which makes the range the response reports back a fiction.
+    """
+    with session_scope() as s:
+        return s.execute(select(func.min(AnalyticsEvent.created_at))).scalar_one_or_none()
 
 
 def overview(start, end, plan=None, account_type=None, audience=AUDIENCE_ALL) -> dict:

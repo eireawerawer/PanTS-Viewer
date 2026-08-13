@@ -54,6 +54,9 @@ export type AuthUser = {
 	plan: PlanId;
 	/** Self-reported account type, from user_account.account_type. Gates nothing. */
 	profile: AccountProfile;
+	/** Roles held, from the user_role table ("admin", "annotator"). The server
+	 *  enforces them; these only decide what the UI offers to draw. */
+	roles: string[];
 };
 
 /** What GET /me/usage returns: the plan's limits and what's been used of them. */
@@ -149,6 +152,7 @@ type ApiUser = {
 	name?: string | null;
 	plan?: string | null;
 	account_type?: string | null;
+	roles?: string[] | null;
 };
 const mapApiUser = (u: ApiUser): AuthUser => {
 	const custom = (u.name || "").trim();
@@ -161,6 +165,9 @@ const mapApiUser = (u: ApiUser): AuthUser => {
 		emailNotifications: loadPref(u.id),
 		plan: (u.plan as PlanId) || "free",
 		profile: { accountType: (u.account_type as AccountType) || null },
+		// Defaulted, never invented: an endpoint that forgets to send roles
+		// leaves you with none, which fails closed.
+		roles: u.roles ?? [],
 	};
 };
 

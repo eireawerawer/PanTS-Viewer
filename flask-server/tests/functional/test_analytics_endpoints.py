@@ -24,9 +24,12 @@ def client(tmp_path, monkeypatch):
     import models.auth_session  # noqa: F401
     import models.usage_event  # noqa: F401
     import models.analytics_event  # noqa: F401
+    import models.user_role  # noqa: F401
     import services.auth_store as auth_store
     importlib.reload(auth_store)
     import services.plan_store  # noqa: F401
+    import services.role_store as role_store
+    importlib.reload(role_store)
     import services.analytics_store as analytics_store
     importlib.reload(analytics_store)
     import api.auth as auth_mod
@@ -55,6 +58,21 @@ def an_action(name="viewer_open_case", **extra):
     return base
 
 
+def sign_up(client, email="a@b.com", password="password1"):
+    """Register and stay signed in as that account. Returns its id."""
+    r = client.post("/api/auth/register", json={"email": email, "password": password})
+    return r.get_json()["user"]["id"]
+
+
+def sign_up_admin(client, email="admin@b.com"):
+    """The dashboard's read endpoints need one of these; most tests below are
+    about what they return, not about who may ask."""
+    from services import role_store
+    user_id = sign_up(client, email)
+    role_store.grant(user_id, role_store.ROLE_ADMIN)
+    return user_id
+
+
 # ---- collecting ------------------------------------------------------------
 
 def test_collect_accepts_events_from_a_signed_out_visitor(client):
@@ -72,13 +90,16 @@ def test_collect_never_errors_on_junk(client):
 
 
 def test_a_signed_in_batch_is_attributed_to_that_account(client, monkeypatch):
-    client.post("/api/auth/register", json={"email": "a@b.com", "password": "password1"})
+    from services import role_store
+    user_id = sign_up(client)
     client.patch("/api/auth/me", json={"account_type": "researcher"})
 
     assert client.post(
         "/api/analytics/collect", json={"events": [an_action(plan="enterprise")]}
     ).get_json() == {"stored": 1}
 
+    # Same account reads it back, so the batch stays attributed to one person.
+    role_store.grant(user_id, role_store.ROLE_ADMIN)
     monkeypatch.setenv("ANALYTICS_DASHBOARD", "true")
     data = client.get("/api/analytics/overview").get_json()
     assert data["totals"]["signed_in_people"] == 1
@@ -99,27 +120,53 @@ def test_collect_still_works_while_the_dashboard_is_off(client):
     ).status_code == 200
 
 
-def test_the_endpoints_open_when_the_flag_is_set(client, monkeypatch):
+def test_the_endpoints_open_when_the_flag_is_set_and_you_are_an_admin(client, monkeypatch):
+    sign_up_admin(client)
     monkeypatch.setenv("ANALYTICS_DASHBOARD", "true")
     assert client.get("/api/analytics/overview").status_code == 200
     assert client.get("/api/analytics/meta").status_code == 200
 
 
+def test_the_flag_alone_is_not_enough(client, monkeypatch):
+    """Signed out, with the flag on: still refused."""
+    monkeypatch.setenv("ANALYTICS_DASHBOARD", "true")
+    assert client.get("/api/analytics/overview").status_code == 401
+    assert client.get("/api/analytics/meta").status_code == 401
+
+
+def test_an_ordinary_account_is_refused(client, monkeypatch):
+    sign_up(client, "nobody@b.com")
+    monkeypatch.setenv("ANALYTICS_DASHBOARD", "true")
+    assert client.get("/api/analytics/overview").status_code == 403
+    assert client.get("/api/analytics/meta").status_code == 403
+
+
+def test_admin_alone_is_not_enough(client):
+    """Flag off beats being an admin, and it 404s rather than 403s — a deploy
+    that never enabled analytics shouldn't confirm the endpoints are there."""
+    sign_up_admin(client)
+    assert client.get("/api/analytics/overview").status_code == 404
+    assert client.get("/api/analytics/meta").status_code == 404
+
+
 # ---- querying --------------------------------------------------------------
 
 def test_overview_rejects_a_backwards_range(client, monkeypatch):
+    sign_up_admin(client)
     monkeypatch.setenv("ANALYTICS_DASHBOARD", "true")
     r = client.get("/api/analytics/overview?from=2026-08-08&to=2026-08-01")
     assert r.status_code == 400
 
 
 def test_overview_rejects_an_unknown_audience(client, monkeypatch):
+    sign_up_admin(client)
     monkeypatch.setenv("ANALYTICS_DASHBOARD", "true")
     assert client.get("/api/analytics/overview?audience=everyone").status_code == 400
 
 
 def test_the_to_date_includes_that_whole_day(client, monkeypatch):
     """A range ending today must contain events recorded today."""
+    sign_up_admin(client)
     monkeypatch.setenv("ANALYTICS_DASHBOARD", "true")
     client.post("/api/analytics/collect", json={"events": [an_action()]})
 
@@ -129,7 +176,34 @@ def test_the_to_date_includes_that_whole_day(client, monkeypatch):
     assert data["totals"]["events"] == 1
 
 
+def test_all_time_reaches_past_the_date_range(client, monkeypatch):
+    """?range=all ignores from/to and starts at the oldest event on record."""
+    sign_up_admin(client)
+    monkeypatch.setenv("ANALYTICS_DASHBOARD", "true")
+    client.post("/api/analytics/collect", json={"events": [an_action()]})
+
+    # A window that deliberately excludes today, so a range that was honoured
+    # would report nothing.
+    empty = client.get("/api/analytics/overview?from=2020-01-01&to=2020-01-02").get_json()
+    assert empty["totals"]["events"] == 0
+
+    data = client.get(
+        "/api/analytics/overview?range=all&from=2020-01-01&to=2020-01-02"
+    ).get_json()
+    assert data["totals"]["events"] == 1
+
+
+def test_all_time_survives_an_empty_table(client, monkeypatch):
+    """No events at all means no earliest event to start from."""
+    sign_up_admin(client)
+    monkeypatch.setenv("ANALYTICS_DASHBOARD", "true")
+    r = client.get("/api/analytics/overview?range=all")
+    assert r.status_code == 200
+    assert r.get_json()["totals"]["events"] == 0
+
+
 def test_meta_lists_the_filters_the_dashboard_offers(client, monkeypatch):
+    sign_up_admin(client)
     monkeypatch.setenv("ANALYTICS_DASHBOARD", "true")
     meta = client.get("/api/analytics/meta").get_json()
     assert "free" in meta["plans"] and "enterprise" in meta["plans"]

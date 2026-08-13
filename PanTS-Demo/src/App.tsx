@@ -23,6 +23,10 @@ const ProfileSettings = lazy(() => import("./routes/Settings/ProfileSettings"));
 const PlanSettings = lazy(() => import("./routes/Settings/PlanSettings"));
 const HistorySettings = lazy(() => import("./routes/Settings/HistorySettings"));
 const PrivacySettings = lazy(() => import("./routes/Settings/PrivacySettings"));
+// Admin-only sections: split out so the charts and the account list stay out of
+// everyone else's bundle.
+const AnalyticsSettings = lazy(() => import("./routes/Settings/AnalyticsSettings"));
+const PeopleSettings = lazy(() => import("./routes/Settings/PeopleSettings"));
 const SignupRedirect = lazy(() => import("./routes/SignupRedirect"));
 const LegalPage = lazy(() => import("./routes/LegalPage"));
 const RotatingHeartLoader = lazy(() => import("./components/Loading"));
@@ -99,6 +103,10 @@ function App() {
                     <Route path="plan" element={<PlanSettings />} />
                     <Route path="history" element={<HistorySettings />} />
                     <Route path="privacy" element={<PrivacySettings />} />
+                    {/* Admin-only. Both check the role themselves and the API
+                        refuses either way — the nav just doesn't offer them. */}
+                    <Route path="analytics" element={<AnalyticsSettings />} />
+                    <Route path="people" element={<PeopleSettings />} />
                   </Route>
                   <Route path="/terms" element={<LegalPage kind="terms" />} />
                   <Route path="/privacy" element={<LegalPage kind="privacy" />} />

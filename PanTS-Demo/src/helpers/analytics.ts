@@ -45,7 +45,9 @@ export type TrackedAction =
 	| "auth_sign_up"
 	| "auth_sign_out"
 	| "plan_limit_hit"
-	| "plan_limit_dialog_cta";
+	| "plan_limit_dialog_cta"
+	| "admin_grant_role"
+	| "admin_revoke_role";
 
 type TrackedEvent = {
 	kind: "action" | "page_view";
@@ -62,6 +64,7 @@ type TrackedEvent = {
 const STATIC_ROUTES = new Set([
 	"/", "/dashboard", "/dicom", "/local-nifti", "/upload", "/signup",
 	"/account", "/account/plan", "/account/history", "/account/privacy",
+	"/account/analytics", "/account/people",
 	"/terms", "/privacy", "/team", "/compare", "/compare-viewer",
 ]);
 

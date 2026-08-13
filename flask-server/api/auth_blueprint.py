@@ -5,7 +5,7 @@ Routes (registered under <BASE_PATH>/api):
   POST   /auth/register   {email, password, name?}  -> creates account, logs in
   POST   /auth/login      {email, password}         -> logs in
   POST   /auth/logout                               -> revokes session
-  GET    /auth/me                                   -> current user (401 if none)
+  GET    /auth/me                                   -> current user + roles (401 if none)
   PATCH  /auth/me         {name?, account_type?}    -> update name / account type
   POST   /me/plan         {plan}                    -> change plan (no payment)
   GET    /me/usage                                  -> plan limits + usage so far
@@ -22,7 +22,7 @@ from flask import Blueprint, jsonify, make_response, request
 from api.auth import (
     COOKIE_NAME, clear_session_cookie, current_user, require_auth, set_session_cookie,
 )
-from services import auth_store, job_store, plan_store
+from services import auth_store, job_store, plan_store, role_store
 
 auth_blueprint = Blueprint("auth", __name__)
 
@@ -31,10 +31,20 @@ def _json():
     return request.get_json(silent=True) or {}
 
 
+def _with_roles(user: dict) -> dict:
+    """The user body the client gets, plus the roles it holds.
+
+    Attached here rather than in ``User.to_public_dict`` so the roles query is
+    paid on the handful of endpoints that return a user, not on everything that
+    resolves a session.
+    """
+    return {**user, "roles": role_store.roles_for(user["id"])}
+
+
 def _logged_in_response(user: dict, status: int = 200):
     """JSON user body + a fresh session cookie."""
     raw = auth_store.create_session(user["id"])
-    resp = make_response(jsonify({"user": user}), status)
+    resp = make_response(jsonify({"user": _with_roles(user)}), status)
     return set_session_cookie(resp, raw)
 
 
@@ -75,7 +85,7 @@ def logout():
 @auth_blueprint.route("/auth/me", methods=["GET"])
 @require_auth
 def me():
-    return jsonify({"user": current_user()}), 200
+    return jsonify({"user": _with_roles(current_user())}), 200
 
 
 @auth_blueprint.route("/auth/me", methods=["PATCH"])
@@ -108,7 +118,7 @@ def update_me():
 
     if user is None:
         return jsonify({"error": "Account not found"}), 404
-    return jsonify({"user": user}), 200
+    return jsonify({"user": _with_roles(user)}), 200
 
 
 @auth_blueprint.route("/me/plan", methods=["POST"])
@@ -126,7 +136,7 @@ def set_my_plan():
         return jsonify({"error": "Unknown plan"}), 400
     if user is None:
         return jsonify({"error": "Account not found"}), 404
-    return jsonify({"user": user}), 200
+    return jsonify({"user": _with_roles(user)}), 200
 
 
 @auth_blueprint.route("/me/usage", methods=["GET"])
