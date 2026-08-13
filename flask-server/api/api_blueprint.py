@@ -257,15 +257,17 @@ def get_preview(clabel_ids):
 def get_image_preview(clabel_id):
     if not _is_safe_id(clabel_id):
         return jsonify({"error": "Invalid id"}), 400
-    if get_dataset_from_case_id(secure_filename(clabel_id)) == "CancerVerse":
-        # No profile thumbnails for CancerVerse yet — let the frontend fall back.
-        return jsonify({"error": "No preview for CancerVerse case"}), 404
-    path = os.path.join(Constants.PANTS_PATH, "profile_only", get_panTS_id(secure_filename(clabel_id)), "profile.jpg")
+    safe_id = secure_filename(clabel_id)
+    if get_dataset_from_case_id(safe_id) == "CancerVerse":
+        # Generated offline by scripts/make_profile_previews.pY
+        path = os.path.join(Constants.CANCERVERSE_PATH, "profile_only", get_cancerverse_id(safe_id), "profile.jpg")
+    else:
+        path = os.path.join(Constants.PANTS_PATH, "profile_only", get_panTS_id(safe_id), "profile.jpg")
     if not os.path.exists(path):
         return jsonify({"error": f"File not found: {path} "}), 404
     return send_file(
         path,
-        mimetype="image/jpg",   
+        mimetype="image/jpg",
         as_attachment=False,
         download_name=f"{clabel_id}_slice.jpg"
     )
