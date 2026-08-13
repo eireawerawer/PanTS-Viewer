@@ -106,10 +106,11 @@ def test_validate_ct_accepts_real_ct_and_rejects_garbage(ud, tmp_path):
     ok, reason = ud.validate_ct(ct)
     assert ok, reason
 
-    # constant volume -> rejected
+    # constant volume -> rejected (a constant volume compresses tiny, so it trips
+    # too_small before the constant/intensity checks -- all are valid rejections).
     flat = str(tmp_path / "flat.nii.gz"); _write_nifti(flat, np.zeros((64, 64, 64), "float32"))
     ok, reason = ud.validate_ct(flat)
-    assert not ok and reason in ("constant_volume", "non_ct_intensity:[0,0]")
+    assert not ok and reason in ("constant_volume", "too_small", "non_ct_intensity:[0,0]")
 
     # non-CT intensities (all positive, no air) -> rejected
     pos = np.full((64, 64, 64), 50.0, dtype="float32"); pos[0, 0, 0] = 90.0
@@ -117,8 +118,10 @@ def test_validate_ct_accepts_real_ct_and_rejects_garbage(ud, tmp_path):
     ok, reason = ud.validate_ct(posf)
     assert not ok
 
-    # 2D image -> rejected
-    twod = str(tmp_path / "2d.nii.gz"); _write_nifti(twod, np.zeros((64, 64, 1), "float32"))
+    # 2D image -> rejected as not_3d (random data so it clears the size floor and
+    # reaches the dimensionality check rather than tripping too_small first)
+    twod_arr = np.random.RandomState(1).uniform(-1000, 500, (256, 256, 1)).astype("float32")
+    twod = str(tmp_path / "2d.nii.gz"); _write_nifti(twod, twod_arr)
     ok, reason = ud.validate_ct(twod)
     assert not ok and reason.startswith("not_3d")
 
