@@ -1,4 +1,4 @@
-/* Batch details popup. Monochrome + JHU Heritage Blue, matching the app. */
+/* Batch details popup. Ink/paper neutrals + BodyMaps accent, matching the app. */
 
 .bdm-backdrop {
 	position: fixed;
@@ -27,7 +27,7 @@
 	border-radius: 16px;
 	box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
 	overflow: hidden;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 }
 
 .bdm-header {
@@ -40,11 +40,11 @@
 }
 .bdm-title {
 	font-size: 18px;
-	font-weight: 700;
+	font-weight: 600;
 	color: #111111;
 }
 .bdm-subtitle {
-	font-family: 'JetBrains Mono', monospace;
+	font-family: "IBM Plex Mono", ui-monospace, monospace;
 	font-size: 12px;
 	color: #8f8f8f;
 	margin-top: 2px;
@@ -57,17 +57,17 @@
 .bdm-download-all {
 	padding: 8px 16px;
 	border-radius: 8px;
-	background: #002d72;
+	background: var(--ink);
 	color: #ffffff;
-	border: 1px solid #002d72;
-	font-family: 'Space Grotesk', sans-serif;
+	border: 1px solid var(--ink);
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 12px;
 	font-weight: 600;
 	cursor: pointer;
 	transition: background 0.15s;
 }
 .bdm-download-all:hover {
-	background: #00399a;
+	background: var(--ink-2);
 }
 .bdm-close {
 	display: flex;
@@ -81,7 +81,7 @@
 	color: #6a6a6a;
 	cursor: pointer;
 	transition: background 0.15s, color 0.15s;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 22px;
 	line-height: 1;
 	padding: 0 0 2px;
@@ -121,7 +121,7 @@
 	white-space: nowrap;
 }
 .bdm-row-sub {
-	font-family: 'JetBrains Mono', monospace;
+	font-family: "IBM Plex Mono", ui-monospace, monospace;
 	font-size: 11px;
 	color: #6a6a6a;
 	margin-top: 2px;
@@ -142,7 +142,7 @@
 	background: transparent;
 	border: 1px solid rgba(0, 0, 0, 0.12);
 	color: #111111;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 11px;
 	cursor: pointer;
 	transition: background 0.15s, border-color 0.15s;

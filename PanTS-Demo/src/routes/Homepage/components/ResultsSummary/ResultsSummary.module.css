@@ -7,7 +7,7 @@
 }
 
 .resultsText {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 12px;
   color: rgba(0, 0, 0, 0.55);
 }
@@ -16,7 +16,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 12px;
   color: rgba(0, 0, 0, 0.45);
   background: transparent;

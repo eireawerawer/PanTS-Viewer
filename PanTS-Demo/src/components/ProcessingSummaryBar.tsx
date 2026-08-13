@@ -35,7 +35,7 @@ const ProcessingSummaryBar: React.FC<Props> = ({ running, done, statusLabel, tit
 						cy={SIZE / 2}
 						r={r}
 						fill="none"
-						stroke="rgba(0,45,114,0.12)"
+						stroke="rgba(15,23,42,0.12)"
 						strokeWidth={STROKE}
 					/>
 					<circle
@@ -43,7 +43,7 @@ const ProcessingSummaryBar: React.FC<Props> = ({ running, done, statusLabel, tit
 						cy={SIZE / 2}
 						r={r}
 						fill="none"
-						stroke="#002D72"
+						stroke="#C2532F"
 						strokeWidth={STROKE}
 						strokeLinecap="round"
 						strokeDasharray={circ}
