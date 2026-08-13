@@ -5,7 +5,7 @@
   position: sticky;
   top: 0;
   z-index: var(--z-sidebar);
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
 }
 
 /* ── Nav bar ── */
@@ -30,12 +30,11 @@
   width: 38px;
   height: 38px;
   display: block;
-  border-radius: 11px;
 }
 .logoTitle {
   font-size: 18px;
-  font-weight: 700;
-  color: #111111;
+  font-weight: 600;
+  color: var(--ink);
   letter-spacing: -0.02em;
   line-height: 1.1;
 }
@@ -58,7 +57,7 @@
   border: 1px solid transparent;
   color: #6a6a6a;
   transition: color 0.2s ease, background 0.2s ease;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   background: transparent;
   letter-spacing: 0.08em;
   text-decoration: none;
@@ -68,9 +67,9 @@
   color: #111111;
 }
 .tabPillActive {
-  background: #002D72;
+  background: var(--ink);
   color: #ffffff;
-  border-color: #002D72;
+  border-color: var(--ink);
   cursor: default;
 }
 .tabPillActive:hover {
@@ -172,10 +171,10 @@
 }
 .drawerTitle {
   font-size: 16px;
-  font-weight: 700;
+  font-weight: 600;
   color: #111111;
   letter-spacing: -0.01em;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
 }
 .drawerClose {
   display: flex;
@@ -215,7 +214,7 @@
   border: none;
   text-align: left;
   cursor: pointer;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   letter-spacing: 0.03em;
   transition: color 0.15s, background 0.15s;
   min-height: 44px;
@@ -226,11 +225,11 @@
   background: rgba(0, 0, 0, 0.04);
 }
 .mobileTabActive {
-  color: #002D72;
-  background: rgba(0, 45, 114, 0.07);
+  color: var(--ink);
+  background: rgba(15, 23, 42, 0.06);
 }
 .mobileTabActive:hover {
-  color: #002D72;
+  color: var(--ink);
 }
 
 .drawerFooter {

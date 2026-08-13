@@ -2425,6 +2425,43 @@ export function canvasPointToVoxel(pane: CinePane, canvasPos: Point2): [number, 
     return null;
   }
 }
+// Canvas-pixel positions only mean what they mean for the camera that was
+// active the instant they were captured — zooming/panning afterward remaps
+// every world location to a different canvas pixel, so anything stashed as
+// a raw canvas coordinate (a lasso/scissors corner, a smart-fill seed dot)
+// silently drifts off the anatomy it was placed on the moment the camera
+// changes, both visually and — if it's later fed back into
+// canvasPointToVoxel — in the actual voxels the tool acts on. World-space
+// (mm) points don't have that problem: a world coordinate names the same
+// physical location regardless of zoom/pan. Anything that needs to survive
+// a camera change between "placed" and "drawn/committed" should be stored
+// via canvasPointToWorld and turned back into a canvas pixel via
+// worldToCanvasPoint at the moment it's actually drawn or committed.
+export function canvasPointToWorld(pane: CinePane, canvasPos: Point2): Point3 | null {
+  const engine = getRenderingEngine(renderingEngineId);
+  if (!engine) return null;
+  const viewport = engine.getViewport(CINE_VIEWPORT_BY_PANE[pane]) as any;
+  if (!viewport) return null;
+  try {
+    return viewport.canvasToWorld(canvasPos) as Point3;
+  } catch {
+    return null;
+  }
+}
+
+export function worldToCanvasPoint(pane: CinePane, world: Point3): [number, number] | null {
+  const engine = getRenderingEngine(renderingEngineId);
+  if (!engine) return null;
+  const viewport = engine.getViewport(CINE_VIEWPORT_BY_PANE[pane]) as any;
+  if (!viewport) return null;
+  try {
+    const [x, y] = viewport.worldToCanvas(world) as Point2;
+    return [x, y];
+  } catch {
+    return null;
+  }
+}
+
 function _sliceAxisForPane(pane: CinePane): 0 | 1 | 2 {
   return pane === "sagittal" ? 0 : pane === "coronal" ? 1 : 2;
 }
@@ -2671,9 +2708,83 @@ export function computeLiveWirePath(
   if (pathLocal[pathLocal.length - 1] !== seedLocal) return null; // unreachable
   pathLocal.reverse();
 
+  // --- Sub-voxel edge snap ---------------------------------------------
+  // The raw Dijkstra path above is grid-locked (every point sits on an
+  // integer voxel) and, on any CONVEX stretch of boundary, is quietly
+  // biased toward the INSIDE of the intensity transition: a real CT edge
+  // is a ramp several voxels wide (partial-volume blur), not a single-
+  // pixel step, and going around the inside of that ramp is a shorter
+  // route than going around the outside. Since the search also minimizes
+  // path length (linkLen + the bending penalty), that small length
+  // advantage quietly wins the tie-break across a whole curved stretch —
+  // this is what shows up as the contour consistently sitting a few mm
+  // inside the true boundary. Fix: for every interior point (the two
+  // fastened endpoints are left exactly where the user clicked), walk a
+  // short distance along the LOCAL intensity gradient — i.e.
+  // perpendicular to the edge — and re-center the point on the actual
+  // gradient-magnitude peak, located with sub-voxel precision via a
+  // parabolic fit rather than whichever integer voxel the graph search
+  // happened to land on. Bilinear-sampled, so it isn't limited to the
+  // same coarse grid that caused the bias in the first place.
+  const sampleHUf = (a: number, b: number): number => {
+    const a0 = Math.floor(a), b0 = Math.floor(b);
+    const fa = a - a0, fb = b - b0;
+    const v00 = huAt(a0, b0), v10 = huAt(a0 + 1, b0);
+    const v01 = huAt(a0, b0 + 1), v11 = huAt(a0 + 1, b0 + 1);
+    return v00 * (1 - fa) * (1 - fb) + v10 * fa * (1 - fb) + v01 * (1 - fa) * fb + v11 * fa * fb;
+  };
+  const H = 0.5; // sub-voxel differencing step, in voxels
+  const gradAtf = (a: number, b: number): [number, number] => [
+    (sampleHUf(a + H, b) - sampleHUf(a - H, b)) / (2 * H),
+    (sampleHUf(a, b + H) - sampleHUf(a, b - H)) / (2 * H),
+  ];
+  const gradMagAtf = (a: number, b: number): number => {
+    const [gxf, gyf] = gradAtf(a, b);
+    return Math.hypot(gxf, gyf);
+  };
+
+  const REFINE_RADIUS = 1.75; // voxels either side of the raw path point to search
+  const REFINE_STEP = 0.25;
+  const refinePoint = (a: number, b: number): [number, number] => {
+    const [gxf, gyf] = gradAtf(a, b);
+    const gmag = Math.hypot(gxf, gyf);
+    if (gmag < 1e-6) return [a, b]; // flat locally — nothing to snap to, leave it
+    const ux = gxf / gmag, uy = gyf / gmag; // unit vector along the gradient, i.e. perpendicular to the edge
+
+    // Coarse search for the strongest gradient magnitude along that
+    // normal. Starts from (and only ever improves on) the raw point's own
+    // magnitude, so this can only pull toward a genuinely stronger nearby
+    // edge — never introduces a large jump toward an unrelated feature.
+    let bestT = 0, bestMag = gmag;
+    for (let t = -REFINE_RADIUS; t <= REFINE_RADIUS; t += REFINE_STEP) {
+      if (t === 0) continue;
+      const m = gradMagAtf(a + ux * t, b + uy * t);
+      if (m > bestMag) { bestMag = m; bestT = t; }
+    }
+    // Parabolic sub-step refinement around the winning sample so the final
+    // point isn't itself grid-locked to REFINE_STEP increments.
+    const mMinus = gradMagAtf(a + ux * (bestT - REFINE_STEP), b + uy * (bestT - REFINE_STEP));
+    const mPlus = gradMagAtf(a + ux * (bestT + REFINE_STEP), b + uy * (bestT + REFINE_STEP));
+    const denom = mMinus - 2 * bestMag + mPlus;
+    const delta = Math.abs(denom) > 1e-6 ? (0.5 * (mMinus - mPlus)) / denom : 0;
+    const tRefined = bestT + Math.max(-REFINE_STEP, Math.min(REFINE_STEP, delta * REFINE_STEP));
+
+    return [a + ux * tRefined, b + uy * tRefined];
+  };
+
   const points: Array<[number, number]> = [];
-  for (const li of pathLocal) {
-    const a = winA0 + (li % winW), b = winB0 + Math.floor(li / winW);
+  for (let idx = 0; idx < pathLocal.length; idx++) {
+    const li = pathLocal[idx];
+    let a = winA0 + (li % winW), b = winB0 + Math.floor(li / winW);
+    // Leave the two fastened endpoints exactly where the user clicked —
+    // only interior points get snapped to the refined edge location.
+    if (idx > 0 && idx < pathLocal.length - 1) {
+      [a, b] = refinePoint(a, b);
+    }
+    // sliceOf works fine with fractional a/b (it just slots them into the
+    // fixed-axis tuple) — passing the refined, non-rounded values straight
+    // through is what actually preserves the sub-voxel correction; feeding
+    // it Math.round(a)/Math.round(b) here would throw the refinement away.
     const [i, j, k] = sliceOf(a, b);
     try {
       const world = ctVolume.imageData.indexToWorld([i, j, k]);

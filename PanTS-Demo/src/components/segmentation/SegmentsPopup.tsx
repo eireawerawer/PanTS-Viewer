@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import {
 	IconEye, IconEyeOff, IconTrash, IconPlus, IconStack2, IconSparkles,
 	IconPencil,
-	IconLoader2, IconTargetArrow,
+	IconLoader2,
 } from "@tabler/icons-react";
 import type { CheckBoxData } from "../../types";
 import "./SegmentsPopup.css";
@@ -188,112 +188,115 @@ function ColorPickerPopover({ value, onChange, onClose, anchorRef }: ColorPicker
 	);
 }
 
-// Alternative to the old grid-template-rows(0fr/1fr) collapse trick, which
-// read as "stuck halfway then vanishes" — that approach animates a CSS grid
-// track, but the *content itself* wasn't clipped to match at every instant
-// (an error line appearing/disappearing changes the natural height out from
-// under the grid animation, and the two could visibly desync), and the
-// close was driven by a JS setTimeout guessing the transition's real
-// duration rather than the transition itself, so a slow frame or a
-// mid-flight re-render could unmount the row before (or well after) it had
-// actually finished animating.
+// Replaces the old in-row Collapse (grid-template-rows / max-height) trick.
+// That approach animated the *content's own* box open and closed inline in
+// the list, which had two problems in practice: every existing row below it
+// physically shifted up/down as the form expanded and collapsed (jarring
+// next to a list the person is actively scanning), and its "done animating"
+// signal was a CSS `transitionend` on `max-height` — which never fires if
+// the browser coalesces the open→close flip within a frame, if the content's
+// measured height doesn't actually change between states, or if a re-render
+// interrupts the transition mid-flight. When that happened the row got stuck
+// permanently in its "closing" bookkeeping state, and since the very next
+// "Add class" button is gated on that same bookkeeping having cleared, it
+// would silently stop appearing at all.
 //
-// This instead measures the *real* pixel height of the content (via the
-// inner ref's scrollHeight) and animates `max-height` directly to that
-// number, then releases it to `none` once open so dynamic content (an
-// error message showing up, the character-count line, etc.) can still grow
-// freely without being clipped. Closing reverses that: pin the current
-// height to a concrete px first (you can't transition away from `none`),
-// then flip to 0 on the next frame. Either direction's completion is driven
-// by the transition's own `onTransitionEnd`, not a timer, so there's no
-// duration to keep in sync with the CSS and no way for it to fire early or
-// late.
-interface CollapseProps {
-	/** true = expanded/open, false = animate closed. The caller keeps this
-	 *  component mounted for a beat after flipping to false (see
-	 *  `onExited`) so the close transition is visible instead of the row
-	 *  just disappearing. */
-	in: boolean;
-	/** Fires once the close transition has genuinely finished — the right
-	 *  moment for the caller to actually unmount this row/form. */
-	onExited?: () => void;
-	children: React.ReactNode;
-	className?: string;
+// This instead portals the add/edit form to <body> as a small floating
+// panel anchored (fixed position, computed off the trigger button's own
+// rect) next to whatever it's editing — same mechanism already proven out
+// by ColorPickerPopover above. Existing rows and icons never move, because
+// the form isn't part of their flex flow at all. And open/close is driven
+// entirely by this component's own JS timer (mirroring
+// ColorPickerPopover's `requestClose`), never by waiting on a transition
+// event, so there's no path left where it can get stuck.
+interface FormFlyoutProps {
+	/** The button this flyout is anchored to and points at with its little
+	 *  pointer/arrow — the "Add class" button, or a row's pencil icon. */
+	anchorEl: HTMLElement | null;
+	/** Called once the close animation has actually finished — the right
+	 *  moment for the caller to unmount this flyout / clear its target id. */
+	onClose: () => void;
+	/** Render prop so Cancel / successful-Enter / successful-Apply inside
+	 *  the form can all trigger the same gradual close by calling this,
+	 *  instead of each needing its own copy of the animate-then-unmount
+	 *  logic. */
+	children: (requestClose: () => void) => React.ReactNode;
 }
 
-function Collapse({ in: open, onExited, children, className = "" }: CollapseProps) {
-	const innerRef = useRef<HTMLDivElement>(null);
-	const [maxHeight, setMaxHeight] = useState<number | "none">(open ? "none" : 0);
-	const rafRef = useRef<number | null>(null);
-	const mountedRef = useRef(false);
+function FormFlyout({ anchorEl, onClose, children }: FormFlyoutProps) {
+	const [closing, setClosing] = useState(false);
+	const panelRef = useRef<HTMLDivElement>(null);
+	const [pos, setPos] = useState<{ top: number; left: number; arrowLeft: number } | null>(null);
 
-	useEffect(() => {
-		const el = innerRef.current;
-		if (!el) return;
-
-		// First paint: just reflect the initial state, nothing to animate
-		// yet (avoids an unwanted transition from 0 the instant a row that
-		// starts out open first mounts).
-		if (!mountedRef.current) {
-			mountedRef.current = true;
-			return;
-		}
-
-		if (open) {
-			// Opening: animate from wherever we are (0, most commonly) up to
-			// the content's real measured height.
-			setMaxHeight(el.scrollHeight);
-		} else {
-			// Closing: if we're currently sitting at `none` (fully open,
-			// content free to grow), pin that down to today's actual pixel
-			// height first — `none` can't be transitioned away from
-			// directly — then let the next frame drop it to 0 so the
-			// browser has a real numeric start point to animate from.
-			setMaxHeight(el.scrollHeight);
-			rafRef.current = requestAnimationFrame(() => setMaxHeight(0));
-		}
-		return () => {
-			if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
-		};
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [open]);
-
-	const handleTransitionEnd = (e: React.TransitionEvent<HTMLDivElement>) => {
-		if (e.target !== e.currentTarget || e.propertyName !== "max-height") return;
-		if (open) {
-			// Release the cap so content that changes height while open
-			// (error text, char-count line) isn't clipped or fighting a
-			// stale measured number.
-			setMaxHeight("none");
-		} else {
-			onExited?.();
-		}
+	const requestClose = () => {
+		if (closing) return;
+		setClosing(true);
+		window.setTimeout(onClose, EXIT_ANIM_MS);
 	};
 
-	return (
+	useEffect(() => {
+		const compute = () => {
+			if (!anchorEl) return;
+			const rect = anchorEl.getBoundingClientRect();
+			const panelW = panelRef.current?.offsetWidth ?? 260;
+			const panelH = panelRef.current?.offsetHeight ?? 0;
+			const margin = 8;
+			// Prefer opening just below the trigger, left-aligned to it;
+			// clamp horizontally so it never runs off the viewport edge,
+			// and flip above the trigger if there isn't room below.
+			let left = rect.left;
+			left = Math.max(margin, Math.min(left, window.innerWidth - panelW - margin));
+			let top = rect.bottom + 10;
+			if (panelH && top + panelH > window.innerHeight - margin) {
+				top = rect.top - panelH - 10;
+			}
+			// Point the little pointer at the trigger's own center, clamped
+			// to stay within the panel's own width.
+			const arrowLeft = Math.max(14, Math.min(rect.left + rect.width / 2 - left, panelW - 14));
+			setPos({ top, left, arrowLeft });
+		};
+		compute();
+		window.addEventListener("resize", compute);
+		window.addEventListener("scroll", compute, true);
+		return () => {
+			window.removeEventListener("resize", compute);
+			window.removeEventListener("scroll", compute, true);
+		};
+	}, [anchorEl]);
+
+	useEffect(() => {
+		const onDown = (e: MouseEvent) => {
+			if (panelRef.current?.contains(e.target as Node)) return;
+			if (anchorEl?.contains(e.target as Node)) return;
+			requestClose();
+		};
+		const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") requestClose(); };
+		document.addEventListener("mousedown", onDown);
+		document.addEventListener("keydown", onKey);
+		return () => {
+			document.removeEventListener("mousedown", onDown);
+			document.removeEventListener("keydown", onKey);
+		};
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [anchorEl]);
+
+	if (typeof document === "undefined" || !pos) return null;
+
+	return createPortal(
 		<div
-			className={`segpop__collapse ${open ? "is-open" : "is-closing"} ${className}`}
-			style={{ maxHeight: maxHeight === "none" ? "none" : `${maxHeight}px` }}
-			onTransitionEnd={handleTransitionEnd}
+			ref={panelRef}
+			className={`segpop__form-flyout ${closing ? "is-closing" : "is-open"}`}
+			style={{ position: "fixed", top: pos.top, left: pos.left }}
+			onClick={(e) => e.stopPropagation()}
 		>
-			<div ref={innerRef} className="segpop__collapse-inner">
-				{children}
-			</div>
-		</div>
+			<span className="segpop__form-flyout-arrow" style={{ left: pos.arrowLeft }} />
+			{children(requestClose)}
+		</div>,
+		document.body
 	);
 }
 
-// Single compact "this is the current target" indicator, shared by both the
-// custom-class rows and the existing-organ rows so the two tabs read the
-// same way. Icon-only (with a tooltip) so it costs as little row width as
-// possible, leaving more room for the name itself.
-function TargetBadge() {
-	return (
-		<span className="segpop__target-badge" title="Currently targeted" aria-label="Currently targeted">
-			<IconTargetArrow size={13} />
-		</span>
-	);
-}
+
 
 // Gap kept clear between the docked panel's top edge and the reserved
 // annotation area above it (topbar + ribbon + flyout strip — see
@@ -364,14 +367,13 @@ export default function SegmentsPopup({
 		root.style.setProperty("--atb-segpanel-w", open ? `${width}px` : "0px");
 	}, [open, width]);
 
-	const [tab, setTab] = useState<PopupTab>(activeCatalogOrganId != null ? "existing" : "custom");
-
-	// `adding` drives the Collapse's `in` prop (expanded vs. animating
-	// closed); `addFormMounted` stays true for the extra beat it takes the
-	// close transition to actually finish, cleared only by Collapse's own
-	// `onExited` — so the form is never yanked out mid-animation.
+	const [tab, setTab] = useState<PopupTab>("existing");
+	// `adding` drives whether the Add-class FormFlyout is mounted at all —
+	// no separate "still animating closed" bookkeeping needed anymore since
+	// FormFlyout owns its own close animation/timer internally and only
+	// calls back once it's genuinely done.
 	const [adding, setAdding] = useState(false);
-	const [addFormMounted, setAddFormMounted] = useState(false);
+	const [addAnchorEl, setAddAnchorEl] = useState<HTMLElement | null>(null);
 	const [draftName, setDraftName] = useState("");
 	const [draftColor, setDraftColor] = useState(NEXT_COLOR_POOL[segments.length % NEXT_COLOR_POOL.length]);
 	const [createError, setCreateError] = useState("");
@@ -379,18 +381,17 @@ export default function SegmentsPopup({
 
 	// Combined name+color editor, opened via the pen icon (replaces the old
 	// double-click-to-rename-only flow — both fields are changed and
-	// confirmed together, in one place).
-	// `editingId` drives Collapse's `in` prop; `editRowMountedId` stays set
-	// (same pattern as addFormMounted above) until Collapse's `onExited`
-	// confirms the close transition has actually finished.
+	// confirmed together, in one place). Same "no separate mounted flag"
+	// simplification as `adding` above — the FormFlyout itself tracks its
+	// close animation.
 	const [editingId, setEditingId] = useState<number | null>(null);
-	const [editRowMountedId, setEditRowMountedId] = useState<number | null>(null);
+	const [editAnchorEl, setEditAnchorEl] = useState<HTMLElement | null>(null);
 	const [editNameDraft, setEditNameDraft] = useState("");
 	const [editColorDraft, setEditColorDraft] = useState("#ffffff");
 	const [renameError, setRenameError] = useState<number | null>(null);
 	const [editColorPopoverOpen, setEditColorPopoverOpen] = useState(false);
 	// Anchors for the portaled ColorPickerPopover — one swatch button lives
-	// in the add-form, the other in the inline edit row, and only one of
+	// in the add-form flyout, the other in the edit flyout, and only one of
 	// either is ever mounted at a time, but keeping separate refs avoids
 	// them fighting over a single ref across renders.
 	const addColorBtnRef = useRef<HTMLButtonElement>(null);
@@ -440,29 +441,28 @@ export default function SegmentsPopup({
 	const switchTab = (next: PopupTab) => {
 		setTab(next);
 		setAdding(false);
-		setAddFormMounted(false);
 		setCreateError("");
 		setEditingId(null);
-		setEditRowMountedId(null);
 		setConfirmDeleteId(null);
 	};
 
-	const startAdd = () => {
+	const startAdd = (e: React.MouseEvent<HTMLButtonElement>) => {
+		setAddAnchorEl(e.currentTarget);
 		setAdding(true);
-		setAddFormMounted(true);
 		setDraftName("");
 		setCreateError("");
 		setDraftColor(NEXT_COLOR_POOL[segments.length % NEXT_COLOR_POOL.length]);
 	};
 
-	// Kicks off the add-form's collapse-out transition — shared by both
-	// Cancel and a successful Add so closing always reads the same way
-	// regardless of why it's closing. The form stays mounted (see
-	// `addFormMounted`) until Collapse's `onExited` fires below, once the
-	// animation has genuinely finished.
+	// Fully closes the add flyout immediately — used when something else
+	// (switching tabs, deleting) needs it gone right away, with no need for
+	// its own gradual close animation. The FormFlyout's own Cancel/Enter/
+	// Apply paths instead call the `requestClose` it hands them, which
+	// plays the close animation first and calls this once it's done.
 	const closeAddForm = () => {
 		setAddColorPopoverOpen(false);
 		setAdding(false);
+		setAddAnchorEl(null);
 	};
 
 	const commitAdd = (): boolean => {
@@ -490,20 +490,19 @@ export default function SegmentsPopup({
 		return true;
 	};
 
-	const startEdit = (id: number, currentName: string, currentColor: string) => {
+	const startEdit = (id: number, currentName: string, currentColor: string, anchorEl: HTMLElement) => {
 		setEditingId(id);
-		setEditRowMountedId(id);
+		setEditAnchorEl(anchorEl);
 		setEditNameDraft(currentName);
 		setEditColorDraft(currentColor);
 		setRenameError(null);
 	};
-	// Kicks off the edit row's collapse-out transition, shared by Save and
-	// Cancel so both close the same way. The row stays mounted until
-	// Collapse's `onExited` fires (see the render below), once the close
-	// transition has actually finished — no more setTimeout guessing.
+	// Immediately closes the edit flyout — see closeAddForm's note above for
+	// why this is separate from the FormFlyout's own animated requestClose.
 	const closeEdit = (id: number) => {
 		setEditColorPopoverOpen(false);
 		setEditingId((cur) => (cur === id ? null : cur));
+		setEditAnchorEl(null);
 	};
 	const cancelEdit = () => {
 		if (editingId == null) return;
@@ -597,7 +596,7 @@ export default function SegmentsPopup({
 												onClick={() => handleSelectExisting(o.id)}
 											>
 												<span className="segpop__catalog-row-name">{toTitleCase(o.label)}</span>
-												{activeCatalogOrganId === o.id && <TargetBadge />}
+
 											</button>
 										))}
 									</div>
@@ -613,80 +612,11 @@ export default function SegmentsPopup({
 									const active = isCustomActive(s.id);
 									const hex = colors[s.id] ?? "#ffffff";
 									const isEditing = editingId === s.id;
-									const isEditRowMounted = editRowMountedId === s.id;
-
-									if (isEditRowMounted) {
-										const remaining = MAX_SEGMENT_NAME_LENGTH - editNameDraft.length;
-										return (
-											<Collapse
-												key={s.id}
-												in={isEditing}
-												onExited={() => setEditRowMountedId((cur) => (cur === s.id ? null : cur))}
-												className="segpop__row segpop__row--editing"
-											>
-												<div
-													className="segpop__row--editing-inner"
-													onClick={(e) => e.stopPropagation()}
-												>
-												{/* Swatch button opens the gradual color popover instead of the
-												    OS's own abrupt native picker — same swatch look as the static
-												    row, just clickable while editing. */}
-												<div className="segpop__color-anchor">
-													<button
-														ref={editColorBtnRef}
-														type="button"
-														className="segpop__color segpop__color-btn"
-														style={{ background: editColorDraft }}
-														aria-label="Class color"
-														title="Change color"
-														onClick={() => setEditColorPopoverOpen((v) => !v)}
-													/>
-													{editColorPopoverOpen && isEditing && (
-														<ColorPickerPopover
-															value={editColorDraft}
-															onChange={setEditColorDraft}
-															onClose={() => setEditColorPopoverOpen(false)}
-															anchorRef={editColorBtnRef}
-														/>
-													)}
-												</div>
-												<input
-													autoFocus
-													className={`segpop__name-input ${renameError === s.id ? "is-error" : ""}`}
-													value={editNameDraft}
-													maxLength={MAX_SEGMENT_NAME_LENGTH}
-													onChange={(e) => { setEditNameDraft(e.target.value); setRenameError(null); }}
-													onKeyDown={(e) => {
-														// Same fix as the add-form input above: close on a
-														// successful Enter-commit instead of leaving the row
-														// stuck open in edit mode.
-														if (e.key === "Enter") { if (commitEdit(s.id)) closeEdit(s.id); }
-														if (e.key === "Escape") cancelEdit();
-													}}
-												/>
-												{renameError === s.id && <span className="segpop__err segpop__err--block">Name in use</span>}
-												{renameError !== s.id && remaining <= 10 && (
-													<span className="segpop__err segpop__err--block segpop__char-count">{remaining} characters left</span>
-												)}
-												{/* Same Apply/Cancel row arrangement as the "Add class"
-												    form below — one standardized commit control across the
-												    popup instead of this row's own bespoke Save/X buttons. */}
-												<div className="segpop__row-actions">
-													<ApplyButton className="segpop__add-confirm" onApply={() => commitEdit(s.id)} onDone={() => closeEdit(s.id)} label="Save" applyingLabel="Saving…" successLabel="Saved" />
-													<button className="atb-action-btn segpop__add-cancel-text" onClick={cancelEdit}>
-														<span className="atb-action-btn__label">Cancel</span>
-													</button>
-												</div>
-												</div>
-											</Collapse>
-										);
-									}
-
 									const isDeleting = deletingIds.has(s.id);
 									return (
 										<div
 											key={s.id}
-											className={`segpop__row ${active ? "is-active" : ""} ${isDeleting ? "is-deleting" : ""}`}
+											className={`segpop__row ${active ? "is-active" : ""} ${isDeleting ? "is-deleting" : ""} ${isEditing ? "is-editing-target" : ""}`}
 											onClick={() => { if (!isDeleting) { onSelect(active ? null : s.id); } }}
 										>
 											<button
@@ -701,11 +631,11 @@ export default function SegmentsPopup({
 											<span className="segpop__name" title={s.label}>
 												{s.label}
 											</span>
-											{active && !isDeleting && <TargetBadge />}
+
 											{!isDeleting && (
 												<button
-													className="segpop__edit-btn"
-													onClick={(e) => { e.stopPropagation(); startEdit(s.id, s.label, hex); }}
+													className={`segpop__edit-btn ${isEditing ? "is-active" : ""}`}
+													onClick={(e) => { e.stopPropagation(); startEdit(s.id, s.label, hex, e.currentTarget); }}
 													aria-label="Rename / recolor"
 													title="Rename / recolor"
 												>
@@ -725,6 +655,66 @@ export default function SegmentsPopup({
 									);
 								})}
 
+								{/* Edit flyout: a single instance, floated next to whichever
+								    row's pencil icon opened it, instead of expanding inline —
+								    so the rest of the list never shifts and this can never get
+								    stuck the way the old inline collapse could. */}
+								{editingId != null && (() => {
+									const s = segments.find((seg) => seg.id === editingId);
+									if (!s) return null;
+									const remaining = MAX_SEGMENT_NAME_LENGTH - editNameDraft.length;
+									return (
+										<FormFlyout anchorEl={editAnchorEl} onClose={() => closeEdit(editingId)}>
+											{(requestClose) => (
+												<div className="segpop__form-flyout-inner">
+													<div style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}>
+														<div className="segpop__color-anchor">
+															<button
+																ref={editColorBtnRef}
+																type="button"
+																className="segpop__color segpop__color-btn"
+																style={{ background: editColorDraft }}
+																aria-label="Class color"
+																title="Change color"
+																onClick={() => setEditColorPopoverOpen((v) => !v)}
+															/>
+															{editColorPopoverOpen && (
+																<ColorPickerPopover
+																	value={editColorDraft}
+																	onChange={setEditColorDraft}
+																	onClose={() => setEditColorPopoverOpen(false)}
+																	anchorRef={editColorBtnRef}
+																/>
+															)}
+														</div>
+														<input
+															autoFocus
+															className={`segpop__name-input ${renameError === s.id ? "is-error" : ""}`}
+															value={editNameDraft}
+															maxLength={MAX_SEGMENT_NAME_LENGTH}
+															onChange={(e) => { setEditNameDraft(e.target.value); setRenameError(null); }}
+															onKeyDown={(e) => {
+																if (e.key === "Enter") { if (commitEdit(s.id)) requestClose(); }
+																if (e.key === "Escape") requestClose();
+															}}
+														/>
+													</div>
+													{renameError === s.id && <span className="segpop__err segpop__err--block">Name in use</span>}
+													{renameError !== s.id && remaining <= 10 && (
+														<span className="segpop__err segpop__err--block segpop__char-count">{remaining} characters left</span>
+													)}
+													<div className="segpop__row-actions">
+														<ApplyButton className="segpop__add-confirm" onApply={() => commitEdit(s.id)} onDone={requestClose} label="Save" applyingLabel="Saving…" successLabel="Saved" />
+														<button className="atb-action-btn segpop__add-cancel-text" onClick={requestClose}>
+															<span className="atb-action-btn__label">Cancel</span>
+														</button>
+													</div>
+												</div>
+											)}
+										</FormFlyout>
+									);
+								})()}
+
 								{confirmDeleteId != null && (
 									<GuidedStepModal
 										title="Delete this class?"
@@ -740,67 +730,62 @@ export default function SegmentsPopup({
 									/>
 								)}
 
-								{addFormMounted ? (
-									<Collapse
-										in={adding}
-										onExited={() => setAddFormMounted(false)}
-										className="segpop__add-form"
-									>
-										<div className="segpop__add-form-inner" ref={addClassRef}>
-										<div style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}>
-											<div className="segpop__color-anchor">
-												<button
-													ref={addColorBtnRef}
-													type="button"
-													className="segpop__color segpop__color-btn"
-													style={{ background: draftColor }}
-													aria-label="Class color"
-													title="Change color"
-													onClick={() => setAddColorPopoverOpen((v) => !v)}
-												/>
-												{addColorPopoverOpen && (
-													<ColorPickerPopover
-														value={draftColor}
-														onChange={setDraftColor}
-														onClose={() => setAddColorPopoverOpen(false)}
-														anchorRef={addColorBtnRef}
+								{/* "Add class" trigger stays put and always renders — the form
+								    itself now lives in a floating FormFlyout (below) instead of
+								    swapping this button out for an inline form, so there's no
+								    "form got stuck open, button never came back" failure mode. */}
+								<div ref={addClassRef}>
+									<button className={`segpop__new ${adding ? "is-active" : ""}`} onClick={startAdd}>
+										<IconPlus size={15} /> Add class
+									</button>
+								</div>
+								{adding && (
+									<FormFlyout anchorEl={addAnchorEl} onClose={closeAddForm}>
+										{(requestClose) => (
+											<div className="segpop__form-flyout-inner">
+												<div style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}>
+													<div className="segpop__color-anchor">
+														<button
+															ref={addColorBtnRef}
+															type="button"
+															className="segpop__color segpop__color-btn"
+															style={{ background: draftColor }}
+															aria-label="Class color"
+															title="Change color"
+															onClick={() => setAddColorPopoverOpen((v) => !v)}
+														/>
+														{addColorPopoverOpen && (
+															<ColorPickerPopover
+																value={draftColor}
+																onChange={setDraftColor}
+																onClose={() => setAddColorPopoverOpen(false)}
+																anchorRef={addColorBtnRef}
+															/>
+														)}
+													</div>
+													<input
+														autoFocus
+														className={`segpop__name-input ${createError ? "is-error" : ""}`}
+														placeholder="Class name"
+														value={draftName}
+														maxLength={MAX_SEGMENT_NAME_LENGTH}
+														onChange={(e) => { setDraftName(e.target.value); setCreateError(""); }}
+														onKeyDown={(e) => {
+															if (e.key === "Enter") { if (commitAdd()) requestClose(); }
+															if (e.key === "Escape") requestClose();
+														}}
 													/>
-												)}
+												</div>
+												{createError && <span className="segpop__err segpop__err--block">{createError}</span>}
+												<div className="segpop__row-actions">
+													<ApplyButton className="segpop__add-confirm" onApply={commitAdd} onDone={requestClose} label="Add class" applyingLabel="Adding…" successLabel="Added" />
+													<button className="atb-action-btn segpop__add-cancel-text" onClick={requestClose}>
+														<span className="atb-action-btn__label">Cancel</span>
+													</button>
+												</div>
 											</div>
-											<input
-												autoFocus
-												className={`segpop__name-input ${createError ? "is-error" : ""}`}
-												placeholder="Class name"
-												value={draftName}
-												maxLength={MAX_SEGMENT_NAME_LENGTH}
-												onChange={(e) => { setDraftName(e.target.value); setCreateError(""); }}
-												onKeyDown={(e) => {
-													// Mirrors the ApplyButton path below: on a successful add,
-													// close the form the same way clicking "Add class" would
-													// (previously this just called commitAdd() and left the
-													// form sitting open with no visible next step).
-													if (e.key === "Enter") { if (commitAdd()) closeAddForm(); }
-													if (e.key === "Escape") closeAddForm();
-												}}
-											/>
-										</div>
-										{createError && <span className="segpop__err segpop__err--block">{createError}</span>}
-										<div className="segpop__row-actions">
-											{/* Same ApplyButton used by every flyout's "do this now"
-											    action — one consistent commit control across the panel. */}
-											<ApplyButton className="segpop__add-confirm" onApply={commitAdd} onDone={closeAddForm} label="Add class" applyingLabel="Adding…" successLabel="Added" />
-											<button className="atb-action-btn segpop__add-cancel-text" onClick={closeAddForm}>
-												<span className="atb-action-btn__label">Cancel</span>
-											</button>
-										</div>
-										</div>
-									</Collapse>
-								) : (
-									<div ref={addClassRef}>
-										<button className="segpop__new" onClick={startAdd}>
-											<IconPlus size={15} /> Add class
-										</button>
-									</div>
+										)}
+									</FormFlyout>
 								)}
 							</>
 						)}

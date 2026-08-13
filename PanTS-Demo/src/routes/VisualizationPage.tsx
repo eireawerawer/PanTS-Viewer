@@ -41,6 +41,7 @@ import { createPortal } from "react-dom";
 import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
 import { useLocation, useParams } from "react-router-dom";
 import AISidebar from "../components/AIAssistant/AISidebar";
+import { track } from "../helpers/analytics";
 import { buildViewerActions } from "../components/AIAssistant/assistantActions";
 import MeasurementPanel from "../components/MeasurementPanel/MeasurementPanel";
 import { SegmentationMeshViewer } from "../components/viewer/MeshViewer";
@@ -410,6 +411,86 @@ function useToolbarFlyout() {
 	return { open, pos, groupRef, btnRef, menuRef, toggle, close };
 }
 
+// One-time "click here to close" nudge shown next to the closing anchor
+// (the highlighted/red first point) on the Lasso/Scissors live-wire
+// overlay, the moment the cursor first gets close enough to actually close
+// the loop. Fades away automatically after a few seconds rather than
+// needing a dismiss click, since by the time it fades the person has
+// almost always already seen the highlighted anchor itself. Resets the
+// moment the loop is closed/cancelled (anchor goes away), so it can show
+// again on the next shape.
+const CLOSE_LOOP_HINT_VISIBLE_MS = 3000;
+const CLOSE_LOOP_HINT_FADE_MS = 300;
+function CloseLoopHint({ nearClose, anchor }: { nearClose: boolean; anchor: [number, number] | undefined }) {
+	const [visible, setVisible] = useState(false);
+	const [fading, setFading] = useState(false);
+	// Tracks whether this hint has already been shown for the CURRENT loop
+	// in progress, so it only ever fires once per shape rather than
+	// re-triggering every time the cursor wanders in and out of range.
+	const shownThisLoopRef = useRef(false);
+	const fadeTimerRef = useRef<number | null>(null);
+	const hideTimerRef = useRef<number | null>(null);
+
+	const clearTimers = () => {
+		if (fadeTimerRef.current) window.clearTimeout(fadeTimerRef.current);
+		if (hideTimerRef.current) window.clearTimeout(hideTimerRef.current);
+		fadeTimerRef.current = null;
+		hideTimerRef.current = null;
+	};
+
+	// No anchor means there's no shape in progress (just closed, cancelled,
+	// or not started yet) — reset so the next shape can show the hint again.
+	useEffect(() => {
+		if (anchor) return;
+		shownThisLoopRef.current = false;
+		setVisible(false);
+		setFading(false);
+		clearTimers();
+	}, [anchor]);
+
+	useEffect(() => {
+		if (!nearClose || !anchor || shownThisLoopRef.current) return;
+		shownThisLoopRef.current = true;
+		setFading(false);
+		setVisible(true);
+		fadeTimerRef.current = window.setTimeout(() => setFading(true), CLOSE_LOOP_HINT_VISIBLE_MS);
+		hideTimerRef.current = window.setTimeout(() => setVisible(false), CLOSE_LOOP_HINT_VISIBLE_MS + CLOSE_LOOP_HINT_FADE_MS);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [nearClose, anchor]);
+
+	useEffect(() => () => clearTimers(), []);
+
+	if (!visible || !anchor) return null;
+	return (
+		<div
+			aria-hidden="true"
+			style={{
+				position: "absolute",
+				left: anchor[0] + 14,
+				top: anchor[1],
+				transform: "translateY(-130%)",
+				background: "rgba(0, 45, 114, 0.55)",
+				border: "1px solid rgba(104, 172, 229, 0.55)",
+				borderRadius: 6,
+				color: "rgba(255, 255, 255, 0.9)",
+				fontFamily: "system-ui, sans-serif",
+				fontSize: 11,
+				fontWeight: 700,
+				padding: "5px 9px",
+				whiteSpace: "nowrap",
+				pointerEvents: "none",
+				zIndex: 40,
+				boxShadow: "0 6px 16px -6px rgba(0,0,0,0.35)",
+				backdropFilter: "blur(2px)",
+				opacity: fading ? 0 : 0.85,
+				transition: `opacity ${CLOSE_LOOP_HINT_FADE_MS}ms ease`,
+			}}
+		>
+			Click here to close the lasso
+		</div>
+	);
+}
+
 function VisualizationPage() {
 	// References and state
 	const params = useParams();
@@ -546,6 +627,12 @@ function VisualizationPage() {
 	
 	const [outlineOpacityValue, setOutlineOpacityValue] = useState(0);
 	// Current/total slice per MPR pane, for the "245/519" caption + drag scrollbar.
+	// One event per case actually opened in the viewer — not per re-render, and
+	// not for a viewer opened on a local file, which has no case behind it.
+	useEffect(() => {
+		if (pantsCase || sessionId) track("viewer_open_case");
+	}, [pantsCase, sessionId]);
+
 	// Populated by subscribeToSliceChanges once the volume is ready; null until then.
 	const [sliceInfo, setSliceInfo] = useState<Record<CinePane, SliceInfo | null>>({
 		axial: null,
@@ -757,6 +844,21 @@ function VisualizationPage() {
 
 	const setActiveSegment = (id: number | null) => setActiveSegmentState(id);
 
+	// Shared by both "select a custom class" and "select an existing organ"
+	// (see onSelect/handleSelectCatalogOrgan below): moves both the 2D MPR
+	// crosshair and the 3D crosshair to the centroid of whatever class was
+	// just targeted, on axial/sagittal/coronal at once — same mechanism the
+	// sidebar's "jump to organ" already uses (handleJumpToOrgan below), just
+	// triggered from the popup's own row click instead. No-ops quietly if
+	// the class has no voxels yet (nothing painted into it) or centroid data
+	// isn't available for it.
+	const jumpCrosshairToSegmentCentroid = (label: number) => {
+		const centroid = getOrganCentroids()?.[label];
+		if (!centroid) return;
+		moveCornerstoneCrosshairToMm(centroid);
+		setCrosshairMm(centroid);
+	};
+
 	// Selecting an existing organ from the dropdown targets the brush at it
 	// exactly like clicking a custom-segment row does.
 	const handleSelectCatalogOrgan = (id: number | null) => {
@@ -765,6 +867,7 @@ function VisualizationPage() {
 		// (id === null) must clear activeSegment too, or a stale id lingers
 		// and SegmentsPopup keeps showing a target as active.
 		setActiveSegmentState(id);
+		if (id != null) jumpCrosshairToSegmentCentroid(id);
 	};
 	const handleRenameSegment = (id: number, name: string): boolean => {
 		const dup = checkBoxData.some((s) => s.id !== id && s.label.toLowerCase() === name.toLowerCase());
@@ -779,6 +882,7 @@ function VisualizationPage() {
 	};
 
 	const handleToggleSegmentVisibility = (id: number) => {
+	track("viewer_toggle_organ");
 	setSegmentVisibility((prev) => {
 		const next = { ...prev, [id]: prev[id] === false ? true : false };
 		setCheckState((cs) => {
@@ -1151,6 +1255,11 @@ function VisualizationPage() {
 		operation: levelTraceOperation,
 		activeSegmentIndex: activeSegment,
 		maskFilter,
+		// Lets the hook re-derive its cached preview outline (voxel-space,
+		// camera-independent) against the new camera the instant zoom changes,
+		// instead of leaving it drawn at old canvas pixels until the next
+		// mousemove happens to refresh it.
+		cameraVersion: zoomLevel,
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 1500),
 	});
 
@@ -1276,6 +1385,23 @@ function VisualizationPage() {
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(null);
 			releasePrimaryMouseTools();
+		} else if (editMode === "lasso" || activeToolbarTool === "levelTracing") {
+			// Scissors/lasso (editMode "lasso") and level tracing (its own hook,
+			// keyed off activeToolbarTool rather than editMode) all place their
+			// points via plain clicks on the pane, same as smart fill's
+			// scribbling — so the crosshair tool needs to be OFF here too, not
+			// just left to whatever `crosshairToolActive` (the user's saved
+			// navigation preference) happens to be. Previously this fell
+			// through to the plain `else` below, which re-enabled Crosshairs
+			// whenever `crosshairToolActive` was true (the default) — so the
+			// crosshair stayed live and interactive under the polygon/trace
+			// clicks even though the toolbar's own crosshair button visually
+			// showed itself as deselected (its active-state check already
+			// excludes any editMode) — nothing in the UI hinted navigation was
+			// still armed underneath.
+			setActiveMeasurementTool(null);
+			setActiveMaskEditTool(null);
+			toggleCrosshairTool(false);
 		} else if (activeMeasureTool) {
 			setActiveMaskEditTool(null);
 			setActiveMeasurementTool(activeMeasureTool);
@@ -1284,7 +1410,7 @@ function VisualizationPage() {
 			setActiveMeasurementTool(null);
 			toggleCrosshairTool(crosshairToolActive);
 		}
-	}, [editMode, activeMeasureTool, crosshairToolActive]);
+	}, [editMode, activeToolbarTool, activeMeasureTool, crosshairToolActive]);
 
 
 
@@ -1450,6 +1576,7 @@ function VisualizationPage() {
 		const unsubscribe = subscribeToMeasurementChanges((kind, m) => {
 			if (!sessionRef.current) return;
 			if (kind === "completed") {
+				track("viewer_measure");
 				sessionRef.current.log("measure", `${toolDisplayName(m.tool)} measured: ${m.value}`);
 				requestAnimationFrame(() => {
 					void takeSnapshot(`${toolDisplayName(m.tool)} — ${m.value}`);
@@ -2302,6 +2429,25 @@ function VisualizationPage() {
 		}
 	};
 
+	const handleToggleAnnotationToolbar = () => {
+		const opening = !showAnnotationToolbar;
+		setShowAnnotationToolbar(opening);
+		if (!opening) {
+			// Closing (deselecting the Annotate button): drop whatever class
+			// was targeted — the isolation effect above reacts to
+			// activeCatalogOrganId/activeSegment both going null by putting
+			// every segmentation mask back to visible — and back out of
+			// whatever tool/edit mode was active, so the toolbar and popup
+			// (both driven by the same `open`/`showAnnotationToolbar` prop)
+			// close together instead of the target/tool state lingering
+			// invisibly after the UI has visually gone away.
+			setActiveCatalogOrganId(null);
+			setActiveSegmentState(null);
+			setEditMode(null);
+			setActiveToolbarTool(null);
+		}
+	};
+
 	const handleToggleStats = () => {
 		// The right-side slot is shared by stats / metadata / measurements / mask editing.
 		setShowMetadata(false);
@@ -2327,6 +2473,7 @@ function VisualizationPage() {
 	const handleToggleAISidebar = () => {
 		const opening = !showAISidebar;
 
+		if (opening) track("assistant_open");
 		setShowAISidebar(opening);
 
 		if (opening) {
@@ -2645,7 +2792,7 @@ const aiAvailableOrgans = useMemo(() => {
 												{LAYOUT_PRESETS.map(({ id, label }) => (
 													<button
 														key={id}
-														onClick={() => setLayoutPreset(id)}
+														onClick={() => { track("viewer_change_layout"); setLayoutPreset(id); }}
 														className={`vp-seg__btn ${layoutPreset === id ? "vp-seg__btn--active" : ""}`}
 													>{label}</button>
 												))}
@@ -3035,7 +3182,7 @@ const aiAvailableOrgans = useMemo(() => {
 												<button
 													ref={annotatePencilRef}
 													className={`vp-tool ${showAnnotationToolbar ? "vp-tool--active" : ""}`}
-													onClick={() => setShowAnnotationToolbar((v) => !v)}
+													onClick={handleToggleAnnotationToolbar}
 													aria-label="Annotate"
 													aria-pressed={showAnnotationToolbar}
 												>
@@ -3223,7 +3370,7 @@ const aiAvailableOrgans = useMemo(() => {
 											{!isLocal && (
 												<button
 													className="vp-tool"
-													onClick={() => setShowReportScreen(true)}
+													onClick={() => { track("report_open"); setShowReportScreen(true); }}
 													aria-label="Open report"
 												>
 													<IconReport size={20} color="white" />
@@ -3418,6 +3565,9 @@ const aiAvailableOrgans = useMemo(() => {
 							livePreviewPath={activeDrawTool.livePreviewPath}
 						/>
 						)}
+						{editMode === "lasso" && activeDrawTool.pane === "axial" && (
+							<CloseLoopHint nearClose={activeDrawTool.nearClose} anchor={activeDrawTool.cornersCanvas[0]} />
+						)}
 						{activeToolbarTool === "levelTracing" && levelTracing.previewPane === "axial" && levelTracing.previewPath && (
 						<svg
 							className="vp-leveltrace-overlay"
@@ -3495,6 +3645,9 @@ const aiAvailableOrgans = useMemo(() => {
 								nearClose={activeDrawTool.nearClose}
 								livePreviewPath={activeDrawTool.livePreviewPath}
 							/>
+						)}
+						{editMode === "lasso" && activeDrawTool.pane === "sagittal" && (
+							<CloseLoopHint nearClose={activeDrawTool.nearClose} anchor={activeDrawTool.cornersCanvas[0]} />
 						)}
 						{activeToolbarTool === "levelTracing" && levelTracing.previewPane === "sagittal" && levelTracing.previewPath && (
 						<svg
@@ -3576,6 +3729,9 @@ const aiAvailableOrgans = useMemo(() => {
 								nearClose={activeDrawTool.nearClose}
 								livePreviewPath={activeDrawTool.livePreviewPath}
 							/>
+						)}
+						{editMode === "lasso" && activeDrawTool.pane === "coronal" && (
+							<CloseLoopHint nearClose={activeDrawTool.nearClose} anchor={activeDrawTool.cornersCanvas[0]} />
 						)}
 
 						{activeToolbarTool === "levelTracing" && levelTracing.previewPane === "coronal" && levelTracing.previewPath && (
@@ -3927,6 +4083,7 @@ const aiAvailableOrgans = useMemo(() => {
 				popupDragRef={annotationPopupDragRef}
 				popupMinRef={annotationPopupMinRef}
 				sliceJumpRef={sliceJumpWrapRef}
+				anchorRef={annotatePencilRef}
 			/>
 			<SegmentsPopup
 				open={showAnnotationToolbar}
@@ -3934,7 +4091,11 @@ const aiAvailableOrgans = useMemo(() => {
 				colors={segmentColorsHex}
 				visibility={segmentVisibility}
 				activeSegmentId={activeSegment}
-				onSelect={(id) => { setActiveSegment(id); setActiveCatalogOrganId(null); }}
+				onSelect={(id) => {
+					setActiveSegment(id);
+					setActiveCatalogOrganId(null);
+					if (id != null) jumpCrosshairToSegmentCentroid(id);
+				}}
 				onRename={handleRenameSegment}
 				onColorChange={handleSegmentColorChange}
 				onToggleVisibility={handleToggleSegmentVisibility}

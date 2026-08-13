@@ -5,6 +5,11 @@ type Props = {
 	anchorPointsCanvas: Array<[number, number]>; // dense — used for the fill path only
 	cornerPointsCanvas: Array<[number, number]>; // one per click — used for the dots
 	livePreviewPath: Array<[number, number]> | null;
+	// True once the cursor is within closing range of the first point. Used
+	// only to soften/highlight the closing anchor here — the actual
+	// "click here to close" nudge is a separate <CloseLoopHint> in
+	// VisualizationPage.tsx, positioned off the same corner.
+	nearClose?: boolean;
 };
 
 
@@ -15,7 +20,7 @@ function pathToD(points: Array<[number, number]>, close: boolean): string {
 }
 
 
-function LiveWireOverlay({ anchorPointsCanvas, cornerPointsCanvas, livePreviewPath }: Props) {
+function LiveWireOverlay({ anchorPointsCanvas, cornerPointsCanvas, livePreviewPath, nearClose }: Props) {
 	return (
 		<svg
 			className="vp-livewire-overlay"
@@ -39,9 +44,22 @@ function LiveWireOverlay({ anchorPointsCanvas, cornerPointsCanvas, livePreviewPa
 					opacity={0.6}
 				/>
 			)}
-			{cornerPointsCanvas.map((p, i) => (
-				<circle key={`corner-${i}`} cx={p[0]} cy={p[1]} r={4} fill={i === 0 ? "#f43f5e" : "#22d3ee"} stroke="#08090b" strokeWidth={1.5} />
-			))}
+			{cornerPointsCanvas.map((p, i) => {
+				const isClosingAnchor = i === 0;
+				return (
+					<circle
+						key={`corner-${i}`}
+						cx={p[0]}
+						cy={p[1]}
+						r={isClosingAnchor && nearClose ? 6 : 4}
+						fill={isClosingAnchor ? "#f43f5e" : "#22d3ee"}
+						fillOpacity={isClosingAnchor && nearClose ? 0.55 : 1}
+						stroke="#08090b"
+						strokeWidth={1.5}
+						style={isClosingAnchor ? { transition: "r 150ms ease, fill-opacity 150ms ease" } : undefined}
+					/>
+				);
+			})}
 		</svg>
 	);
 }

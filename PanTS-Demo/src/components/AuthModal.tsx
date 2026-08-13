@@ -2,6 +2,7 @@ import { IconBrandGithub, IconBrandGoogle } from "@tabler/icons-react";
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../contexts/authContext";
+import { track } from "../helpers/analytics";
 import "./AuthModal.css";
 
 // The one auth popup: signing in and creating an account are the same card with
@@ -73,6 +74,8 @@ const AuthModal: React.FC = () => {
 		try {
 			if (isSignup) await signUp(email, password);
 			else await signIn(email, password);
+			// After the await: this counts successful sign-ins, not attempts.
+			track(isSignup ? "auth_sign_up" : "auth_sign_in");
 			// authContext auto-closes the popup once the user is set.
 		} catch (err) {
 			// Surface the API's message ("Invalid email or password", "An account

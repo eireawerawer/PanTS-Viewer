@@ -1,5 +1,6 @@
 import { preload } from "react-dom";
 import Header from "../../components/Header";
+import SiteFooter from "../../components/SiteFooter";
 import styles from "./TeamPage.module.css";
 
 type Member = { name: string; role: string; photo?: string };
@@ -110,6 +111,7 @@ export default function TeamPage() {
           ))}
         </div>
       </main>
+      <SiteFooter />
     </div>
   );
 }

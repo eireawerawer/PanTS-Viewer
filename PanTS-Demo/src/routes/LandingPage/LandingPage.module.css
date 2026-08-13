@@ -7,15 +7,16 @@
 }
 
 /* ---------- Root container ---------- */
-/* Theme: JHU Heritage Blue (#002D72) primary, Spirit Blue (#68ACE5) accent bars. */
+/* Theme: BodyMaps brand tokens — ink primary (fills/CTAs), orange strictly as accent. */
 .root {
   position: fixed;
   inset: 0;
   background: #ffffff;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  font-family: 'Space Grotesk', sans-serif;
+  overflow-x: hidden;
+  overflow-y: auto; /* short viewports scroll instead of clipping the hero */
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   color: #111111;
 }
 
@@ -39,14 +40,14 @@
 }
 .heroTitle {
   font-size: clamp(64px, 12vw, 132px);
-  font-weight: 700;
-  color: #002D72;
+  font-weight: 600;
+  color: var(--ink);
   letter-spacing: -0.04em;
   line-height: 1;
   margin: 0;
 }
 .heroTitleAlt {
-  color: #111111;
+  color: var(--ink);
 }
 .heroSubtitle {
   font-size: clamp(20px, 2.4vw, 30px);
@@ -72,14 +73,14 @@
 }
 .heroStatValue {
   font-size: 34px;
-  font-weight: 700;
-  color: #002D72;
+  font-weight: 600;
+  color: var(--accent-deep);
   letter-spacing: -0.02em;
   line-height: 1.1;
 }
 .heroStatLabel {
   font-size: 11px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   color: #6a6a6a;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -102,35 +103,35 @@
 .btnPrimary {
   padding: 16px 44px;
   border-radius: 14px;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
-  background: #002D72;
+  background: var(--ink);
   color: #ffffff;
-  border: 1px solid #002D72;
+  border: 1px solid var(--ink);
   transition: all 0.2s ease;
 }
 .btnPrimary:hover {
-  background: #00399a;
-  border-color: #00399a;
+  background: var(--ink-2);
+  border-color: var(--ink-2);
   transform: translateY(-1px);
 }
 .btnSecondary {
   padding: 16px 44px;
   border-radius: 14px;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
   background: transparent;
-  color: #002D72;
-  border: 1px solid rgba(0,45,114,.35);
+  color: var(--accent-deep);
+  border: 1px solid rgba(15, 23, 42, .35);
   transition: all 0.2s ease;
 }
 .btnSecondary:hover {
-  background: rgba(0,45,114,.06);
-  border-color: rgba(0,45,114,.55);
+  background: rgba(15, 23, 42, .05);
+  border-color: rgba(15, 23, 42, .55);
   transform: translateY(-1px);
 }
 
