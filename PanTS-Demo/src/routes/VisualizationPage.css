@@ -441,6 +441,22 @@
   /* Above .atb-shell's z-index (50) so this bar's downward-pointing tool
      tooltips render on top of the annotation ribbon when it's open. */
   z-index: 55;
+  transition: background 0.25s ease, border-color 0.25s ease;
+}
+
+/* While the annotation ribbon is open, the main toolbar steps back —
+   lower background contrast and dimmer inactive icons — so attention
+   reads as "focused on the annotation toolbar now open below" instead of
+   two equally-loud bars competing for it. The Annotate button itself
+   (and anything else already flagged active) stays at full strength so
+   it doesn't look broken or disabled. */
+.VisualizationPage.annotation-open .vp-topbar {
+  background: rgba(12, 13, 16, 0.6);
+  border-bottom-color: rgba(255, 255, 255, 0.05);
+}
+
+.VisualizationPage.annotation-open .vp-topbar .vp-tool:not(.vp-tool--active) {
+  opacity: 0.5;
 }
 
 /* Floating gear shown only when the toolbar is hidden. */
@@ -701,7 +717,7 @@
   border: 1px solid var(--vp-border);
   color: var(--vp-text);
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s, border-color 0.15s, opacity 0.25s ease;
 }
 
 .vp-tool:hover {
