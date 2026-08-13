@@ -257,15 +257,17 @@ def get_preview(clabel_ids):
 def get_image_preview(clabel_id):
     if not _is_safe_id(clabel_id):
         return jsonify({"error": "Invalid id"}), 400
-    if get_dataset_from_case_id(secure_filename(clabel_id)) == "CancerVerse":
-        # No profile thumbnails for CancerVerse yet — let the frontend fall back.
-        return jsonify({"error": "No preview for CancerVerse case"}), 404
-    path = os.path.join(Constants.PANTS_PATH, "profile_only", get_panTS_id(secure_filename(clabel_id)), "profile.jpg")
+    safe_id = secure_filename(clabel_id)
+    if get_dataset_from_case_id(safe_id) == "CancerVerse":
+        # Generated offline by scripts/make_profile_previews.pY
+        path = os.path.join(Constants.CANCERVERSE_PATH, "profile_only", get_cancerverse_id(safe_id), "profile.jpg")
+    else:
+        path = os.path.join(Constants.PANTS_PATH, "profile_only", get_panTS_id(safe_id), "profile.jpg")
     if not os.path.exists(path):
         return jsonify({"error": f"File not found: {path} "}), 404
     return send_file(
         path,
-        mimetype="image/jpg",   
+        mimetype="image/jpg",
         as_attachment=False,
         download_name=f"{clabel_id}_slice.jpg"
     )
@@ -1030,6 +1032,11 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
     user = current_user()
     if user is None:
         return jsonify({"error": "Sign in to run inference"}), 401
+    # Captured in the request context so the background worker (which has none) can
+    # attribute the scan for per-IP quotas in the user-dataset gatekeeper. Use
+    # remote_addr (set by the trusted reverse proxy) rather than a client-supplied
+    # X-Forwarded-For, which an attacker could rotate per request to defeat the cap.
+    _collector_ip = request.remote_addr or ""
     blocked = plan_store.check_inference(user["id"], model_name)
     if blocked is not None:
         # 402 Payment Required: the request is well-formed and the user is
@@ -1116,6 +1123,20 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
             _set_inference_job(session_id, status="completed", error=None,
                                zip_path=zip_path, output_mask_dir=output_mask_dir)
             print(f"✅ Finished segmentation and zipping for session {session_id}")
+
+            # Non-blocking: offer this scan+mask to the user-dataset gatekeeper,
+            # which decides (async) whether it's worth keeping. The result is
+            # already delivered above; this never affects the user, and is a no-op
+            # unless USER_DATASET_PATH is configured.
+            try:
+                from services.user_dataset import collect_user_scan_async
+                collect_user_scan_async(
+                    ct_path=input_path, output_mask_dir=output_mask_dir,
+                    model=model_name, user_id=user.get("id"), ip=_collector_ip,
+                    session_id=session_id,
+                )
+            except Exception as _ude:
+                print(f"[user_dataset] hook error (non-fatal): {_ude}")
         except Exception as e:
             # A killed subprocess surfaces here as CalledProcessError/RuntimeError;
             # if the user cancelled, keep "cancelled" rather than reporting failure.

@@ -33,6 +33,11 @@ class Constants:
     CANCERVERSE_PATH = os.environ.get('CANCERVERSE_PATH')
     CANCERVERSE_LOWRES_PATH = os.environ.get('CANCERVERSE_LOWRES_PATH', '/home/visitor/cancerverse_lowres')
     DATASET_PREFIXES = {'PanTS': 'PanTS', 'CancerVerse': 'CV'}
+    # Where accepted user scans (CT + mask + sublabels) are collected, in a
+    # PanTS-mirroring layout (image_only/, mask_only/). Unset => the collection
+    # gatekeeper (services/user_dataset.py) is a no-op. Point it at a writable
+    # staging dir now; relocate beside PanTS/CancerVerse once write access lands.
+    USER_DATASET_PATH = os.environ.get('USER_DATASET_PATH')
     PERMISSIONS_DIR = os.environ.get('PERMISSIONS_DIR', "/home/visitor/data")
     MESH_PATH = PERMISSIONS_DIR + "/render_only"
     CASE_QUALITY_MANIFEST = os.environ.get('BODYMAPS_CASE_QUALITY_MANIFEST')
