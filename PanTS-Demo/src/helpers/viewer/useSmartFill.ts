@@ -1,14 +1,25 @@
 import { useRef, useState, type MouseEvent } from "react";
 import {
 	canvasPointToVoxel,
+	canvasPointToWorld,
+	worldToCanvasPoint,
 	runDualScribbleFill,
 	pushEditHistory,
 	type CinePane,
 	type SliceInfo,
 	type MaskFilter,
 } from "../CornerstoneNifti2";
+import type { Point3 } from "@cornerstonejs/core/types";
 
-type ScribblePoint = { pos: [number, number]; slice: number };
+// World-space, not canvas-pixel — a canvas position only means what it means
+// for the camera active the instant it was clicked, so a dot stored that way
+// visually drifts off the marked anatomy the moment the user zooms/pans.
+// Storing world coordinates and reprojecting to canvas pixels on every
+// render keeps the preview pinned to the same spot on the slice regardless
+// of zoom. (The actual fill algorithm below already works in voxel space via
+// fgVoxelsRef/bgVoxelsRef, so it was never affected — only the preview dots
+// were drifting.)
+type ScribblePoint = { posWorld: Point3; slice: number };
 type PanePreview = { fg: ScribblePoint[]; bg: ScribblePoint[] };
 
 const EMPTY_PREVIEW: Record<CinePane, PanePreview> = {
@@ -38,19 +49,19 @@ interface UseSmartFillArgs {
 export function useSmartFill({ enabled, sliceInfoRef, maskFilter, onLog }: UseSmartFillArgs) {
 	const [markMode, setMarkMode] = useState<"fg" | "bg">("fg");
 	const [scope, setScope] = useState<"slice" | "volume">("slice");
-	const [preview, setPreview] = useState<Record<CinePane, PanePreview>>(EMPTY_PREVIEW);
+	const [previewWorld, setPreviewWorld] = useState<Record<CinePane, PanePreview>>(EMPTY_PREVIEW);
 
 	const scribbleActiveRef = useRef(false);
 	const fgVoxelsRef = useRef<[number, number, number][]>([]);
 	const bgVoxelsRef = useRef<[number, number, number][]>([]);
 	const paneRef = useRef<CinePane | null>(null);
 
-	// Mirrors `preview` so stroke bookkeeping can read the latest value
+	// Mirrors `previewWorld` so stroke bookkeeping can read the latest value
 	// synchronously (state updates are async/batched, refs aren't).
-	const previewRef = useRef(preview);
+	const previewRef = useRef(previewWorld);
 	const updatePreview = (next: Record<CinePane, PanePreview>) => {
 		previewRef.current = next;
-		setPreview(next);
+		setPreviewWorld(next);
 	};
 
 	// Captures everything needed to undo/redo one whole click-and-drag
@@ -76,6 +87,8 @@ export function useSmartFill({ enabled, sliceInfoRef, maskFilter, onLog }: UseSm
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
 		const voxel = canvasPointToVoxel(pane, canvasPos);
 		if (!voxel) return;
+		const world = canvasPointToWorld(pane, canvasPos);
+		if (!world) return;
 
 		paneRef.current = pane;
 		(markMode === "fg" ? fgVoxelsRef : bgVoxelsRef).current.push(voxel);
@@ -85,7 +98,7 @@ export function useSmartFill({ enabled, sliceInfoRef, maskFilter, onLog }: UseSm
 			...previewRef.current,
 			[pane]: {
 				...previewRef.current[pane],
-				[markMode]: [...previewRef.current[pane][markMode], { pos: canvasPos, slice: sliceIdx }],
+				[markMode]: [...previewRef.current[pane][markMode], { posWorld: world, slice: sliceIdx }],
 			},
 		});
 	};
@@ -146,6 +159,24 @@ export function useSmartFill({ enabled, sliceInfoRef, maskFilter, onLog }: UseSm
 			},
 		});
 	};
+
+	// Canvas-pixel view of the world-space preview dots, reprojected against
+	// whatever camera (zoom/pan) is active on THIS render — this is what the
+	// overlay should actually draw from, so the dots track the marked
+	// anatomy through zoom instead of staying pinned to old pixel positions.
+	const preview: Record<CinePane, { fg: Array<{ pos: [number, number]; slice: number }>; bg: Array<{ pos: [number, number]; slice: number }> }> = {
+		axial: { fg: [], bg: [] },
+		sagittal: { fg: [], bg: [] },
+		coronal: { fg: [], bg: [] },
+	};
+	(Object.keys(previewWorld) as CinePane[]).forEach((pane) => {
+		(["fg", "bg"] as const).forEach((mode) => {
+			for (const pt of previewWorld[pane][mode]) {
+				const pos = worldToCanvasPoint(pane, pt.posWorld);
+				if (pos) preview[pane][mode].push({ pos, slice: pt.slice });
+			}
+		});
+	});
 
 	return {
 		markMode,

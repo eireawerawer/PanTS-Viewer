@@ -70,6 +70,43 @@
     animation: atb-pop-grow-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* ============================================================
+   POINTER — the little arrow connecting a flyout panel back to the
+   ribbon icon it opened from, so it's unambiguous which button in the
+   horizontal toolbar produced it (same rotated-square technique as
+   SegmentsPopup's .segpop__form-flyout-arrow, but with a Hopkins-blue
+   border instead of a plain hairline one, since here it's doing double
+   duty as an "originates from this button" cue rather than just a
+   cosmetic connector). Sits on the panel itself, positioned per-instance
+   via the inline `top`/`left` FlyoutPanel computes off the anchor's own
+   center — see the `pointer` calc in FlyoutPanel's compute().
+   ============================================================ */
+.atb-pop__pointer {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    background: #202124;
+    border-left: 2px solid #68ACE5;
+    border-top: 2px solid #68ACE5;
+    border-radius: 3px 0 0 0;
+    z-index: 1;
+}
+
+/* Below-anchored panel: pointer sits on the top edge, rotated to point
+   straight up at the icon above it. */
+.atb-pop__pointer--top {
+    top: -6.5px;
+    transform: translateX(-50%) rotate(45deg);
+}
+
+/* Right-anchored (grandchild) panel: pointer sits on the left edge,
+   rotated a quarter turn further so the same top-left border pair now
+   points left, at the row that spawned it. */
+.atb-pop__pointer--left {
+    left: -6.5px;
+    transform: translateY(-50%) rotate(-45deg);
+}
+
 .atb-pop__panel.is-closing {
     opacity: 0;
     transform: scale(0.9);
