@@ -158,7 +158,10 @@ export default function CinematicPage() {
       style={{
         position: "fixed",
         inset: 0,
-        background: "#050505",
+        // --ink from styles/brand.css. Hard-coded rather than var() because this
+        // route renders full-bleed with no app shell, and the cut from here to
+        // the title card is seamless only if both grounds are the same value.
+        background: "#0F172A",
         cursor: "none",
         // MeshViewer renders a plain "Loading 3D segmentation…" string before its
         // own manifest fetch resolves. Nothing else on this route draws text, so

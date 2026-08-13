@@ -205,7 +205,7 @@ export default function WallPage() {
   }, [replay]);
 
   return (
-    <div style={{ position: "fixed", inset: 0, overflow: "hidden", background: "#050505", cursor: "none" }}>
+    <div style={{ position: "fixed", inset: 0, overflow: "hidden", background: "#0F172A", cursor: "none" }}>
       <div ref={scaleRef} style={{ width: "100%", height: "100%", willChange: "transform" }}>
         <div
           ref={scrollRef}
@@ -228,7 +228,7 @@ export default function WallPage() {
                 aspectRatio: "1 / 1",
                 objectFit: "cover",
                 display: "block",
-                background: "#0d0d0d",
+                background: "#1B2436",
               }}
             />
           ))}

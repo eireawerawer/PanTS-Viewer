@@ -1,196 +1,123 @@
-# BodyMaps — "One Scan" · VO script
+# BodyMaps — "One Scan" · VO + shooting script
 
-**Cut:** 2:42 · **Words:** 199 · **Pace:** ~145 wpm (`words ÷ 2.4 ≈ seconds`)
-**Speech density:** ~82s of voice across 162s of picture — roughly half. The silence
-is the point; it is what makes it read as a launch film rather than a walkthrough.
+**Cut:** 2:56 · **Words:** 187 · **Pace:** ~145 wpm (`words ÷ 2.4 ≈ seconds`)
+**Speech density:** 78s of voice across 176s — 44%. The silence is the point.
 
-## Reading notes
+Every viewer URL takes `?hd=1`. Without it the app serves `?res=low` whenever the
+JHU server is reachable, so having the tunnel up makes the picture *worse* unless
+you ask for full res.
 
-- **Flat and unhurried.** No upward inflection at line ends, no selling. The numbers
-  carry the weight — say them plainly and let them sit.
-- **Read numbers as written.** "Thirty-six thousand, three hundred ninety" is four
-  beats, not a glance at a figure.
-- **Land the line, then stop.** Every timing below has slack built in. If you finish
-  early, do not fill.
-- **Two full stops of real silence:** 0:00–0:09 and 2:19–2:29. Do not talk over the
-  assemble or the pull-back.
+**SRV** marks a block that needs the tunnel.
 
 ---
 
 ## Shooting script
 
-Every viewer URL takes `?hd=1`. Without it the app serves `?res=low` whenever the
-JHU server is reachable — so having the tunnel up makes the picture *worse* unless
-you ask for full res. The HuggingFace fallback is full res already.
-
-**SRV** marks a block that cannot be shot without the tunnel.
-
 | Time | On screen | VO |
 |---|---|---|
-| 0:00 | `/cinematic/17?local=1&start=liver&hold=1800&step=160&speed=0.5` — press **R** to arm. Black frame. The liver alone, rotating slowly. It holds 1.8s. | *(silence)* |
-| 0:02 | Structures begin stepping in, one every 160ms, building the abdomen outward around the liver. 23 in total — the lungs are excluded, they're truncated by the top of the volume and read as broken. | *(silence)* |
-| 0:09 | Assembly settles. Cut to `/cards.html` card **1** — wordmark rises out of blur. | **One scan. Twenty-five structures.** |
-| 0:12 | `/cards.html` press **2**. Four figures count up in sequence, ~350ms apart. | **It's one of thirty-six thousand, three hundred ninety. From a hundred and forty-five hospitals.** |
-| 0:20 | **SRV** `/upload` — drag `test-scan.nii.gz` onto the drop zone. File lands, model picker appears. Start the run; the pipeline steps through its stages. | **A new scan uploads once. Six segmentation models run in sequence — organs, vessels, pancreatic substructure, lesions — and return thirty-two labelled classes. No manual contouring.** |
-| 0:34 | `/case/17?hd=1`, already warm in the tab. Three MPR panes, soft-tissue window, slice readouts visible. | **Every scan opens in three planes at once.** |
-| 0:40 | Drag the crosshair in the axial pane. The other two panes track it live. | **Axial, coronal, sagittal — locked to one cursor.** |
-| 0:46 | Toggle segmentation classes on one at a time. Colour builds over the greyscale. | **Structures build up a layer at a time.** |
-| 0:52 | Window/level: drag from Soft Tissue toward Bone. Watch the tissue drop out and the skeleton resolve. | **Window the intensity, and soft tissue separates from bone.** |
-| 0:59 | Scrub the slice slider fast through the stack — one continuous pass, don't stutter. | **Scrub the stack.** |
-| 1:03 | Draw a distance line across an organ. Then an area. Let the HU readout land. | **Measure anything. Distance, area, density in Hounsfield units.** |
-| 1:10 | Move the cursor over two or three structures. Each names itself as you cross it. | **Hover a structure and it names itself.** |
-| 1:16 | Open the docked Segments panel. Brush a correction onto a mask edge, smooth it, split a class. | **Where the model got it wrong, correct the mask directly. Brush it, smooth it, split it.** |
-| 1:25 | Hold on the corrected mask. | **The correction is the annotation.** |
-| 1:30 | **SRV** Open the report. Findings timeline; the pancreas row sits amber — `status: "check"`. | **Findings arrive as a timeline. This pancreas is flagged for review.** |
-| 1:40 | **SRV** Toggle clinical → plain language. The impression rewrites in place. | **Read it in clinical language — or switch to plain language for the patient.** |
-| 1:47 | **SRV** Select the pancreas finding; the structure lights in the 3D pane. | **Select a finding, and the structure lights up in three dimensions.** |
-| 1:52 | `/compare-viewer?a=17&b=44`, pre-warmed. Two cases side by side. Enable linked slice position and scroll — both move together. | **Put any two cases side by side. One crosshair, scrolling both at once.** |
-| 2:00 | **SRV** Click copy-link. Hold on the confirmation toast. **Never show the URL bar** — it copies `window.location.origin`, which off the dev server reads `localhost:5173`. | **Every view has a link.** |
-| 2:04 | **SRV** Reading session: dictate a line, the draft report assembles beneath it, export the bundle. | **Dictate while you read. The session assembles a draft report, and exports as a single bundle.** |
-| 2:16 | `/wall?hero=17&n=1200&cols=20&local=1` — press **R**. Case 17's own tile fills the frame. | **That was one.** |
-| 2:19 | Pull back. The grid resolves around it, then the scroll accelerates down through 1,200 tiles. Let the music carry this — no voice for ten seconds. | *(silence)* |
-| 2:30 | Scroll settles; the tumour filter re-flows the grid. | **Thirty-six thousand, three hundred ninety more.** |
-| 2:38 | `/cards.html` press **3**. Wordmark and institution. | **BodyMaps. Johns Hopkins University.** |
-
-### On "Twenty-five structures"
-
-Case 17 has 25 organ meshes; the shot shows 23 because both lungs are excluded.
-Keep the line — the scan genuinely has 25 segmented structures and the cold open
-is hiding two for looks, not overstating the data. Nobody counts meshes on screen.
-If it nags you, "One scan. Every structure, mapped." costs the specificity but
-removes the gap.
-
-## Timed script
-
-| In | Block | Line | Words |
-|---|---|---|---|
-| 0:09 | Cold open | One scan. Twenty-five structures. | 4 |
-| 0:12 | Landing stats | It's one of thirty-six thousand, three hundred ninety. From a hundred and forty-five hospitals. | 14 |
-| 0:20 | Upload | A new scan uploads once. Six segmentation models run in sequence — organs, vessels, pancreatic substructure, lesions — and return thirty-two labelled classes. No manual contouring. | 24 |
-| 0:34 | Viewer · MPR | Every scan opens in three planes at once. | 8 |
-| 0:40 | Viewer · MPR | Axial, coronal, sagittal — locked to one cursor. | 8 |
-| 0:46 | Viewer · cascade | Structures build up a layer at a time. | 8 |
-| 0:52 | Viewer · windowing | Window the intensity, and soft tissue separates from bone. | 10 |
-| 0:59 | Viewer · cine | Scrub the stack. | 3 |
-| 1:03 | Viewer · measure | Measure anything. Distance, area, density in Hounsfield units. | 9 |
-| 1:10 | Viewer · hover | Hover a structure and it names itself. | 7 |
-| 1:16 | Viewer · mask edit | Where the model got it wrong, correct the mask directly. Brush it, smooth it, split it. | 16 |
-| 1:25 | Viewer · mask edit | The correction is the annotation. | 5 |
-| 1:30 | Report | Findings arrive as a timeline. | 5 |
-| 1:35 | Report | This pancreas is flagged for review. | 6 |
-| 1:40 | Report | Read it in clinical language — or switch to plain language for the patient. | 14 |
-| 1:47 | Report | Select a finding, and the structure lights up in three dimensions. | 11 |
-| 1:52 | Compare | Put any two cases side by side. One crosshair, scrolling both at once. | 13 |
-| 2:00 | Share | Every view has a link. | 5 |
-| 2:04 | Reading session | Dictate while you read. The session assembles a draft report, and exports as a single bundle. | 16 |
-| 2:16 | Library reveal | That was one. | 3 |
-| 2:30 | Library reveal | Thirty-six thousand, three hundred ninety more. | 7 |
-| 2:38 | Closing card | BodyMaps. Johns Hopkins. | 3 |
+| 0:00 | `/cinematic/17?local=1&start=liver&hold=1800&step=160&speed=0.5` — press **R** to arm. The liver alone on ink, rotating. Holds 1.8s. | *(silence)* |
+| 0:04 | Structures step in, one every 160ms, building outward. 23 in total; the lungs are excluded — truncated by the top of the volume, they read as broken geometry. | **One abdominal CT is a thousand images. Somewhere inside them is everything you need to know.** |
+| 0:09 | Assembly settles. Cut to `/cards.html` card **1** — the mark resolves out of blur. | *(silence — let the title land)* |
+| 0:12 | `/cards.html` press **2**. Four figures count up, ~350ms apart, in accent orange. | **Thirty-six thousand, three hundred ninety scans. A hundred and forty-five medical centers. Nearly a million labeled structures. Introducing BodyMaps.** |
+| 0:20 | Cut to the library grid. Scroll it briefly, then move to Upload. | **You can open any one of them, or upload a scan of your own.** |
+| 0:26 | **SRV** `/upload` — drag `~/Desktop/test-scan.nii.gz` onto the drop zone. Model picker appears. Start the run; speed-ramp the pipeline. | **Drop in a file, choose a model, and go.** |
+| 0:38 | `/case/17?hd=1`, already warm. Three MPR panes, soft-tissue window. | **Thirty-two structures, labeled. Every organ, vessel and bone.** |
+| 0:46 | Organ cascade plays out. Then drag the crosshair — all three panes track it, and the 3D pane orients with them. | **In three planes. Axial, coronal, sagittal. And in three dimensions.** |
+| 0:56 | Window/level: Soft Tissue → Bone → Lung. Tissue drops away, skeleton resolves, then air. | **Adjust the window to bring out soft tissue, or bone, or lung.** |
+| 1:04 | Scrub the slice slider through the stack — one continuous pass, no stutter. | **Scroll the whole volume.** |
+| 1:10 | Draw a distance line, then an area. Let the HU readout settle. | **Measure anything. Distance, area, density in Hounsfield units.** |
+| 1:18 | Cross the cursor over two or three structures; each names itself. | **Hover a structure and it names itself.** |
+| 1:24 | Open the docked Segments panel. Brush a mask edge, smooth it, split a class. | **And where the model got it wrong, the masks are yours to edit.** |
+| 1:34 | **SRV** Report opens. Timeline animates node by node; the pancreas row flags amber (`status: "check"`). | **Every case comes with its own report.** |
+| 1:42 | **SRV** Select the pancreas finding — it highlights on the scan and in 3D. | **Select a finding and it highlights on the scan.** |
+| 1:49 | **SRV** Toggle clinical → plain language. The impression rewrites in place. | **In clinical language. Or in plain English.** |
+| 1:56 | `/compare-viewer?a=17&b=44`, pre-warmed. Enable linked slice position and scroll — both cases move together. | **Two scans, side by side. Scroll them as one.** |
+| 2:04 | **SRV** Click copy-link, hold on the toast. Replace the URL in post — it copies `window.location.origin`, which off the dev server reads `localhost:5173`. | **Any view you build is a link.** |
+| 2:08 | **SRV** Reading session: dictate a line, the draft assembles beneath it, export the bundle. | **Dictate as you read. The session assembles a draft report, and exports as a single bundle.** |
+| 2:20 | `/wall?hero=17&n=1200&cols=20&local=1` — press **R**. Case 17's own tile fills the frame. | **That was one scan.** |
+| 2:24 | Pull-back begins. The grid resolves around it. | *(beat)* |
+| 2:30 | Scroll accelerates down through 1,200 tiles. | **BodyMaps has thirty-six thousand, three hundred and ninety.** |
+| 2:34 | ~12s of music only. Scroll runs out, the tumour filter re-flows the grid, type resolves. | *(silence)* |
+| 2:46 | `/cards.html` press **3**. Figures, then the mark, then the URL, then the institution. | *(silence)* |
+| 2:56 | End. | |
 
 ---
 
 ## Continuous read
 
-Record straight through with a beat of silence between paragraphs; the editor
-splits on those gaps.
+Record straight through with a beat of silence between paragraphs.
 
-> One scan. Twenty-five structures.
+> One abdominal CT is a thousand images. Somewhere inside them is everything you need to know.
 >
-> It's one of thirty-six thousand, three hundred ninety. From a hundred and
-> forty-five hospitals.
+> Thirty-six thousand, three hundred ninety scans. A hundred and forty-five medical centers. Nearly a million labeled structures. Introducing BodyMaps.
 >
-> A new scan uploads once. Six segmentation models run in sequence — organs,
-> vessels, pancreatic substructure, lesions — and return thirty-two labelled
-> classes. No manual contouring.
+> You can open any one of them, or upload a scan of your own.
 >
-> Every scan opens in three planes at once. Axial, coronal, sagittal — locked to
-> one cursor.
+> Drop in a file, choose a model, and go.
 >
-> Structures build up a layer at a time.
+> Thirty-two structures, labeled. Every organ, vessel and bone.
 >
-> Window the intensity, and soft tissue separates from bone.
+> In three planes. Axial, coronal, sagittal. And in three dimensions.
 >
-> Scrub the stack.
+> Adjust the window to bring out soft tissue, or bone, or lung.
+>
+> Scroll the whole volume.
 >
 > Measure anything. Distance, area, density in Hounsfield units.
 >
 > Hover a structure and it names itself.
 >
-> Where the model got it wrong, correct the mask directly. Brush it, smooth it,
-> split it. The correction is the annotation.
+> And where the model got it wrong, the masks are yours to edit.
 >
-> Findings arrive as a timeline. This pancreas is flagged for review.
+> Every case comes with its own report. Select a finding and it highlights on the scan.
 >
-> Read it in clinical language — or switch to plain language for the patient.
+> In clinical language. Or in plain English.
 >
-> Select a finding, and the structure lights up in three dimensions.
+> Two scans, side by side. Scroll them as one.
 >
-> Put any two cases side by side. One crosshair, scrolling both at once.
+> Any view you build is a link.
 >
-> Every view has a link.
+> Dictate as you read. The session assembles a draft report, and exports as a single bundle.
 >
-> Dictate while you read. The session assembles a draft report, and exports as a
-> single bundle.
+> That was one scan.
 >
-> That was one.
->
-> Thirty-six thousand, three hundred ninety more.
->
-> BodyMaps. Johns Hopkins.
+> BodyMaps has thirty-six thousand, three hundred and ninety.
 
 ---
 
-## Fallback: 2:28 cut (inference doesn't verify)
+## Where the extra time went
 
-Drop the **Upload** line (0:20, 24 words) in full. Everything after it shifts
-**14 seconds earlier**; no other wording changes. Word count becomes **174**.
+Your draft ended at 2:04. Three additions bring it to 2:56:
 
-The six-models claim is the only place the segmentation story is told, so if the
-upload block dies, move the idea into the cold open instead:
-
-> One scan. Twenty-five structures, found by six models.
-
-That is the whole repair — 6 words, and the AI story survives without the
-upload demo.
+| Added | Time | Why |
+|---|---|---|
+| Library reveal | 26s | Restores the payoff the cold open sets up. The hero tile is now correctly centred at index 610. |
+| Reading session | 12s | 2:08–2:20. Dictate → draft → bundle. Verified working against the server. |
+| "Open any one of them" + hover-to-name | 12s | Your line bridges stats → upload, and gives the library a reason to be on screen before the reveal. Hover was in an earlier cut and is a cheap delight. |
 
 ---
 
-## Two wording decisions, flagged
+## Corrections made to the draft, and why
 
-**"Flagged for review," not the impression text.** Case 17's report reads
-*"Enlarged pancreas."* and the screen will show it. The VO deliberately does not
-say it. A voice track asserting a finding reads as a diagnostic claim; the same
-words on screen read as software output. Keep the assertion in the UI where it
-belongs.
+- **"thousands of images" → "a thousand images."** Case 17 is `shape [484,344,219]`: 219 axial slices, 1,047 across all three planes. "Thousands" overstated by 3–5× in the film's first factual claim.
+- **"or vessels" → "or lung."** The viewer's window presets are Soft Tissue, Bone, Lung. There is no vessel preset — you'd have said a word the UI contradicts.
+- **"Every organ, every difference" → "Scroll them as one."** Compare has no volume-delta readout; every "volume" in `CompareViewerPage` is Cornerstone's pixel array. The original line promised computed differences that don't exist.
+- **"Tap a finding" → "Select a finding."** Desktop app, cursor, not touch.
+- **"our many AI models" → "a model."** Four lesion models are visible on the upload page (pancreatic, liver, kidney, colon); the handoff claims six total. "Many" was vague and I could not verify a number — confirm on screen if you want to name one.
+- Dropped the filler: "Like", "as well", "Lets" → "Let's", the doubled period.
 
-**"Where the model got it wrong."** This is the strongest line in the script and
-the one most likely to get challenged. Keep it. Showing a platform that assumes
-its own segmentation is fallible — and hands you the brush — is more credible
-than any accuracy number, and it sets up mask editing as a feature rather than an
-apology. It also now matches the shipped UI: the docked Segments panel with
-brush, smoothing and split landed on `main` this sprint.
+## Keep off camera
 
----
+In the organ-stats table, two rows are segmentation artifacts labelled "normal":
 
-**Compare is not a prior-study feature, and there are no volume deltas.** The beat
-sheet said "Compare — volume deltas." That feature does not exist. `CompareViewerPage`
-puts **two different cases** side by side (`?a=&b=`, picked by case number from the
-library tray): two 3-plane MPR viewers, per-case crosshair, segmentation overlays,
-window presets, and an optional link that syncs slice position across both. No
-longitudinal/prior-study concept, no cm³ readout anywhere, and **3D is deliberately
-omitted** on that page. The line above is rewritten to what the page actually does —
-which is a better beat anyway, because synced scrolling across two patients is
-visibly impressive in a way a number is not.
+- `pancreas_body` — `mean_hu -804.4`, **volume 184.1 cc against the whole pancreas at 31.02 cc.** A sub-part six times its parent is the visible tell, more than the HU.
+- `common_bile_duct` — `mean_hu -715.6`, also air density.
 
-**Shoot the share beat on the compare page.** `?a=&b=` means the compare URL encodes
-both cases, so "every view has a link" pays off hardest right after the compare
-shot. It also chains the two blocks into one continuous 12-second move instead of
-two disconnected ones.
+`lung_right` at `-802` is legitimate; lungs are air.
 
-## Headroom
+## On "Thirty-two structures"
 
-198 words against a ~230 target leaves roughly **30 words** spare. If the
-professor wants more coverage, the two places that can absorb it without
-crowding are the **upload block** (0:20, 14s of picture for 10s of voice) and
-the **report block** (1:30, 22s for 15s). Do not add words to the cold open or
-the library reveal — those two run on silence by design.
+32 is the model's class count, not what case 17 contains — it has 25 meshes, and the
+cold open shows 23 after the lungs are excluded. It is fair as a capability claim.
+If you would rather it describe what is on screen, "Every organ, vessel and bone,
+labeled" costs the number and removes the gap.
