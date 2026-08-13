@@ -122,6 +122,21 @@ export function FlyoutArrow({
 			type="button"
 			className={`atb-pop__arrow ${open ? "is-open" : ""}`}
 			onClick={onClick}
+			// The panel this arrow toggles anchors to the tool's ICON, not the
+			// arrow itself (so the flyout centers under the icon rather than
+			// the wider icon+arrow wrapper) — so the arrow sits outside the
+			// anchorRef/panelRef boundary useFlyout's outside-click listener
+			// checks. Without this, pressing the arrow to CLOSE an open
+			// flyout raced with that listener: its `mousedown` handler fired
+			// first (mousedown bubbles to `document` before `click` fires),
+			// saw the arrow wasn't inside the boundary, and closed the panel
+			// right there — then this button's own `onClick` ran a beat
+			// later against an already-`open:false` render and reopened it,
+			// so the arrow appeared to do nothing on the second press.
+			// Stopping propagation here keeps that mousedown from ever
+			// reaching the document listener, so this button's own toggle
+			// logic is the only thing that decides open/closed.
+			onMouseDown={(e) => e.stopPropagation()}
 			aria-label={label}
 			aria-expanded={open}
 		>
@@ -174,7 +189,12 @@ export function FlyoutPanel({
 	 *  tree — and the overlay it portals to <body> — stays alive. */
 	keepMounted?: boolean;
 }) {
-	const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+	// `pointer` is the offset (along the panel's top edge for "below", or
+	// its left edge for "right") of the little blue-bordered arrow that
+	// connects the panel back to the ribbon icon it opened from — see
+	// .atb-pop__pointer. Computed off the anchor's own center, same
+	// approach as SegmentsPopup's FormFlyout arrowLeft.
+	const [pos, setPos] = useState<{ top: number; left: number; pointer: number } | null>(null);
 
 	// How long the panel's grow-in/shrink-out transition takes — mirrors the
 	// entrance animation's own duration (see .atb-pop__panel's
@@ -245,7 +265,15 @@ export function FlyoutPanel({
 			}
 			left = Math.max(margin, left);
 			top = Math.min(top, vh - margin - 40);
-			setPos({ top, left });
+			// Point the arrow at the anchor's own center, clamped to stay
+			// within the panel's (estimated) bounds — same clamping idea as
+			// SegmentsPopup's FormFlyout arrowLeft, just axis-swapped for
+			// "right" panels (offset down their left edge instead of across
+			// their top edge).
+			const pointer = placement === "right"
+				? Math.max(14, Math.min(r.top + r.height / 2 - top, (panelRef.current?.offsetHeight ?? 200) - 14))
+				: Math.max(14, Math.min(r.left + r.width / 2 - left, estWidth - 14));
+			setPos({ top, left, pointer });
 		};
 		compute();
 		window.addEventListener("resize", compute);
@@ -284,6 +312,16 @@ export function FlyoutPanel({
 				display: keepMounted && !open && !closing ? "none" : undefined,
 			}}
 		>
+			{/* Blue-bordered pointer connecting this panel back to the
+			 *  ribbon icon (or row) it opened from — same rotated-square
+			 *  technique as SegmentsPopup's .segpop__form-flyout-arrow,
+			 *  but with a Hopkins-blue border so it doubles as a clear
+			 *  "this panel belongs to that button" cue. Sits on the top
+			 *  edge for a "below" panel, the left edge for a "right" one. */}
+			<span
+				className={`atb-pop__pointer ${placement === "right" ? "atb-pop__pointer--left" : "atb-pop__pointer--top"}`}
+				style={placement === "right" ? { top: pos.pointer } : { left: pos.pointer }}
+			/>
 			{children}
 		</div>,
 		document.body
