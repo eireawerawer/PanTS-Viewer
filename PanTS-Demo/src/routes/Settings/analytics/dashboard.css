@@ -2,8 +2,8 @@
    the trend line. Everything else — panels, headings, rows, buttons, inputs —
    comes from Settings.css, which the settings shell already imports.
 
-   The palette is the site's: JHU blue #002d72 on #fafafa, Space Grotesk for
-   text, JetBrains Mono for figures. Bars are one hue throughout; colour here
+   The palette is the brand's: --ink on --paper-2, IBM Plex Sans for text,
+   IBM Plex Mono for figures. Bars are one hue throughout; colour here
    would encode rank, which length and order already encode.
 
    Every rule is under .dash-*, and the variables are scoped to the dashboard's
@@ -11,11 +11,11 @@
    site. It was a standalone app's stylesheet before it lived here. */
 
 .dash {
-	--dash-brand: #002d72;
+	--dash-brand: #0F172A;
 	--dash-ink: #111111;
 	--dash-muted: #8f8f8f;
 	--dash-hairline: rgba(0, 0, 0, 0.07);
-	--dash-track: rgba(0, 45, 114, 0.08);
+	--dash-track: rgba(15, 23, 42, 0.08);
 }
 
 /* ── Filters: one row, above everything they affect ── */
@@ -91,7 +91,7 @@
 	color: var(--dash-muted);
 }
 .dash-tile-value {
-	font-family: 'JetBrains Mono', monospace;
+	font-family: "IBM Plex Mono", ui-monospace, monospace;
 	font-size: 24px;
 	font-weight: 600;
 	color: var(--dash-ink);
@@ -165,7 +165,7 @@
 	border-bottom: none;
 }
 .dash-bar-row:hover {
-	background: rgba(0, 45, 114, 0.03);
+	background: rgba(15, 23, 42, 0.03);
 }
 .dash-bar-label {
 	font-size: 13.5px;
@@ -193,7 +193,7 @@
 	transition: width 0.2s ease;
 }
 .dash-bar-value {
-	font-family: 'JetBrains Mono', monospace;
+	font-family: "IBM Plex Mono", ui-monospace, monospace;
 	font-size: 13px;
 	color: var(--dash-ink);
 	text-align: right;
@@ -211,7 +211,7 @@
 	overflow: visible;
 }
 .dash-trend-area {
-	fill: rgba(0, 45, 114, 0.07);
+	fill: rgba(15, 23, 42, 0.07);
 }
 .dash-trend-line {
 	fill: none;
@@ -227,12 +227,12 @@
 	transition: r 0.1s ease;
 }
 .dash-trend-crosshair {
-	stroke: rgba(0, 45, 114, 0.35);
+	stroke: rgba(15, 23, 42, 0.35);
 	stroke-width: 1;
 	stroke-dasharray: 3 3;
 }
 .dash-trend-axis {
-	font-family: 'JetBrains Mono', monospace;
+	font-family: "IBM Plex Mono", ui-monospace, monospace;
 	font-size: 11px;
 	fill: var(--dash-muted);
 }

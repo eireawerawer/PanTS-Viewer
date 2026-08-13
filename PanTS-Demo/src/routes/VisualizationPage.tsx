@@ -469,7 +469,7 @@ function CloseLoopHint({ nearClose, anchor }: { nearClose: boolean; anchor: [num
 				left: anchor[0] + 14,
 				top: anchor[1],
 				transform: "translateY(-130%)",
-				background: "rgba(0, 45, 114, 0.55)",
+				background: "rgba(15, 23, 42, 0.55)",
 				border: "1px solid rgba(104, 172, 229, 0.55)",
 				borderRadius: 6,
 				color: "rgba(255, 255, 255, 0.9)",
@@ -3547,7 +3547,7 @@ const aiAvailableOrgans = useMemo(() => {
 								{smartFill.preview.axial.fg
 									.filter((p) => p.slice === (sliceInfo.axial?.current ?? -1))
 									.map((p, i) => (
-										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#68ACE5" stroke="#08090b" strokeWidth={1.5} />
+										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#E76F51" stroke="#08090b" strokeWidth={1.5} />
 									))}
 								{smartFill.preview.axial.bg
 									.filter((p) => p.slice === (sliceInfo.axial?.current ?? -1))
@@ -3575,8 +3575,8 @@ const aiAvailableOrgans = useMemo(() => {
 						>
 							<polygon
 								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
-								fill="rgba(0, 45, 114, 0.22)"
-								stroke="#002D72"
+								fill="rgba(15, 23, 42, 0.22)"
+								stroke="#0F172A"
 								strokeWidth={2}
 							/>
 						</svg>
@@ -3628,7 +3628,7 @@ const aiAvailableOrgans = useMemo(() => {
 								{smartFill.preview.sagittal.fg
 									.filter((p) => p.slice === (sliceInfo.sagittal?.current ?? -1))
 									.map((p, i) => (
-										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#68ACE5" stroke="#08090b" strokeWidth={1.5} />
+										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#E76F51" stroke="#08090b" strokeWidth={1.5} />
 									))}
 								{smartFill.preview.sagittal.bg
 									.filter((p) => p.slice === (sliceInfo.sagittal?.current ?? -1))
@@ -3656,8 +3656,8 @@ const aiAvailableOrgans = useMemo(() => {
 						>
 							<polygon
 								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
-								fill="rgba(0, 45, 114, 0.22)"
-								stroke="#002D72"
+								fill="rgba(15, 23, 42, 0.22)"
+								stroke="#0F172A"
 								strokeWidth={2}
 							/>
 						</svg>
@@ -3712,7 +3712,7 @@ const aiAvailableOrgans = useMemo(() => {
 								{smartFill.preview.coronal.fg
 									.filter((p) => p.slice === (sliceInfo.coronal?.current ?? -1))
 									.map((p, i) => (
-										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#68ACE5" stroke="#08090b" strokeWidth={1.5} />
+										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#E76F51" stroke="#08090b" strokeWidth={1.5} />
 									))}
 								{smartFill.preview.coronal.bg
 									.filter((p) => p.slice === (sliceInfo.coronal?.current ?? -1))
@@ -3741,8 +3741,8 @@ const aiAvailableOrgans = useMemo(() => {
 						>
 							<polygon
 								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
-								fill="rgba(0, 45, 114, 0.22)"
-								stroke="#002D72"
+								fill="rgba(15, 23, 42, 0.22)"
+								stroke="#0F172A"
 								strokeWidth={2}
 							/>
 						</svg>

@@ -278,7 +278,7 @@
 }
 
 .segpop__color-popover-swatch.is-active {
-    outline: 2px solid #68ACE5;
+    outline: 2px solid #E76F51;
     outline-offset: 1px;
 }
 
@@ -327,7 +327,7 @@
     width: 18px;
     height: 18px;
     border-radius: 50%;
-    color: #68ACE5;
+    color: #E76F51;
     background: rgba(104, 172, 229, 0.16);
 }
 
@@ -380,7 +380,7 @@
 
 .segpop__edit-btn:hover,
 .segpop__edit-btn.is-active {
-    color: #68ACE5;
+    color: #E76F51;
 }
 
 /* Floating add/edit form (see FormFlyout in SegmentsPopup.tsx). Portaled to
@@ -449,7 +449,7 @@
 }
 
 .segpop__edit-confirm {
-    background: #002D72;
+    background: #0F172A;
     border: none;
     color: #08090b;
     border-radius: 6px;
@@ -515,7 +515,7 @@
 }
 
 .segpop__delete:hover:not(:disabled) {
-    color: #68ACE5;
+    color: #E76F51;
 }
 
 .segpop__err {
@@ -653,7 +653,7 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: #68ACE5;
+    background: #E76F51;
 }
 
 .segpop__tab.is-active .segpop__tab-dot {

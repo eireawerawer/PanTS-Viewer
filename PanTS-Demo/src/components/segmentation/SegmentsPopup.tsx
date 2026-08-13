@@ -63,7 +63,7 @@ function toTitleCase(label: string): string {
 // Suggested default swatch for the next new class — cycles through the
 // Hopkins palette so a freshly-created class starts on-brand. Can still be
 // repainted via the color input afterward.
-const NEXT_COLOR_POOL = ["#002D72", "#68ACE5", "#0A2540", "#002D72", "#68ACE5", "#0A2540"];
+const NEXT_COLOR_POOL = ["#0F172A", "#E76F51", "#2A344A", "#0F172A", "#E76F51", "#2A344A"];
 
 // Applies to both the "add segment" and "rename" name fields.
 const MAX_SEGMENT_NAME_LENGTH = 40;
@@ -77,7 +77,7 @@ type PopupTab = "existing" | "custom";
 // Small curated swatch set for the color popover — Hopkins palette first,
 // then a handful of common accent colors so classes stay visually distinct.
 const SWATCH_PRESETS = [
-	"#002D72", "#68ACE5", "#0A2540", "#E85D5D", "#4CAF7D",
+	"#0F172A", "#E76F51", "#2A344A", "#E85D5D", "#4CAF7D",
 	"#F2B33D", "#9B6BD6", "#2FB6C4", "#D9645B", "#7C8A9E",
 ];
 

@@ -86,8 +86,8 @@
     width: 12px;
     height: 12px;
     background: #202124;
-    border-left: 2px solid #68ACE5;
-    border-top: 2px solid #68ACE5;
+    border-left: 2px solid #E76F51;
+    border-top: 2px solid #E76F51;
     border-radius: 3px 0 0 0;
     z-index: 1;
 }
@@ -290,7 +290,7 @@
     flex-shrink: 0;
     width: 14px;
     height: 14px;
-    accent-color: #68ACE5;
+    accent-color: #E76F51;
     cursor: pointer;
 }
 
@@ -336,9 +336,9 @@
 }
 
 .atb-menu-row__expand-chip.is-open {
-    background: rgba(0, 45, 114, 0.35);
+    background: rgba(15, 23, 42, 0.35);
     border-color: rgba(104, 172, 229, 0.5);
-    color: #68ACE5;
+    color: #E76F51;
 }
 
 .atb-menu-row:hover:not(:disabled) .atb-menu-row__expand-chip:not(.is-open) {
@@ -367,7 +367,7 @@
     justify-content: center;
     width: 16px;
     height: 16px;
-    color: var(--jhu-blue-light, #68ACE5);
+    color: var(--accent, #E76F51);
     animation: atb-check-pop 0.15s ease-out;
 }
 
@@ -587,7 +587,7 @@
 
 .atb-action-btn__check {
     flex-shrink: 0;
-    color: #68ACE5;
+    color: #E76F51;
     animation: atb-action-check-in 0.24s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 

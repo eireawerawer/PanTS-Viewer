@@ -221,7 +221,7 @@
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: #002D72;
+  background: #0F172A;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -517,7 +517,7 @@
   background: rgba(0,0,0,.04);
 }
 .model-dropdown-item.selected {
-  background: rgba(0,45,114,.05);
+  background: rgba(15, 23, 42, .05);
 }
 .model-dropdown-item-content {
   display: flex;
@@ -534,7 +534,7 @@
   color: #111111;
 }
 .model-dropdown-item.selected .model-dropdown-item-name {
-  color: #002D72;
+  color: #C2532F;
 }
 .model-dropdown-item-desc {
   font-family: 'Space Grotesk', sans-serif;
@@ -542,7 +542,7 @@
   color: #8f8f8f;
 }
 .model-dropdown-check {
-  color: #002D72;
+  color: #C2532F;
   flex-shrink: 0;
 }
 .model-dropdown-item-side {
@@ -566,8 +566,8 @@
   text-transform: uppercase;
   padding: 3px 7px;
   border-radius: 999px;
-  background: rgba(0, 45, 114, 0.08);
-  color: #002d72;
+  background: rgba(15, 23, 42, 0.08);
+  color: #C2532F;
   white-space: nowrap;
 }
 
@@ -606,8 +606,8 @@
   flex-shrink: 0;
   margin-left: 12px;
   padding: 10px 32px;
-  background: #002D72;
-  border: 1px solid #002D72;
+  background: #0F172A;
+  border: 1px solid #0F172A;
   border-radius: 8px;
   color: #ffffff;
   font-family: 'Space Grotesk', sans-serif;
@@ -618,8 +618,8 @@
   letter-spacing: 0.02em;
 }
 .run-btn:hover:not(:disabled) {
-  background: #00399a;
-  border-color: #00399a;
+  background: #1B2436;
+  border-color: #1B2436;
   color: #ffffff;
 }
 .run-btn:disabled {
@@ -715,10 +715,10 @@
   transition: width 0.4s cubic-bezier(.2,.8,.2,1);
 }
 .progress-fill-upload {
-  background: linear-gradient(90deg, #8f8f8f, #002D72);
+  background: linear-gradient(90deg, #8f8f8f, #0F172A);
 }
 .progress-fill-inference {
-  background: linear-gradient(90deg, #6a6a6a, #00399a);
+  background: linear-gradient(90deg, #6a6a6a, #E76F51);
 }
 
 /* ── Result actions ── */
@@ -761,13 +761,13 @@
   color: #111111;
 }
 .result-btn-primary {
-  background: #002D72;
-  border-color: #002D72;
+  background: #0F172A;
+  border-color: #C2532F;
   color: #ffffff;
 }
 .result-btn-primary:hover {
-  background: #00399a;
-  border-color: #00399a;
+  background: #1B2436;
+  border-color: #1B2436;
   color: #ffffff;
 }
 
@@ -802,7 +802,7 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #002D72;
+  background: #0F172A;
   animation: upload-pulse 1.6s ease-in-out infinite;
   flex-shrink: 0;
 }
@@ -860,10 +860,10 @@
 }
 .file-chip-preview {
   padding: 2px 8px;
-  background: rgba(0,45,114,.1);
-  border: 1px solid rgba(0,45,114,.2);
+  background: rgba(15, 23, 42, .1);
+  border: 1px solid rgba(15, 23, 42, .2);
   border-radius: 10px;
-  color: #002D72;
+  color: #C2532F;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 10px;
   font-weight: 600;
@@ -873,11 +873,11 @@
   flex-shrink: 0;
 }
 .file-chip-preview:hover {
-  background: rgba(0,45,114,.18);
+  background: rgba(15, 23, 42, .18);
 }
 .file-chip--active {
-  border-color: rgba(0,45,114,.3);
-  background: rgba(0,45,114,.06);
+  border-color: rgba(15, 23, 42, .3);
+  background: rgba(15, 23, 42, .06);
 }
 
 /* ── Pending CT preview panel ── */
@@ -947,10 +947,10 @@
   transition: width 0.35s cubic-bezier(.2,.8,.2,1);
 }
 .upload-progress-fill--upload {
-  background: linear-gradient(90deg, #8f8f8f, #002D72);
+  background: linear-gradient(90deg, #8f8f8f, #0F172A);
 }
 .upload-progress-fill--inference {
-  background: linear-gradient(90deg, #6a6a6a, #00399a);
+  background: linear-gradient(90deg, #6a6a6a, #E76F51);
 }
 .upload-progress-pct {
   font-family: 'JetBrains Mono', monospace;
@@ -1073,8 +1073,8 @@
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  border: 2px solid rgba(0, 45, 114, 0.12);
-  border-top-color: #002D72;
+  border: 2px solid rgba(15, 23, 42, 0.12);
+  border-top-color: #C2532F;
   animation: upload-spin 0.75s linear infinite;
 }
 
@@ -1099,7 +1099,7 @@
   padding: 0;
   font: inherit;
   font-weight: 700;
-  color: #002d72;
+  color: #C2532F;
   cursor: pointer;
   text-decoration: underline;
 }
@@ -1116,7 +1116,7 @@
   cursor: pointer;
 }
 .upload-history-link:hover {
-  color: #002d72;
+  color: #C2532F;
 }
 
 /* ── Processing summary bar (all in-flight scans in one row) ── */
@@ -1128,7 +1128,7 @@
   padding: 16px 20px;
   border-radius: 12px;
   background: #f5f5f5;
-  border: 1px solid rgba(0, 45, 114, 0.14);
+  border: 1px solid rgba(15, 23, 42, 0.14);
 }
 .proc-wheel {
   position: relative;
@@ -1142,7 +1142,7 @@
   font-family: 'Space Grotesk', sans-serif;
   font-size: 11px;
   font-weight: 700;
-  color: #002d72;
+  color: #C2532F;
 }
 .proc-info {
   flex: 1;
@@ -1161,7 +1161,7 @@
   font-family: 'JetBrains Mono', monospace;
   font-size: 13px;
   font-weight: 700;
-  color: #002d72;
+  color: #C2532F;
 }
 .proc-sub {
   display: flex;
@@ -1258,7 +1258,7 @@
   background: rgba(0, 0, 0, 0.04);
 }
 .model-submenu-item.selected {
-  background: rgba(0, 45, 114, 0.05);
+  background: rgba(15, 23, 42, 0.05);
 }
 .model-submenu-check {
   width: 14px;
@@ -1266,7 +1266,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #002D72;
+  color: #C2532F;
 }
 .model-submenu-label {
   display: flex;
@@ -1278,7 +1278,7 @@
   color: #111111;
 }
 .model-submenu-item.selected .model-submenu-label {
-  color: #002D72;
+  color: #C2532F;
 }
 .model-submenu-exp {
   font-family: 'JetBrains Mono', monospace;
