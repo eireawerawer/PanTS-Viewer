@@ -17,6 +17,49 @@ is the point; it is what makes it read as a launch film rather than a walkthroug
 
 ---
 
+## Shooting script
+
+Every viewer URL takes `?hd=1`. Without it the app serves `?res=low` whenever the
+JHU server is reachable — so having the tunnel up makes the picture *worse* unless
+you ask for full res. The HuggingFace fallback is full res already.
+
+**SRV** marks a block that cannot be shot without the tunnel.
+
+| Time | On screen | VO |
+|---|---|---|
+| 0:00 | `/cinematic/17?local=1&start=liver&hold=1800&step=160&speed=0.5` — press **R** to arm. Black frame. The liver alone, rotating slowly. It holds 1.8s. | *(silence)* |
+| 0:02 | Structures begin stepping in, one every 160ms, building the abdomen outward around the liver. 23 in total — the lungs are excluded, they're truncated by the top of the volume and read as broken. | *(silence)* |
+| 0:09 | Assembly settles. Cut to `/cards.html` card **1** — wordmark rises out of blur. | **One scan. Twenty-five structures.** |
+| 0:12 | `/cards.html` press **2**. Four figures count up in sequence, ~350ms apart. | **It's one of thirty-six thousand, three hundred ninety. From a hundred and forty-five hospitals.** |
+| 0:20 | **SRV** `/upload` — drag `test-scan.nii.gz` onto the drop zone. File lands, model picker appears. Start the run; the pipeline steps through its stages. | **A new scan uploads once. Six segmentation models run in sequence — organs, vessels, pancreatic substructure, lesions — and return thirty-two labelled classes. No manual contouring.** |
+| 0:34 | `/case/17?hd=1`, already warm in the tab. Three MPR panes, soft-tissue window, slice readouts visible. | **Every scan opens in three planes at once.** |
+| 0:40 | Drag the crosshair in the axial pane. The other two panes track it live. | **Axial, coronal, sagittal — locked to one cursor.** |
+| 0:46 | Toggle segmentation classes on one at a time. Colour builds over the greyscale. | **Structures build up a layer at a time.** |
+| 0:52 | Window/level: drag from Soft Tissue toward Bone. Watch the tissue drop out and the skeleton resolve. | **Window the intensity, and soft tissue separates from bone.** |
+| 0:59 | Scrub the slice slider fast through the stack — one continuous pass, don't stutter. | **Scrub the stack.** |
+| 1:03 | Draw a distance line across an organ. Then an area. Let the HU readout land. | **Measure anything. Distance, area, density in Hounsfield units.** |
+| 1:10 | Move the cursor over two or three structures. Each names itself as you cross it. | **Hover a structure and it names itself.** |
+| 1:16 | Open the docked Segments panel. Brush a correction onto a mask edge, smooth it, split a class. | **Where the model got it wrong, correct the mask directly. Brush it, smooth it, split it.** |
+| 1:25 | Hold on the corrected mask. | **The correction is the annotation.** |
+| 1:30 | **SRV** Open the report. Findings timeline; the pancreas row sits amber — `status: "check"`. | **Findings arrive as a timeline. This pancreas is flagged for review.** |
+| 1:40 | **SRV** Toggle clinical → plain language. The impression rewrites in place. | **Read it in clinical language — or switch to plain language for the patient.** |
+| 1:47 | **SRV** Select the pancreas finding; the structure lights in the 3D pane. | **Select a finding, and the structure lights up in three dimensions.** |
+| 1:52 | `/compare-viewer?a=17&b=44`, pre-warmed. Two cases side by side. Enable linked slice position and scroll — both move together. | **Put any two cases side by side. One crosshair, scrolling both at once.** |
+| 2:00 | **SRV** Click copy-link. Hold on the confirmation toast. **Never show the URL bar** — it copies `window.location.origin`, which off the dev server reads `localhost:5173`. | **Every view has a link.** |
+| 2:04 | **SRV** Reading session: dictate a line, the draft report assembles beneath it, export the bundle. | **Dictate while you read. The session assembles a draft report, and exports as a single bundle.** |
+| 2:16 | `/wall?hero=17&n=1200&cols=20&local=1` — press **R**. Case 17's own tile fills the frame. | **That was one.** |
+| 2:19 | Pull back. The grid resolves around it, then the scroll accelerates down through 1,200 tiles. Let the music carry this — no voice for ten seconds. | *(silence)* |
+| 2:30 | Scroll settles; the tumour filter re-flows the grid. | **Thirty-six thousand, three hundred ninety more.** |
+| 2:38 | `/cards.html` press **3**. Wordmark and institution. | **BodyMaps. Johns Hopkins University.** |
+
+### On "Twenty-five structures"
+
+Case 17 has 25 organ meshes; the shot shows 23 because both lungs are excluded.
+Keep the line — the scan genuinely has 25 segmented structures and the cold open
+is hiding two for looks, not overstating the data. Nobody counts meshes on screen.
+If it nags you, "One scan. Every structure, mapped." costs the specificity but
+removes the gap.
+
 ## Timed script
 
 | In | Block | Line | Words |
