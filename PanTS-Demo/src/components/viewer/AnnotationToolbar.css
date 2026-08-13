@@ -786,6 +786,17 @@
     border-color: rgba(105, 121, 241, 0.55);
 }
 
+.atb-guided__btn--continue {
+    background: #002D72;
+    border: 1px solid #002D72;
+    color: #ffffff;
+}
+
+.atb-guided__btn--continue:hover {
+    background: #013a91;
+    border-color: #013a91;
+}
+
 /* ============================================================================
    First-use shortcuts popup — shown once, the first time any tool icon in
    the horizontal ribbon is clicked, then never again (see
