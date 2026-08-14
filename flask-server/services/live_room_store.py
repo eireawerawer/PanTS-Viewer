@@ -26,12 +26,26 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 import nibabel as nib
 import numpy as np
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
+
+from services.live_quiz import (
+    ALLOWED_TIMERS,
+    QUIZ_PACK_ID,
+    QuizPackError,
+    QuizPackRegistry,
+    choice_ids,
+    consistency_for,
+    correct_choice,
+    get_registry,
+    public_question,
+    reveal_for,
+)
+from services.quiz_telemetry import QuizTelemetry
 
 try:  # Linux production path; tests on other platforms still keep thread safety.
     import fcntl
@@ -71,6 +85,15 @@ DURABLE_TYPES = {
     "note.upsert",
     "note.delete",
     "chat.add",
+}
+QUIZ_EVENT_TYPES = {
+    "quiz.started",
+    "quiz.closed",
+    "quiz.revealed",
+    "quiz.advanced",
+    "quiz.host_paused",
+    "quiz.host_resumed",
+    "quiz.host_promoted",
 }
 
 
@@ -160,11 +183,14 @@ class LiveRoomStore:
         pants_path: str | os.PathLike[str] | None = None,
         *,
         now: Callable[[], datetime] = utcnow,
+        quiz_registry: QuizPackRegistry | None = None,
     ) -> None:
         self.root = Path(sessions_dir).resolve() / "live_rooms"
         self.root.mkdir(parents=True, exist_ok=True)
         self.pants_path = Path(pants_path).resolve() if pants_path else None
         self._now = now
+        self.quiz_registry = quiz_registry or get_registry()
+        self.quiz_telemetry = QuizTelemetry(sessions_dir)
         self._locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
 
@@ -223,6 +249,7 @@ class LiveRoomStore:
 
     def _load_metadata(self, room_dir: Path, *, allow_expired: bool = False) -> dict[str, Any]:
         metadata = self._read_json(room_dir / "metadata.json")
+        metadata.setdefault("mode", "review")
         metadata = self._recover_from_event_log(room_dir, metadata)
         if not allow_expired and parse_time(metadata["expires_at"]) <= self._now():
             raise RoomExpired("Room expired and was deleted")
@@ -290,8 +317,15 @@ class LiveRoomStore:
             "geometry_hash",
             "dimensions",
             "latest_seq",
+            "mode",
+            "quiz_pack_id",
+            "quiz_pack_version",
+            "quiz_playlist_id",
+            "quiz_timer_seconds",
         }
-        return {key: metadata[key] for key in allowed if key in metadata}
+        public = {key: metadata[key] for key in allowed if key in metadata}
+        public.setdefault("mode", "review")
+        return public
 
     def _resolve_case(self, case_id: str, resolution: str) -> CaseFiles:
         if not re.fullmatch(r"\d+", str(case_id)):
@@ -355,7 +389,48 @@ class LiveRoomStore:
             dimensions=tuple(int(v) for v in mask_img.shape[:3]),
         )
 
-    def create_room(self, case_id: str, resolution: str = "low") -> tuple[dict[str, Any], str]:
+    def _create_room(
+        self,
+        case_id: str,
+        resolution: str = "low",
+        *,
+        mode: str = "review",
+        quiz_pack_id: str | None = None,
+        quiz_playlist_id: str | None = None,
+        quiz_playlist_seed: str | None = None,
+        quiz_exclude_pack_ids: Iterable[str] = (),
+        quiz_timer_seconds: int | None = 30,
+    ) -> tuple[dict[str, Any], str, str | None]:
+        if mode not in {"review", "quiz"}:
+            raise LiveRoomError("mode must be 'review' or 'quiz'")
+        host_secret: str | None = None
+        pack: dict[str, Any] | None = None
+        if mode == "quiz":
+            if bool(quiz_pack_id) == bool(quiz_playlist_id):
+                raise LiveRoomError("Provide exactly one of quiz_pack_id or quiz_playlist_id")
+            try:
+                if quiz_playlist_id:
+                    pack = self.quiz_registry.select(
+                        quiz_playlist_id,
+                        seed=str(quiz_playlist_seed or "default"),
+                        exclude_pack_ids=quiz_exclude_pack_ids,
+                    )
+                else:
+                    pack = self.quiz_registry.get(str(quiz_pack_id))
+            except QuizPackError as exc:
+                raise LiveRoomError(str(exc)) from exc
+            if quiz_timer_seconds not in ALLOWED_TIMERS:
+                raise LiveRoomError("Quiz timer must be untimed, 15, 30, or 60 seconds")
+            if not quiz_playlist_id and case_id:
+                try:
+                    requested_case_id = str(int(case_id))
+                except (TypeError, ValueError) as exc:
+                    raise LiveRoomError("case_id must be numeric") from exc
+                if requested_case_id != str(int(pack["case_id"])):
+                    raise LiveRoomError("Quiz pack does not match the requested case")
+            case_id = str(pack["case_id"])
+            quiz_pack_id = str(pack["pack_id"])
+            host_secret = secrets.token_urlsafe(32)
         case_files = self._resolve_case(str(case_id), resolution)
         room_id = str(uuid.uuid4())
         room_key = secrets.token_urlsafe(32)
@@ -365,6 +440,7 @@ class LiveRoomStore:
             "key_hash": hash_room_key(room_key),
             "case_id": str(int(case_id)),
             "resolution": resolution,
+            "mode": mode,
             "created_at": isoformat(created),
             "expires_at": isoformat(created + ROOM_TTL),
             "geometry_hash": case_files.geometry_hash,
@@ -377,6 +453,15 @@ class LiveRoomStore:
             "last_snapshot_at": isoformat(created),
             "recent_event_ids": [],
         }
+        if mode == "quiz":
+            metadata.update({
+                "quiz_pack_id": quiz_pack_id,
+                "quiz_pack_version": pack["version"] if pack else None,
+                "quiz_playlist_id": quiz_playlist_id,
+                "quiz_timer_seconds": quiz_timer_seconds,
+                "quiz_host_secret_hash": hash_room_key(host_secret or ""),
+                "quiz_host_participant_id": None,
+            })
         state = {
             "measurements": {},
             "notes": {},
@@ -387,7 +472,66 @@ class LiveRoomStore:
             _atomic_json(room_dir / "metadata.json", metadata)
             _atomic_json(room_dir / "state.json", state)
             (room_dir / "events.jsonl").touch(mode=0o600)
-        return self.public_metadata(metadata), room_key
+            if mode == "quiz":
+                if pack is None:  # pragma: no cover - resolved above
+                    raise LiveRoomError("Quiz pack could not be resolved")
+                pack_path = room_dir / "quiz_pack.json"
+                _atomic_json(pack_path, pack)
+                pack_path.chmod(0o600)
+                quiz = {
+                    "phase": "lobby",
+                    "question_index": -1,
+                    "question_count": len(pack["questions"]),
+                    "eligible": [],
+                    "eligible_history": {},
+                    "question_elapsed_ms": {},
+                    "response_count": 0,
+                    "deadline_at": None,
+                    "remaining_seconds": quiz_timer_seconds,
+                    "timer_paused": False,
+                    "elapsed_ms": 0,
+                    "resumed_at": None,
+                    "reveal": None,
+                    "reveals": {},
+                    "leaderboard": [],
+                    "consistency_summary": {"consistent": 0, "inconsistent": 0, "incomplete": 0},
+                    "round_completed": False,
+                    "host_connected": False,
+                }
+                _atomic_json(room_dir / "quiz.json", quiz)
+                answers_path = room_dir / "quiz_answers.json"
+                _atomic_json(answers_path, {"submissions": {}})
+                answers_path.chmod(0o600)
+        return self.public_metadata(metadata), room_key, host_secret
+
+    def create_room(self, case_id: str, resolution: str = "low") -> tuple[dict[str, Any], str]:
+        metadata, room_key, _ = self._create_room(case_id, resolution, mode="review")
+        return metadata, room_key
+
+    def create_quiz_room(
+        self,
+        case_id: str,
+        resolution: str = "low",
+        *,
+        quiz_pack_id: str = QUIZ_PACK_ID,
+        quiz_playlist_id: str | None = None,
+        quiz_playlist_seed: str | None = None,
+        quiz_exclude_pack_ids: Iterable[str] = (),
+        quiz_timer_seconds: int | None = 30,
+    ) -> tuple[dict[str, Any], str, str]:
+        metadata, room_key, host_secret = self._create_room(
+            case_id,
+            resolution,
+            mode="quiz",
+            quiz_pack_id=None if quiz_playlist_id else quiz_pack_id,
+            quiz_playlist_id=quiz_playlist_id,
+            quiz_playlist_seed=quiz_playlist_seed,
+            quiz_exclude_pack_ids=quiz_exclude_pack_ids,
+            quiz_timer_seconds=quiz_timer_seconds,
+        )
+        if host_secret is None:  # pragma: no cover - guarded by mode above
+            raise LiveRoomError("Quiz host secret could not be created")
+        return metadata, room_key, host_secret
 
     def verify_key(self, room_id: str, room_key: str, *, allow_expired: bool = False) -> dict[str, Any]:
         if not isinstance(room_key, str) or not room_key:
@@ -399,6 +543,524 @@ class LiveRoomStore:
                 raise RoomUnauthorized("Invalid room key")
             return self.public_metadata(metadata)
 
+    @staticmethod
+    def _public_quiz_state(quiz: dict[str, Any]) -> dict[str, Any]:
+        public = {
+            "phase": quiz.get("phase", "lobby"),
+            "question_index": int(quiz.get("question_index", -1)),
+            "question_count": int(quiz.get("question_count", 0)),
+            "deadline_at": quiz.get("deadline_at"),
+            "remaining_seconds": quiz.get("remaining_seconds"),
+            "timer_paused": bool(quiz.get("timer_paused", False)),
+            "response_count": int(quiz.get("response_count", 0)),
+            "eligible_count": len(quiz.get("eligible") or []),
+            "reveal": quiz.get("reveal"),
+            "leaderboard": quiz.get("leaderboard") or [],
+            "consistency_summary": quiz.get("consistency_summary") or {
+                "consistent": 0,
+                "inconsistent": 0,
+                "incomplete": 0,
+            },
+            "round_completed": bool(quiz.get("round_completed", False)),
+            "host_connected": bool(quiz.get("host_connected", False)),
+        }
+        index = public["question_index"]
+        if 0 <= index < public["question_count"]:
+            public["current_question"] = quiz.get("current_question")
+        else:
+            public["current_question"] = None
+        return public
+
+    def _pack_locked(self, room_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+        path = room_dir / "quiz_pack.json"
+        if path.is_file():
+            return self._read_json(path)
+        # Backward compatibility for rooms created before frozen pack snapshots.
+        try:
+            return self.quiz_registry.get(str(metadata.get("quiz_pack_id", QUIZ_PACK_ID)))
+        except QuizPackError as exc:
+            raise LiveRoomError(str(exc)) from exc
+
+    @staticmethod
+    def _quiz_elapsed_ms(quiz: dict[str, Any], now: datetime) -> int:
+        elapsed = int(quiz.get("elapsed_ms", 0))
+        resumed_at = quiz.get("resumed_at")
+        if resumed_at and not quiz.get("timer_paused"):
+            elapsed += max(0, int((now - parse_time(resumed_at)).total_seconds() * 1000))
+        return elapsed
+
+    @staticmethod
+    def _authorize_locked(metadata: dict[str, Any], room_key: str) -> None:
+        if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
+            raise RoomUnauthorized("Invalid room key")
+
+    @staticmethod
+    def _require_quiz(metadata: dict[str, Any]) -> None:
+        if metadata.get("mode", "review") != "quiz":
+            raise LiveRoomError("This Live Room is not a quiz")
+
+    @staticmethod
+    def _require_host(metadata: dict[str, Any], host_secret: str, participant_id: str) -> None:
+        if (
+            not host_secret
+            or not hmac.compare_digest(hash_room_key(host_secret), metadata.get("quiz_host_secret_hash", ""))
+            or metadata.get("quiz_host_participant_id") != participant_id
+        ):
+            error = RoomUnauthorized("Invalid or expired quiz host credential")
+            error.code = "invalid_host_secret"
+            raise error
+
+    def _append_quiz_event_locked(
+        self,
+        room_dir: Path,
+        metadata: dict[str, Any],
+        quiz: dict[str, Any],
+        event_type: str,
+    ) -> dict[str, Any]:
+        if event_type not in QUIZ_EVENT_TYPES:
+            raise LiveRoomError("Unsupported quiz event type")
+        _atomic_json(room_dir / "quiz.json", quiz)
+        seq = int(metadata.get("latest_seq", 0)) + 1
+        event = {
+            "seq": seq,
+            "event_id": str(uuid.uuid4()),
+            "type": event_type,
+            "participant_id": "server",
+            "name": "Quiz server",
+            "created_at": isoformat(self._now()),
+            "payload": {"quiz": self._public_quiz_state(quiz)},
+        }
+        with (room_dir / "events.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        metadata["latest_seq"] = seq
+        metadata["recent_event_ids"] = (list(metadata.get("recent_event_ids", [])) + [event["event_id"]])[-10_000:]
+        _atomic_json(room_dir / "metadata.json", metadata)
+        self._invalidate_exports(room_dir)
+        return event
+
+    def quiz_context(
+        self,
+        room_id: str,
+        room_key: str,
+        participant_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            if metadata.get("mode", "review") != "quiz":
+                return None
+            quiz = self._read_json(room_dir / "quiz.json")
+            answers = self._read_json(room_dir / "quiz_answers.json")
+            own = {}
+            if participant_id:
+                for question_id, submissions in (answers.get("submissions") or {}).items():
+                    if participant_id in submissions:
+                        own[question_id] = dict(submissions[participant_id])
+            eligible = participant_id in {
+                item.get("participant_id") for item in (quiz.get("eligible") or [])
+            }
+            return {
+                "state": self._public_quiz_state(quiz),
+                "own_submissions": own,
+                "eligible": eligible,
+            }
+
+    def connect_quiz_host(
+        self,
+        room_id: str,
+        room_key: str,
+        host_secret: str,
+        participant_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            self._require_quiz(metadata)
+            if not host_secret or not hmac.compare_digest(
+                hash_room_key(host_secret), metadata.get("quiz_host_secret_hash", "")
+            ):
+                error = RoomUnauthorized("Invalid or expired quiz host credential")
+                error.code = "invalid_host_secret"
+                raise error
+            current = metadata.get("quiz_host_participant_id")
+            if current not in {None, participant_id}:
+                error = RoomUnauthorized("Quiz host credential belongs to another participant")
+                error.code = "invalid_host_secret"
+                raise error
+            metadata["quiz_host_participant_id"] = participant_id
+            quiz = self._read_json(room_dir / "quiz.json")
+            event = None
+            was_disconnected = not quiz.get("host_connected", False)
+            quiz["host_connected"] = True
+            if quiz.get("phase") == "question_open" and quiz.get("timer_paused"):
+                now = self._now()
+                remaining = quiz.get("remaining_seconds")
+                quiz["timer_paused"] = False
+                quiz["resumed_at"] = isoformat(now)
+                quiz["deadline_at"] = (
+                    isoformat(now + timedelta(seconds=float(remaining)))
+                    if remaining is not None else None
+                )
+                event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.host_resumed")
+            elif was_disconnected:
+                _atomic_json(room_dir / "quiz.json", quiz)
+                _atomic_json(room_dir / "metadata.json", metadata)
+            return self._public_quiz_state(quiz), event
+
+    def disconnect_quiz_host(self, room_id: str, participant_id: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            if metadata.get("mode", "review") != "quiz" or metadata.get("quiz_host_participant_id") != participant_id:
+                return None
+            quiz = self._read_json(room_dir / "quiz.json")
+            quiz["host_connected"] = False
+            if quiz.get("phase") == "question_open" and not quiz.get("timer_paused"):
+                now = self._now()
+                quiz["elapsed_ms"] = self._quiz_elapsed_ms(quiz, now)
+                deadline = quiz.get("deadline_at")
+                quiz["remaining_seconds"] = (
+                    max(0.0, (parse_time(deadline) - now).total_seconds()) if deadline else None
+                )
+                quiz["timer_paused"] = True
+                quiz["deadline_at"] = None
+                quiz["resumed_at"] = None
+            event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.host_paused")
+            return self._public_quiz_state(quiz), event
+
+    def promote_quiz_host(
+        self,
+        room_id: str,
+        participant_id: str,
+    ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._require_quiz(metadata)
+            quiz = self._read_json(room_dir / "quiz.json")
+            if quiz.get("host_connected"):
+                raise LiveRoomError("Quiz host is already connected")
+            secret = secrets.token_urlsafe(32)
+            metadata["quiz_host_secret_hash"] = hash_room_key(secret)
+            metadata["quiz_host_participant_id"] = participant_id
+            quiz["host_connected"] = True
+            if quiz.get("phase") == "question_open" and quiz.get("timer_paused"):
+                now = self._now()
+                remaining = quiz.get("remaining_seconds")
+                quiz["timer_paused"] = False
+                quiz["resumed_at"] = isoformat(now)
+                quiz["deadline_at"] = (
+                    isoformat(now + timedelta(seconds=float(remaining)))
+                    if remaining is not None else None
+                )
+            event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.host_promoted")
+            return secret, self._public_quiz_state(quiz), event
+
+    def _open_question_locked(
+        self,
+        room_dir: Path,
+        metadata: dict[str, Any],
+        quiz: dict[str, Any],
+        question_index: int,
+        participants: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        pack = self._pack_locked(room_dir, metadata)
+        questions = pack["questions"]
+        if not 0 <= question_index < len(questions):
+            raise LiveRoomError("Question index is out of range")
+        now = self._now()
+        eligible = [
+            {"participant_id": str(item["participant_id"]), "name": _clean_text(item["name"], MAX_NAME)}
+            for item in participants
+        ]
+        question_id = questions[question_index]["id"]
+        timer = metadata.get("quiz_timer_seconds")
+        quiz.update({
+            "phase": "question_open",
+            "question_index": question_index,
+            "eligible": eligible,
+            "response_count": 0,
+            "remaining_seconds": timer,
+            "timer_paused": False,
+            "elapsed_ms": 0,
+            "resumed_at": isoformat(now),
+            "deadline_at": isoformat(now + timedelta(seconds=timer)) if timer is not None else None,
+            "reveal": None,
+            "current_question": public_question(pack, question_index, choice_seed=metadata["room_id"]),
+        })
+        quiz.setdefault("eligible_history", {})[question_id] = eligible
+        quiz.setdefault("question_elapsed_ms", {})
+        return quiz
+
+    def start_quiz(
+        self,
+        room_id: str,
+        room_key: str,
+        host_secret: str,
+        participant_id: str,
+        participants: list[dict[str, str]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            self._require_quiz(metadata)
+            self._require_host(metadata, host_secret, participant_id)
+            quiz = self._read_json(room_dir / "quiz.json")
+            if quiz.get("phase") != "lobby" or quiz.get("round_completed"):
+                raise LiveRoomError("This quiz round has already started")
+            self._open_question_locked(room_dir, metadata, quiz, 0, participants)
+            event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.started")
+            pack = self._pack_locked(room_dir, metadata)
+            self.quiz_telemetry.record(
+                "pack_started",
+                pack_id=pack["pack_id"],
+                case_id=pack["case_id"],
+                mode="race",
+            )
+            return self._public_quiz_state(quiz), event
+
+    def _close_question_locked(
+        self,
+        room_dir: Path,
+        metadata: dict[str, Any],
+        quiz: dict[str, Any],
+    ) -> dict[str, Any]:
+        if quiz.get("phase") != "question_open":
+            raise LiveRoomError("No quiz question is open")
+        now = self._now()
+        elapsed = self._quiz_elapsed_ms(quiz, now)
+        pack = self._pack_locked(room_dir, metadata)
+        question_id = pack["questions"][int(quiz["question_index"])]["id"]
+        quiz.setdefault("question_elapsed_ms", {})[question_id] = elapsed
+        quiz.update({
+            "phase": "question_closed",
+            "deadline_at": None,
+            "remaining_seconds": 0,
+            "timer_paused": False,
+            "elapsed_ms": elapsed,
+            "resumed_at": None,
+        })
+        return quiz
+
+    def answer_quiz(
+        self,
+        room_id: str,
+        room_key: str,
+        participant_id: str,
+        name: str,
+        choice_id: str,
+        connected_participant_ids: set[str],
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            self._require_quiz(metadata)
+            quiz = self._read_json(room_dir / "quiz.json")
+            if quiz.get("phase") != "question_open" or quiz.get("timer_paused"):
+                raise LiveRoomError("This question is not accepting answers")
+            now = self._now()
+            deadline = quiz.get("deadline_at")
+            if deadline and now >= parse_time(deadline):
+                raise LiveRoomError("The question deadline has passed")
+            eligible_ids = {item["participant_id"] for item in quiz.get("eligible") or []}
+            if participant_id not in eligible_ids:
+                raise LiveRoomError("You become eligible on the next question")
+            pack = self._pack_locked(room_dir, metadata)
+            question_id = pack["questions"][int(quiz["question_index"])]["id"]
+            if choice_id not in choice_ids(pack, question_id):
+                raise LiveRoomError("Invalid answer choice")
+            answers = self._read_json(room_dir / "quiz_answers.json")
+            submissions = answers.setdefault("submissions", {}).setdefault(question_id, {})
+            if participant_id in submissions:
+                error = LiveRoomError("Your answer is already locked")
+                error.code = "duplicate_quiz_answer"
+                raise error
+            submission = {
+                "choice_id": choice_id,
+                "answered_at": isoformat(now),
+                "response_ms": self._quiz_elapsed_ms(quiz, now),
+                "name": _clean_text(name, MAX_NAME),
+            }
+            submissions[participant_id] = submission
+            _atomic_json(room_dir / "quiz_answers.json", answers)
+            quiz["response_count"] = len(submissions)
+            active_eligible = eligible_ids & set(connected_participant_ids)
+            event = None
+            if active_eligible <= set(submissions):
+                self._close_question_locked(room_dir, metadata, quiz)
+                event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.closed")
+            else:
+                _atomic_json(room_dir / "quiz.json", quiz)
+            return self._public_quiz_state(quiz), submission, event
+
+    def close_quiz_question(
+        self,
+        room_id: str,
+        room_key: str,
+        host_secret: str,
+        participant_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            self._require_host(metadata, host_secret, participant_id)
+            quiz = self._read_json(room_dir / "quiz.json")
+            self._close_question_locked(room_dir, metadata, quiz)
+            event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.closed")
+            return self._public_quiz_state(quiz), event
+
+    def close_quiz_if_due(self, room_id: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            if metadata.get("mode") != "quiz":
+                return None
+            quiz = self._read_json(room_dir / "quiz.json")
+            deadline = quiz.get("deadline_at")
+            if quiz.get("phase") != "question_open" or quiz.get("timer_paused") or not deadline:
+                return None
+            if self._now() < parse_time(deadline):
+                return None
+            self._close_question_locked(room_dir, metadata, quiz)
+            event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.closed")
+            return self._public_quiz_state(quiz), event
+
+    def close_quiz_if_all_answered(
+        self,
+        room_id: str,
+        connected_participant_ids: set[str],
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            if metadata.get("mode") != "quiz":
+                return None
+            quiz = self._read_json(room_dir / "quiz.json")
+            if quiz.get("phase") != "question_open":
+                return None
+            pack = self._pack_locked(room_dir, metadata)
+            question_id = pack["questions"][int(quiz["question_index"])]["id"]
+            submissions = (self._read_json(room_dir / "quiz_answers.json").get("submissions") or {}).get(question_id, {})
+            eligible = {item["participant_id"] for item in quiz.get("eligible") or []}
+            if not (eligible & connected_participant_ids) <= set(submissions):
+                return None
+            self._close_question_locked(room_dir, metadata, quiz)
+            event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.closed")
+            return self._public_quiz_state(quiz), event
+
+    @staticmethod
+    def _quiz_leaderboard(
+        quiz: dict[str, Any],
+        answers: dict[str, Any],
+        pack: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        history = quiz.get("eligible_history") or {}
+        people: dict[str, str] = {}
+        for roster in history.values():
+            for item in roster:
+                people[item["participant_id"]] = item["name"]
+        submissions = answers.get("submissions") or {}
+        question_elapsed = quiz.get("question_elapsed_ms") or {}
+        rows: list[dict[str, Any]] = []
+        summary = {"consistent": 0, "inconsistent": 0, "incomplete": 0}
+        for participant_id, name in people.items():
+            selected: dict[str, str] = {}
+            score = 0
+            total_response_ms = 0
+            for question in pack["questions"]:
+                question_id = question["id"]
+                roster_ids = {item["participant_id"] for item in history.get(question_id, [])}
+                if participant_id not in roster_ids:
+                    continue
+                submission = (submissions.get(question_id) or {}).get(participant_id)
+                if submission:
+                    selected[question_id] = submission["choice_id"]
+                    total_response_ms += int(submission.get("response_ms", 0))
+                    if submission["choice_id"] == correct_choice(pack, question_id):
+                        score += 1
+                else:
+                    total_response_ms += int(question_elapsed.get(question_id, 0))
+            consistency = consistency_for(selected, pack)
+            summary[consistency["status"]] += 1
+            rows.append({
+                "participant_id": participant_id,
+                "name": name,
+                "score": score,
+                "max_score": len(pack["questions"]),
+                "total_response_ms": total_response_ms,
+                "consistency": consistency,
+            })
+        rows.sort(key=lambda item: (-item["score"], item["total_response_ms"], item["name"].casefold(), item["participant_id"]))
+        for index, row in enumerate(rows, 1):
+            row["rank"] = index
+        return rows, summary
+
+    def reveal_quiz_question(
+        self,
+        room_id: str,
+        room_key: str,
+        host_secret: str,
+        participant_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            self._require_host(metadata, host_secret, participant_id)
+            quiz = self._read_json(room_dir / "quiz.json")
+            if quiz.get("phase") != "question_closed":
+                raise LiveRoomError("Close the question before revealing it")
+            question_index = int(quiz["question_index"])
+            pack = self._pack_locked(room_dir, metadata)
+            question_id = pack["questions"][question_index]["id"]
+            answers = self._read_json(room_dir / "quiz_answers.json")
+            submissions = (answers.get("submissions") or {}).get(question_id, {})
+            revealed = reveal_for(pack, question_id, submissions)
+            quiz["phase"] = "question_revealed"
+            quiz["reveal"] = revealed
+            quiz.setdefault("reveals", {})[question_id] = revealed
+            leaderboard, summary = self._quiz_leaderboard(quiz, answers, pack)
+            quiz["leaderboard"] = leaderboard
+            quiz["consistency_summary"] = summary
+            event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.revealed")
+            self.quiz_telemetry.record(
+                "answer_distribution",
+                pack_id=pack["pack_id"],
+                case_id=pack["case_id"],
+                mode="race",
+                payload={"question_id": question_id, "distribution": revealed["distribution"]},
+            )
+            return self._public_quiz_state(quiz), event
+
+    def advance_quiz(
+        self,
+        room_id: str,
+        room_key: str,
+        host_secret: str,
+        participant_id: str,
+        participants: list[dict[str, str]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            self._require_host(metadata, host_secret, participant_id)
+            quiz = self._read_json(room_dir / "quiz.json")
+            pack = self._pack_locked(room_dir, metadata)
+            if quiz.get("phase") != "question_revealed":
+                raise LiveRoomError("Reveal the result before advancing")
+            next_index = int(quiz["question_index"]) + 1
+            if next_index >= len(pack["questions"]):
+                quiz["phase"] = "completed"
+                quiz["round_completed"] = True
+                event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.advanced")
+                self.quiz_telemetry.record(
+                    "pack_completed",
+                    pack_id=pack["pack_id"],
+                    case_id=pack["case_id"],
+                    mode="race",
+                )
+            else:
+                self._open_question_locked(room_dir, metadata, quiz, next_index, participants)
+                event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.advanced")
+            return self._public_quiz_state(quiz), event
+
     def get_metadata(self, room_id: str, room_key: str) -> dict[str, Any]:
         return self.verify_key(room_id, room_key)
 
@@ -408,11 +1070,14 @@ class LiveRoomStore:
             if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
                 raise RoomUnauthorized("Invalid room key")
             state = self._read_json(room_dir / "state.json")
-            return {
+            snapshot = {
                 "room": self.public_metadata(metadata),
                 "latest_seq": metadata["latest_seq"],
                 "state": state,
             }
+            if metadata.get("mode") == "quiz":
+                snapshot["quiz"] = self._public_quiz_state(self._read_json(room_dir / "quiz.json"))
+            return snapshot
 
     def events_after(self, room_id: str, room_key: str, sequence: int) -> list[dict[str, Any]]:
         with self._locked(room_id) as room_dir:
@@ -683,6 +1348,10 @@ class LiveRoomStore:
             metadata = self._load_metadata(room_dir)
             if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
                 raise RoomUnauthorized("Invalid room key")
+            if metadata.get("mode") == "quiz":
+                quiz = self._read_json(room_dir / "quiz.json")
+                if quiz.get("phase") in {"question_open", "question_closed"}:
+                    raise LiveRoomError("Collaboration is locked until the question is revealed")
             if event_id in metadata.get("recent_event_ids", []):
                 existing = self._find_event(room_dir, event_id)
                 if existing:
@@ -769,15 +1438,71 @@ class LiveRoomStore:
         _atomic_json(room_dir / "metadata.json", metadata)
         return snapshot_path
 
+    def _quiz_mask_locked(self, room_dir: Path, metadata: dict[str, Any], *, revealed: bool = False) -> Path:
+        path = room_dir / ("quiz_reveal_mask.nii.gz" if revealed else "quiz_blank_mask.nii.gz")
+        if path.exists():
+            return path
+        image = nib.load(str(metadata["base_mask_path"]))
+        source = np.asanyarray(image.dataobj)
+        output_data = np.zeros(image.shape[:3], dtype=np.uint8)
+        if revealed:
+            pack = self._pack_locked(room_dir, metadata)
+            descriptor = pack["ground_truth"]["reveal_mask"]
+            if descriptor.get("kind") != "labels":
+                raise LiveRoomError("Quiz reveal-mask descriptor is unsupported")
+            labels = [int(value) for value in descriptor.get("source_labels") or []]
+            if pack["ground_truth"]["lesion_present"] and not labels:
+                raise LiveRoomError("Quiz reveal-mask labels are missing")
+            if labels:
+                selected = np.isin(source, labels)
+                if pack["ground_truth"]["lesion_present"] and not np.any(selected):
+                    raise LiveRoomError("Quiz reveal mask is empty")
+                output_data[selected] = int(descriptor.get("output_label", 1))
+        output = nib.Nifti1Image(output_data, image.affine, header=image.header.copy())
+        output.set_data_dtype(np.uint8)
+        temporary = room_dir / f".{path.name}.tmp.nii.gz"
+        nib.save(output, str(temporary))
+        os.replace(temporary, path)
+        return path
+
     def get_mask_snapshot(self, room_id: str, room_key: str) -> tuple[Path, int]:
         with self._locked(room_id) as room_dir:
             metadata = self._load_metadata(room_dir)
             if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
                 raise RoomUnauthorized("Invalid room key")
+            if metadata.get("mode") == "quiz":
+                return self._quiz_mask_locked(room_dir, metadata), 0
             if int(metadata["latest_seq"]) == 0:
                 return Path(metadata["base_mask_path"]), 0
             path = self._materialize_mask_locked(room_dir, metadata)
             return path, int(metadata["mask_snapshot_seq"])
+
+    def get_quiz_reveal_segmentation(self, room_id: str, room_key: str) -> bytes:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            self._require_quiz(metadata)
+            quiz = self._read_json(room_dir / "quiz.json")
+            pack = self._pack_locked(room_dir, metadata)
+            final_revealed = (
+                int(quiz.get("question_index", -1)) == len(pack["questions"]) - 1
+                and quiz.get("phase") in {"question_revealed", "completed"}
+            )
+            if not final_revealed:
+                error = LiveRoomError("The lesion overlay is available only after the final reveal")
+                error.status_code = 403
+                error.code = "quiz_reveal_locked"
+                raise error
+            try:
+                return self._quiz_mask_locked(room_dir, metadata, revealed=True).read_bytes()
+            except Exception:
+                self.quiz_telemetry.record(
+                    "reveal_failure",
+                    pack_id=pack["pack_id"],
+                    case_id=pack["case_id"],
+                    mode="race",
+                )
+                raise
 
     def _event_is_current(self, state: dict[str, Any], event: dict[str, Any]) -> bool:
         payload = event["payload"]
@@ -977,13 +1702,29 @@ class LiveRoomStore:
             f"<li><strong>{html.escape(item['author'])}</strong>: {html.escape(item['text'])}</li>"
             for item in chat
         ) or "<li>None</li>"
+        quiz_summary = self._quiz_export_summary_locked(room_dir, metadata)
+        quiz_html = ""
+        if quiz_summary:
+            leaderboard_rows = "".join(
+                f"<tr><td>{int(item['rank'])}</td><td>{html.escape(item['name'])}</td>"
+                f"<td>{int(item['score'])}/{int(item['max_score'])}</td>"
+                f"<td>{html.escape(item['consistency']['status'])}</td></tr>"
+                for item in quiz_summary["leaderboard"]
+            ) or "<tr><td colspan='4'>No revealed results yet</td></tr>"
+            quiz_html = (
+                f"<h2>Live Quiz</h2><p>Pack {html.escape(quiz_summary['pack_id'])} "
+                f"version {int(quiz_summary['pack_version'])} · phase {html.escape(quiz_summary['phase'])}</p>"
+                "<table><thead><tr><th>Rank</th><th>Participant</th><th>Score</th>"
+                f"<th>Consistency</th></tr></thead><tbody>{leaderboard_rows}</tbody></table>"
+            )
         html_text = f"""<!doctype html><html><head><meta charset='utf-8'><title>BodyMaps Live Room report</title>
 <style>body{{font:14px Arial,sans-serif;margin:40px;color:#18212a}}table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccd5dc;padding:8px;text-align:left}}small{{color:#53606b}}</style></head><body>
 <h1>BodyMaps Live Room report</h1><p>Case {html.escape(metadata['case_id'])} · {html.escape(metadata['resolution'])} resolution</p>
 <p>Created {html.escape(metadata['created_at'])} · Expires {html.escape(metadata['expires_at'])}</p>
 <h2>Measurements</h2><table><thead><tr><th>Tool</th><th>Label</th><th>Text</th></tr></thead><tbody>{rows}</tbody></table>
 <h2>Pinned notes</h2><ul>{note_rows}</ul><h2>Chat</h2><ul>{chat_rows}</ul>
-<p><small>For research use only. Not for diagnostic use.</small></p></body></html>"""
+{quiz_html}
+<p><small>For research and education use only. Not for diagnostic use.</small></p></body></html>"""
         report_html.write_text(html_text, encoding="utf-8")
 
         pdf = canvas.Canvas(str(report_pdf), pagesize=letter)
@@ -1002,6 +1743,21 @@ class LiveRoomStore:
         ):
             pdf.drawString(54, y, line)
             y -= 16
+        if quiz_summary:
+            y -= 4
+            pdf.setFont("Helvetica-Bold", 12)
+            pdf.drawString(54, y, "Live Quiz")
+            y -= 18
+            pdf.setFont("Helvetica", 9)
+            pdf.drawString(62, y, f"Pack {quiz_summary['pack_id']} v{quiz_summary['pack_version']} | {quiz_summary['phase']}")
+            y -= 14
+            for item in quiz_summary["leaderboard"][:20]:
+                pdf.drawString(
+                    62,
+                    y,
+                    f"#{item['rank']} {item['name']}: {item['score']}/{item['max_score']} | {item['consistency']['status']}",
+                )
+                y -= 13
         y -= 8
         pdf.setFont("Helvetica-Bold", 12)
         pdf.drawString(54, y, "Pinned notes")
@@ -1016,9 +1772,30 @@ class LiveRoomStore:
                 y = height - 54
                 pdf.setFont("Helvetica", 9)
         pdf.setFont("Helvetica-Oblique", 9)
-        pdf.drawString(54, 36, "For research use only. Not for diagnostic use.")
+        pdf.drawString(54, 36, "For research and education use only. Not for diagnostic use.")
         pdf.save()
         return report_html, report_pdf
+
+    def _quiz_export_summary_locked(self, room_dir: Path, metadata: dict[str, Any]) -> dict[str, Any] | None:
+        if metadata.get("mode", "review") != "quiz":
+            return None
+        quiz = self._read_json(room_dir / "quiz.json")
+        pack = self._pack_locked(room_dir, metadata)
+        return {
+            "pack_id": pack["pack_id"],
+            "pack_version": pack["version"],
+            "case_id": pack["case_id"],
+            "timer_seconds": metadata.get("quiz_timer_seconds"),
+            "phase": quiz.get("phase"),
+            "revealed_distributions": {
+                question_id: reveal.get("distribution", {})
+                for question_id, reveal in (quiz.get("reveals") or {}).items()
+            },
+            "leaderboard": quiz.get("leaderboard") or [],
+            "consistency_summary": quiz.get("consistency_summary") or {},
+            "question_elapsed_ms": quiz.get("question_elapsed_ms") or {},
+            "disclaimer": "For research and education use only. Not for diagnostic use.",
+        }
 
     @staticmethod
     def _chat_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1039,7 +1816,16 @@ class LiveRoomStore:
             state = self._read_json(room_dir / "state.json")
             events = list(self._iter_events(room_dir))
             export_state = {**state, "chat": self._chat_from_events(events)}
-            mask_path = self._materialize_mask_locked(room_dir, metadata)
+            if metadata.get("mode") == "quiz":
+                quiz = self._read_json(room_dir / "quiz.json")
+                pack = self._pack_locked(room_dir, metadata)
+                final_revealed = (
+                    int(quiz.get("question_index", -1)) == len(pack["questions"]) - 1
+                    and quiz.get("phase") in {"question_revealed", "completed"}
+                )
+                mask_path = self._quiz_mask_locked(room_dir, metadata, revealed=final_revealed)
+            else:
+                mask_path = self._materialize_mask_locked(room_dir, metadata)
             report_html, report_pdf = self._build_report(room_dir, metadata, export_state)
             measurements = list(state["measurements"].values())
             measurements_json = json.dumps(measurements, indent=2, ensure_ascii=False)
@@ -1065,8 +1851,11 @@ class LiveRoomStore:
                     "report.html",
                     "report.pdf",
                 ],
-                "disclaimer": "For research use only. Not for diagnostic use.",
+                "disclaimer": "For research and education use only. Not for diagnostic use.",
             }
+            quiz_summary = self._quiz_export_summary_locked(room_dir, metadata)
+            if quiz_summary:
+                manifest["artifacts"].append("quiz-summary.json")
             temp_path = room_dir / ".export.tmp.zip"
             with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.write(mask_path, "edited_labelmap.nii.gz")
@@ -1077,6 +1866,8 @@ class LiveRoomStore:
                 archive.writestr("events.json", json.dumps(events, indent=2, ensure_ascii=False))
                 archive.write(report_html, "report.html")
                 archive.write(report_pdf, "report.pdf")
+                if quiz_summary:
+                    archive.writestr("quiz-summary.json", json.dumps(quiz_summary, indent=2, ensure_ascii=False))
                 archive.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
             if temp_path.stat().st_size > MAX_EXPORT_BYTES:
                 temp_path.unlink(missing_ok=True)

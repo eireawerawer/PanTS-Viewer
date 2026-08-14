@@ -105,7 +105,11 @@ def create_app():
     # and would let any site make authenticated requests as a logged-in user).
     # Set ALLOWED_ORIGINS on the server (comma-separated); defaults to local dev.
     allowed_origins = [
-        o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+        o.strip()
+        for o in os.environ.get(
+            "ALLOWED_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173",
+        ).split(",")
         if o.strip()
     ]
     CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True)

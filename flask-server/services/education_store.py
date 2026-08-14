@@ -19,9 +19,15 @@ from typing import Any, Callable, Iterator
 
 import nibabel as nib
 import numpy as np
-from scipy.spatial import ConvexHull, distance
 
 from services.advanced_analysis import lps_to_ijk
+from services.case35 import (
+    CASE_ID,
+    LESION_LABEL,
+    load_ground_truth as load_case35_ground_truth,
+    mask_path as case35_mask_path,
+    reveal_segmentation as case35_reveal_segmentation,
+)
 from services.ollama_client import DEFAULT_OLLAMA_MODEL, chat_json
 
 try:
@@ -31,13 +37,50 @@ except ImportError:  # pragma: no cover
 
 
 CHALLENGE_ID = "pancreas-case-35"
-CASE_ID = "35"
-LESION_LABEL = 22
 TIME_LIMIT_SECONDS = 300
 SUBMISSION_GRACE_SECONDS = 15
 ATTEMPT_RETENTION = timedelta(hours=24)
 MAX_IMPRESSION_LENGTH = 2_000
 MAX_TUTOR_MESSAGE_LENGTH = 1_000
+MAX_TUTOR_HISTORY_MESSAGES = 6
+
+RUBRIC_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reply": {"type": "string"},
+        "actions": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "criterion": {
+                        "type": "string",
+                        "enum": ["finding", "location", "evidence", "impression"],
+                    },
+                    "score": {"type": "integer", "minimum": 0, "maximum": 10},
+                },
+                "required": ["criterion", "score"],
+                "additionalProperties": False,
+            },
+        },
+        "intent": {"type": "string", "const": "education_rubric"},
+    },
+    "required": ["reply", "actions", "intent"],
+    "additionalProperties": False,
+}
+
+TUTOR_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reply": {"type": "string"},
+        "actions": {"type": "array", "maxItems": 0},
+        "intent": {"type": "string", "const": "education_tutor"},
+    },
+    "required": ["reply", "actions", "intent"],
+    "additionalProperties": False,
+}
 
 FINDING_CHOICES = [
     {"id": "no_focal_lesion", "label": "No focal pancreatic lesion"},
@@ -49,16 +92,16 @@ FINDING_CHOICES = [
 PUBLIC_CHALLENGE = {
     "challenge_id": CHALLENGE_ID,
     "case_id": CASE_ID,
-    "title": "Pancreatic lesion time trial",
+    "title": "Find the abnormal area in the pancreas",
     "eyebrow": "BodyMaps Solo Challenge 01",
-    "prompt": "Review the abdominal CT, identify the most important focal finding, and submit a concise radiology impression.",
+    "prompt": "Review the CT scan, find the most important abnormal area in the pancreas, measure it, and write what you think it shows.",
     "time_limit_seconds": TIME_LIMIT_SECONDS,
     "finding_choices": FINDING_CHOICES,
     "requirements": [
-        "Choose the best imaging finding",
-        "Place the crosshair on the lesion",
-        "Measure its maximum axial diameter",
-        "Write a concise impression",
+        "Choose what you see on the scan",
+        "Place the crosshair in the center of the abnormal area",
+        "Measure its widest size in the axial (top-down) view",
+        "Write a short conclusion",
     ],
     "scoring": {
         "localization": 35,
@@ -137,6 +180,21 @@ def _clean_text(value: Any, limit: int, *, required: bool = True) -> str:
     return cleaned
 
 
+def _clean_tutor_history(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    cleaned: list[dict[str, str]] = []
+    for item in value[-MAX_TUTOR_HISTORY_MESSAGES:]:
+        if not isinstance(item, dict) or item.get("role") not in {"student", "tutor"}:
+            continue
+        try:
+            text = _clean_text(item.get("text", ""), MAX_TUTOR_MESSAGE_LENGTH)
+        except EducationError:
+            continue
+        cleaned.append({"role": item["role"], "text": text})
+    return cleaned
+
+
 def _point(value: Any, label: str) -> list[float] | None:
     if value is None:
         return None
@@ -187,37 +245,6 @@ def _line_intersects_lesion(mask: np.ndarray, affine: np.ndarray, start: list[fl
     return False
 
 
-def _maximum_axial_diameter(mask: np.ndarray, affine: np.ndarray) -> tuple[float, list[list[float]]]:
-    best_distance = 0.0
-    best_points: list[list[float]] = []
-    for slice_index in np.unique(np.argwhere(mask == LESION_LABEL)[:, 2]):
-        points_ijk = np.argwhere(mask[:, :, int(slice_index)] == LESION_LABEL)
-        if len(points_ijk) < 2:
-            continue
-        points_ijk = np.column_stack([points_ijk, np.full(len(points_ijk), int(slice_index))])
-        points_ras = nib.affines.apply_affine(affine, points_ijk)
-        planar = points_ras[:, :2]
-        try:
-            hull_indices = ConvexHull(planar).vertices if len(planar) >= 3 else np.arange(len(planar))
-        except Exception:
-            hull_indices = np.arange(len(planar))
-        hull = planar[hull_indices]
-        if len(hull) < 2:
-            continue
-        condensed = distance.pdist(hull)
-        pair_index = int(np.argmax(condensed))
-        row, column = np.triu_indices(len(hull), 1)
-        first = int(hull_indices[row[pair_index]])
-        second = int(hull_indices[column[pair_index]])
-        diameter = float(condensed[pair_index])
-        if diameter <= best_distance:
-            continue
-        best_distance = diameter
-        endpoints_ras = points_ras[[first, second]]
-        best_points = [[-float(p[0]), -float(p[1]), float(p[2])] for p in endpoints_ras]
-    return best_distance, best_points
-
-
 def _score_measurement(
     mask: np.ndarray,
     affine: np.ndarray,
@@ -248,21 +275,6 @@ def _score_measurement(
         "crosses_lesion": crosses,
         "axial": axial,
     }
-
-
-def _anatomic_location(mask: np.ndarray, affine: np.ndarray) -> str:
-    lesion = np.argwhere(mask == LESION_LABEL)
-    if lesion.size == 0:
-        return "pancreas"
-    lesion_center = nib.affines.apply_affine(affine, lesion.mean(axis=0))
-    labels = {18: "pancreatic body", 19: "pancreatic head", 20: "pancreatic tail"}
-    candidates: list[tuple[float, str]] = []
-    for label, name in labels.items():
-        points = np.argwhere(mask == label)
-        if points.size:
-            center = nib.affines.apply_affine(affine, points.mean(axis=0))
-            candidates.append((float(np.linalg.norm(center - lesion_center)), name))
-    return min(candidates)[1] if candidates else "pancreas"
 
 
 def _validate_rubric(value: Any) -> tuple[dict[str, int], str] | None:
@@ -309,10 +321,10 @@ class EducationStore:
         return dict(PUBLIC_CHALLENGE)
 
     def _mask_path(self) -> Path:
-        path = self.pants_path / "mask_only" / "PanTS_00000035" / "combined_labels.nii.gz"
-        if not path.is_file():
-            raise EducationError("Case 35 ground-truth segmentation is unavailable")
-        return path
+        try:
+            return case35_mask_path(self.pants_path)
+        except FileNotFoundError as exc:
+            raise EducationError(str(exc)) from exc
 
     @staticmethod
     def _attempt_id(value: str) -> str:
@@ -386,37 +398,50 @@ class EducationStore:
         return attempt
 
     def _ground_truth(self) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-        image = nib.load(str(self._mask_path()))
-        mask = np.asanyarray(image.dataobj)
-        if not np.any(mask == LESION_LABEL):
-            raise EducationError("Case 35 lesion ground truth is unavailable")
-        reference_mm, endpoints = _maximum_axial_diameter(mask, image.affine)
-        location = _anatomic_location(mask, image.affine)
-        return mask, image.affine, {
-            "correct_finding": "focal_pancreatic_lesion",
-            "correct_finding_label": "Focal pancreatic lesion",
-            "location": location,
-            "reference_diameter_mm": round(reference_mm, 1),
-            "reference_measurement_lps": endpoints,
-            "teaching_points": [
-                f"The hidden annotation identifies a focal lesion centered near the {location}.",
-                "Measure the maximum lesion diameter on the axial slice where it appears largest.",
-                "A concise impression should identify the focal pancreatic finding, its location, and the main supporting observation without claiming unsupported histology.",
-            ],
-        }
+        try:
+            mask, affine, ground_truth = load_case35_ground_truth(self.pants_path)
+        except (FileNotFoundError, ValueError) as exc:
+            raise EducationError(str(exc)) from exc
+        ground_truth["teaching_points"] = [
+            f"The highlighted area shows the abnormality in the {ground_truth['location']}.",
+            "Use the top-down (axial) CT view and measure the slice where the abnormality looks widest.",
+            "In your conclusion, say what you found, where it is, and what you saw on the scan. Do not guess the exact tumor type.",
+        ]
+        return mask, affine, ground_truth
 
-    def _grade_impression(self, impression: str, ground_truth: dict[str, Any], objective: dict[str, Any]) -> dict[str, Any]:
+    def reveal_segmentation(self) -> bytes:
+        """Return a lesion-only uint8 NIfTI for the post-submit teaching overlay."""
+        try:
+            return case35_reveal_segmentation(self.pants_path)
+        except (FileNotFoundError, ValueError) as exc:
+            raise EducationError(str(exc)) from exc
+
+    def _grade_impression(self, impression: str, ground_truth: dict[str, Any], _objective: dict[str, Any]) -> dict[str, Any]:
         system_prompt = """
-You are grading a low-stakes medical-student CT interpretation exercise. Grade clinical content, not prose style. Use only the supplied ground truth. Award an integer from 0 to 10 for each criterion: finding, location, evidence, impression. A calibrated impression does not invent histology. Return JSON only as {"reply":"brief specific teaching feedback","actions":[{"criterion":"finding","score":0},{"criterion":"location","score":0},{"criterion":"evidence","score":0},{"criterion":"impression","score":0}],"intent":"education_rubric"}.
+You are grading only the student's written impression in a low-stakes medical-student CT interpretation exercise. Grade clinical content, not prose style, and use only the supplied student impression and ground truth. Do not infer credit from any finding choice, marker, measurement tool, or objective score; those are graded separately.
+
+Score each criterion independently from 0 to 10:
+- finding: identifies the focal pancreatic lesion or equivalent abnormal area.
+- location: identifies the correct pancreatic region.
+- evidence: gives a relevant imaging observation, such as the approximate axial measurement.
+- impression: combines the finding, location, and supporting observation into a concise conclusion without inventing an exact tumor type or unsupported histology.
+
+Use 10 when the criterion is explicitly correct, 5 when it is partly correct or vague, and 0 when it is absent or contradicted. A statement that the exact tumor type cannot be determined from this scan is appropriately calibrated and must not lose points. Never ask the student to name an exact tumor type or unsupported histology. Keep the feedback consistent with the numeric scores. Return JSON only as {"reply":"brief specific teaching feedback","actions":[{"criterion":"finding","score":0},{"criterion":"location","score":0},{"criterion":"evidence","score":0},{"criterion":"impression","score":0}],"intent":"education_rubric"}.
 """.strip()
+        clinical_ground_truth = {
+            "finding": ground_truth["correct_finding_label"],
+            "location": ground_truth["location"],
+            "reference_diameter_mm": ground_truth["reference_diameter_mm"],
+            "teaching_points": ground_truth["teaching_points"],
+        }
         response = self._grader(
             model=DEFAULT_OLLAMA_MODEL,
             system_prompt=system_prompt,
             user_prompt=json.dumps({
                 "student_impression": impression,
-                "ground_truth": ground_truth,
-                "objective_result": objective,
+                "ground_truth": clinical_ground_truth,
             }, ensure_ascii=False),
+            response_schema=RUBRIC_RESPONSE_SCHEMA,
             temperature=0.0,
         )
         validated = _validate_rubric(response)
@@ -530,7 +555,7 @@ You are grading a low-stakes medical-student CT interpretation exercise. Grade c
             _atomic_json(directory / "attempt.json", attempt)
             return result
 
-    def tutor(self, attempt_id: str, key: str, message: str) -> dict[str, Any]:
+    def tutor(self, attempt_id: str, key: str, message: str, history: Any = None) -> dict[str, Any]:
         with self._locked(attempt_id) as directory:
             attempt = self._authorized(directory, key)
             result = attempt.get("result")
@@ -539,11 +564,34 @@ You are grading a low-stakes medical-student CT interpretation exercise. Grade c
             clean_message = _clean_text(message, MAX_TUTOR_MESSAGE_LENGTH)
             if result.get("status") != "graded":
                 return {"available": False, "reply": "The AI tutor is unavailable. Use the revealed overlay and teaching points to review this case."}
+            recent_history = _clean_tutor_history(history)
+            review_context = {
+                "student_impression": result["student"]["impression"],
+                "rubric_scores": result["ai_grade"]["criteria"],
+                "objective_scores": result["scores"],
+                "ground_truth": {
+                    "finding": result["ground_truth"]["correct_finding_label"],
+                    "location": result["ground_truth"]["location"],
+                    "reference_diameter_mm": result["ground_truth"]["reference_diameter_mm"],
+                    "teaching_points": result["ground_truth"]["teaching_points"],
+                },
+            }
+            normalized_message = clean_message.casefold().strip(" \n\t.!?")
+            is_greeting = normalized_message in {
+                "hi", "hello", "hey", "hi there", "hello there", "hey there",
+            }
+            prompt_payload = {
+                "student_question": clean_message,
+                "recent_conversation": recent_history,
+            }
+            if not is_greeting:
+                prompt_payload["review_context"] = review_context
             try:
                 response = self._grader(
                     model=DEFAULT_OLLAMA_MODEL,
-                    system_prompt="You are a concise medical-imaging tutor reviewing a completed low-stakes exercise. Use only the supplied attempt and ground truth. Explain reasoning, acknowledge uncertainty, and do not invent pathology or personalized medical advice. Return JSON with reply, empty actions, and intent education_tutor.",
-                    user_prompt=json.dumps({"question": clean_message, "completed_attempt": result}, ensure_ascii=False),
+                    system_prompt="You are a friendly medical-imaging tutor speaking directly with a student after a low-stakes exercise. The student's latest question is the primary task: answer it directly and naturally in 1 to 3 short sentences. Address the student as 'you'; never refer to them as 'the student'. Do not repeat or summarize the entire grade unless the question asks for it. If no review_context is supplied, respond conversationally and invite a case-related question. For improvement questions, use the rubric scores to identify the weakest criterion and give one concrete next step; do not claim something is missing when it is already present in the student's impression. Use only the supplied review context, acknowledge uncertainty, and do not invent pathology or personalized medical advice. A CT finding alone does not establish an exact tumor type, so praise calibrated uncertainty and never recommend naming unsupported histology. Return exactly one JSON object as {\"reply\":\"direct answer to the latest question\",\"actions\":[],\"intent\":\"education_tutor\"}. The reply value must be a plain string, not an object or list.",
+                    user_prompt=json.dumps(prompt_payload, ensure_ascii=False),
+                    response_schema=TUTOR_RESPONSE_SCHEMA,
                     temperature=0.2,
                 )
                 reply = _clean_text(response.get("reply", ""), 4_000)

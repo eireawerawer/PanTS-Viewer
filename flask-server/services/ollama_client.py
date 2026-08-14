@@ -222,6 +222,7 @@ def chat_json(
     model: str | None,
     system_prompt: str,
     user_prompt: str,
+    response_schema: dict[str, Any] | None = None,
     timeout: float | None = None,
     temperature: float = 0.2,
 ) -> dict[str, Any]:
@@ -268,7 +269,7 @@ def chat_json(
             "seed": 42,
         },
         "think": OLLAMA_THINK,
-        "format": "json",
+        "format": response_schema or "json",
     }
 
     data = _post_chat(payload, request_timeout)
@@ -305,7 +306,7 @@ def chat_json(
                 "num_ctx": 4096,
                 "seed": 42,
             },
-            "format": "json",
+            "format": response_schema or "json",
         }
 
         repaired = _post_chat(

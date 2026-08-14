@@ -1,11 +1,17 @@
 .env
 node_modules/
+.venv/
 certs/
 dist/
 tmp/*
 
 /PanTS/
 downloaded.nii.gz
+PanTS-Demo/public/image_only/PanTS_*/
+PanTS-Demo/public/mask_only/PanTS_*/
+PanTS-Demo/public/quiz/
+/quiz-data/
+PanTS-Demo/public/metadata.official.xlsx
 PanTS/data/pdf/
 .DS_Store
 

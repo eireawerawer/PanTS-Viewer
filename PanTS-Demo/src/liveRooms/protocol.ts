@@ -8,6 +8,7 @@ import type {
 	LiveRoomMeasurement,
 	LiveRoomMetadata,
 	LiveRoomNote,
+	LiveQuizState,
 } from "./types";
 
 export const LIVE_ROOM_PROTOCOL = 1;
@@ -16,6 +17,10 @@ export const MAX_LIVE_ROOM_CHAT_MESSAGES = 500;
 
 export function liveRoomCreatorAutoJoinKey(roomId: string): string {
 	return `bodymaps.live-room.${roomId}.creator-auto-join`;
+}
+
+export function liveQuizHostSecretKey(roomId: string): string {
+	return `bodymaps.live-room.${roomId}.quiz-host-secret`;
 }
 
 export function consumeCreatorAutoJoinName(
@@ -112,6 +117,7 @@ export async function bootstrapLiveRoom(roomId: string, roomKey: string): Promis
 	state: LiveRoomDurableState;
 	maskUrl: string;
 	maskSequence: number;
+	quiz: LiveQuizState | null;
 }> {
 	const headers = { "X-Room-Key": roomKey };
 	const metadataResponse = await fetch(liveRoomApiUrl(roomId), { headers });
@@ -140,10 +146,27 @@ export async function bootstrapLiveRoom(roomId: string, roomKey: string): Promis
 		URL.revokeObjectURL(maskUrl);
 		throw new Error(snapshot.error || `Room snapshot failed (${snapshotResponse.status})`);
 	}
+	const metadata = metadataBody as LiveRoomMetadata;
+	metadata.mode ??= "review";
 	return {
-		metadata: metadataBody as LiveRoomMetadata,
+		metadata,
 		state: (snapshot.state ?? emptyDurableState()) as LiveRoomDurableState,
 		maskUrl,
 		maskSequence,
+		quiz: (snapshot.quiz ?? null) as LiveQuizState | null,
 	};
+}
+
+export async function loadLiveQuizRevealMask(roomId: string, roomKey: string): Promise<string> {
+	const response = await fetch(liveRoomApiUrl(roomId, "/quiz/reveal-segmentation.nii.gz"), {
+		headers: { "X-Room-Key": roomKey },
+	});
+	if (!response.ok) {
+		const body = await response.json().catch(() => ({}));
+		throw new Error(body.error || `Quiz reveal failed (${response.status})`);
+	}
+	const compressed = new Uint8Array(await response.arrayBuffer());
+	return URL.createObjectURL(new Blob([new Uint8Array(ungzip(compressed))], {
+		type: "application/octet-stream",
+	}));
 }

@@ -19,6 +19,7 @@ const CompareViewerPage = lazy(() => import("./routes/CompareViewerPage"));
 const UploadPage = lazy(() => import("./routes/UploadPage"));
 const LiveRoomPage = lazy(() => import("./liveRooms/LiveRoomPage"));
 const SoloChallengePage = lazy(() => import("./education/SoloChallengePage"));
+const QuizPracticePage = lazy(() => import("./education/QuizPracticePage"));
 const AccountPage = lazy(() => import("./routes/AccountPage"));
 const RotatingHeartLoader = lazy(() => import("./components/Loading"));
 
@@ -70,6 +71,7 @@ function App() {
                   <Route path="/case/:caseId" element={<VisualizationPage />} />
                   <Route path="/live/:roomId" element={<LiveRoomPage />} />
                   <Route path="/live/challenge/:challengeId" element={<SoloChallengePage />} />
+                  <Route path="/learn/quiz/:packId" element={<QuizPracticePage />} />
                   <Route
                     path="/session/:sessionId"
                     element={<VisualizationPage />}

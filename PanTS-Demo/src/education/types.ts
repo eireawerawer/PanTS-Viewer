@@ -65,6 +65,8 @@ export type EducationResult = {
 	ground_truth: {
 		correct_finding: string;
 		correct_finding_label: string;
+		segmentation_label: number;
+		mesh_organ_id: number;
 		location: string;
 		reference_diameter_mm: number;
 		reference_measurement_lps: number[][];
@@ -82,6 +84,8 @@ export type SoloChallengeController = {
 	setImpression: (value: string) => void;
 	marker: [number, number, number] | null;
 	setMarker: (value: [number, number, number] | null) => void;
+	measurement: SharedMeasurement | null;
+	setMeasurement: (value: SharedMeasurement | null) => void;
 	result: EducationResult | null;
 	submitting: boolean;
 	retryingGrade: boolean;
@@ -90,4 +94,74 @@ export type SoloChallengeController = {
 	retryGrade: () => Promise<void>;
 	taskDockOpen: boolean;
 	setTaskDockOpen: (value: boolean) => void;
+	clearSession: () => void;
+};
+
+export type QuizPracticeChoice = { id: string; label: string };
+export type QuizPracticeQuestion = {
+	id: string;
+	prompt: string;
+	choices: QuizPracticeChoice[];
+	viewer_cue?: {
+		clear_overlays?: boolean;
+		crosshair_lps?: [number, number, number];
+	};
+};
+
+export type QuizPracticePack = {
+	pack_id: string;
+	version: number;
+	case_id: string;
+	title: string;
+	difficulty: "easy" | "medium" | "hard";
+	provenance: Record<string, unknown>;
+	generator_version: string;
+	validator_version: string;
+	questions: QuizPracticeQuestion[];
+};
+
+export type QuizPracticeReveal = {
+	question_id: string;
+	correct_choice_id: string;
+	explanation: string;
+	source_label?: string;
+	distribution: Record<string, number>;
+	viewer_cue?: {
+		show_lesion_overlay?: boolean;
+		crosshair_lps?: [number, number, number];
+		reference_measurement_lps?: [[number, number, number], [number, number, number]];
+		reference_diameter_mm?: number;
+		lesion_label?: number;
+		mesh_organ_id?: number;
+	};
+};
+
+export type QuizPracticeResult = {
+	attempt_id: string;
+	pack_id: string;
+	pack_version: number;
+	case_id: string;
+	status: "completed";
+	completed_at: string;
+	score: number;
+	max_score: number;
+	answers: Record<string, string>;
+	consistency: { status: "consistent" | "inconsistent" | "incomplete"; reasons: string[] };
+	reveals: QuizPracticeReveal[];
+};
+
+export type QuizPracticeController = {
+	pack: QuizPracticePack;
+	questionIndex: number;
+	answers: Record<string, string>;
+	result: QuizPracticeResult | null;
+	maskUrl: string | null;
+	submitting: boolean;
+	error: string | null;
+	dockOpen: boolean;
+	setDockOpen: (open: boolean) => void;
+	selectAnswer: (choiceId: string) => void;
+	previous: () => void;
+	next: () => void;
+	reportContent: (category: string) => Promise<void>;
 };

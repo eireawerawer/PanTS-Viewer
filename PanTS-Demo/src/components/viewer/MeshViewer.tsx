@@ -24,11 +24,16 @@ type SegmentationMeshViewerProps = {
 export async function fetchMeshManifest(caseId: string): Promise<MeshManifest> {
   const res = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/cases/${caseId}/mesh-manifest`);
   if (!res.ok) throw new Error(`Failed to fetch mesh manifest: ${res.status}`);
-  return res.json();
+  const data = await res.json() as Partial<MeshManifest>;
+  if (!Array.isArray(data.organs) || !Array.isArray(data.center)) {
+    throw new Error("Mesh manifest response is invalid");
+  }
+  return data as MeshManifest;
 }
 
 export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, crosshairMm, customOrgans = [], labelColorMap = {}}: SegmentationMeshViewerProps) {
   const [manifest, setManifest] = useState<MeshManifest | null>(null);
+  const [manifestError, setManifestError] = useState(false);
   const [loaded, setLoaded] = useState<Record<number, boolean>>({});
   // Bumped on every mask edit so editedSegments below is recomputed — the 3D pane
   // needs to know the instant a static organ's mask changes, not just at mount.
@@ -50,6 +55,8 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
 
   useEffect(() => {
     let alive = true;
+    setManifest(null);
+    setManifestError(false);
     fetchMeshManifest(caseId)
       .then((data) => {
         if (!alive) return;
@@ -58,12 +65,13 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
         for (const organ of data.organs) initialLoaded[organ.id] = true;
         setLoaded(initialLoaded);
       })
-      .catch((err) => console.error(err));
+      .catch(() => { if (alive) setManifestError(true); });
     return () => { alive = false; };
   }, [caseId]);
 
   const organs = useMemo(() => manifest?.organs ?? [], [manifest]);
 
+  if (manifestError) return <div role="alert">3D segmentation unavailable.</div>;
   if (!manifest || loading || !checkState || checkState.length === 0) {
     return <div>Loading 3D segmentation...</div>;
   }

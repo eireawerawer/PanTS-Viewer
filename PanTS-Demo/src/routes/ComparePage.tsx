@@ -190,8 +190,10 @@ export default function ComparePage() {
 	};
 	const swap = () => {
 		const next = new URLSearchParams(params);
-		idB ? next.set("a", idB) : next.delete("a");
-		idA ? next.set("b", idA) : next.delete("b");
+		if (idB) next.set("a", idB);
+		else next.delete("a");
+		if (idA) next.set("b", idA);
+		else next.delete("b");
 		setParams(next, { replace: true });
 	};
 

@@ -17,16 +17,29 @@ function renderDialog(caseId = "35") {
 }
 
 describe("Live Room mode menu", () => {
-	it("offers the curated case-35 solo challenge and keeps later stages disabled", () => {
+	it("offers the curated Case 35 solo challenge and Individual Race", () => {
 		renderDialog();
 
 		const solo = screen.getByRole("button", { name: /Solo Challenge/i });
 		expect(solo).toBeEnabled();
-		expect(screen.getByRole("button", { name: /Individual Race/i })).toBeDisabled();
-		expect(screen.getByRole("button", { name: /Assignment/i })).toBeDisabled();
+		const race = screen.getByRole("button", { name: /Individual Race/i });
+		expect(race).toBeEnabled();
+			expect(screen.getByRole("button", { name: /Solo VQA Practice/i })).toBeEnabled();
+		fireEvent.click(race);
+		expect(screen.getByRole("heading", { name: "Start an Individual Race" })).toBeInTheDocument();
+		expect(screen.getByRole("radio", { name: "30 seconds" })).toBeChecked();
 
-		fireEvent.click(solo);
+		fireEvent.click(screen.getByRole("button", { name: /Back to room modes/i }));
+		fireEvent.click(screen.getByRole("button", { name: /Solo Challenge/i }));
 		expect(screen.getByLabelText("Current route")).toHaveTextContent("/live/challenge/pancreas-case-35");
+	});
+
+	it("offers playlist races outside Case 35", () => {
+		renderDialog("34");
+		const race = screen.getByRole("button", { name: /Individual Race/i });
+		expect(race).toBeEnabled();
+		fireEvent.click(race);
+		expect(screen.getByRole("radio", { name: /Case 35/i })).toBeDisabled();
 	});
 
 	it("preserves the existing collaborative room form", () => {

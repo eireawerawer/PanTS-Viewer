@@ -503,7 +503,11 @@ export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivEle
             },
         ]);
 
-        viewportInputArray.forEach(async (viewport) => {
+        // Wait until every viewport owns its representation before reporting that the
+        // viewer is ready. Challenge mode hides the ground-truth segments as soon as
+        // loading ends; letting these promises float races that visibility update and
+        // can leave the default labelmap painted over the CT.
+        await Promise.all(viewportInputArray.map(async (viewport) => {
             await segmentation.addSegmentationRepresentations(viewport.viewportId, [
                 {
                     segmentationId,
@@ -513,11 +517,8 @@ export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivEle
                     }
                 }
             ]);
-            if (segmentationURL && segmentationImageIds.length > 0) {
-
             segmentation.activeSegmentation.setActiveSegmentation(viewport.viewportId, segmentationId);
-            }
-        });
+        }));
     }
 
     renderingEngine.renderViewports(viewportInputArray.map((viewport) => viewport.viewportId));
@@ -1492,6 +1493,15 @@ export function subscribeToMeasurementChanges(
     [cornerstoneTools.Enums.Events.ANNOTATION_MODIFIED, make("modified") as EventListener],
     [cornerstoneTools.Enums.Events.ANNOTATION_REMOVED, make("removed") as EventListener],
   ];
+  const historyRedo = ((evt: Event) => {
+    if (_remoteMeasurementEventDepth > 0) return;
+    const annotationUid = (evt as CustomEvent).detail?.id as unknown;
+    const restored = typeof annotationUid === "string" ? annotation.state.getAnnotation(annotationUid) : null;
+    const toolName = restored?.metadata?.toolName as unknown;
+    if (!restored?.annotationUID || typeof toolName !== "string" || !names.includes(toolName)) return;
+    cb("completed", toSummary(restored));
+  }) as EventListener;
+  pairs.push(["CORNERSTONE_TOOLS_HISTORY_REDO", historyRedo]);
   for (const [name, handler] of pairs) eventTarget.addEventListener(name, handler);
   return () => {
     for (const [name, handler] of pairs) eventTarget.removeEventListener(name, handler);

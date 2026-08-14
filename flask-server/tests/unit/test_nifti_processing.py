@@ -1,4 +1,5 @@
 import unittest
+import os
 from services.nifti_processor import NiftiProcessor
 
 """
@@ -52,6 +53,10 @@ Each test session has
 
 
 
+@unittest.skipUnless(
+    os.path.exists("test-sessions/test-045/ct.nii.gz"),
+    "external NIfTI test fixtures are not installed",
+)
 class TestNiftiProcessing(unittest.TestCase):
 
     def setUp(self):
@@ -92,8 +97,8 @@ class TestNiftiProcessing(unittest.TestCase):
         organ_metrics = nifti_processor.calculate_metrics()
 
         self.assertNotEqual(organ_metrics, None)
-    
- 
+
+
     def test_case_338(self):
         print("testcase 338")
         self.clabel_path = "./test-sessions/test-050/combined_labels_ANS/combined_labels.nii.gz"
@@ -107,5 +112,4 @@ class TestNiftiProcessing(unittest.TestCase):
         organ_metrics = nifti_processor.calculate_metrics()
 
         self.assertNotEqual(organ_metrics, None)
-    
- 
+

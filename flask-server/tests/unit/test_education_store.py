@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -44,8 +45,9 @@ def education_store(tmp_path: Path):
     mask_dir = pants / "mask_only" / "PanTS_00000035"
     mask_dir.mkdir(parents=True)
     mask = np.zeros((12, 12, 5), dtype=np.uint8)
-    mask[4:7, 4:7, 2] = 22
+    mask[4:7, 4:7, 2] = 28
     mask[2:4, 4:7, 2] = 19
+    mask[9:11, 1:11, :] = 22
     nib.save(nib.Nifti1Image(mask, np.eye(4)), mask_dir / "combined_labels.nii.gz")
     return EducationStore(tmp_path / "sessions", pants, now=Clock(), grader=passing_grader)
 
@@ -78,9 +80,57 @@ def test_attempt_scores_objective_and_ai_components(education_store):
     assert result["ai_grade"]["points"] == 36
     assert result["total_points"] == 96
     assert result["ground_truth"]["correct_finding"] == "focal_pancreatic_lesion"
+    assert result["ground_truth"]["segmentation_label"] == 1
+    assert result["ground_truth"]["mesh_organ_id"] == 22
 
     with pytest.raises(AttemptAlreadySubmitted):
         education_store.submit(attempt["attempt_id"], key, valid_submission())
+
+
+def test_postcava_is_not_scored_as_the_lesion(education_store):
+    submission = valid_submission()
+    submission["marker_lps"] = [-9, -1, 0]
+    attempt, key = education_store.start_attempt(CHALLENGE_ID)
+    result = education_store.submit(attempt["attempt_id"], key, submission)
+
+    assert result["scores"]["localization"]["inside_lesion"] is False
+    assert result["scores"]["localization"]["points"] < 35
+
+
+def test_reveal_segmentation_contains_only_the_lesion(education_store):
+    path = education_store.root / "reveal.nii.gz"
+    path.write_bytes(education_store.reveal_segmentation())
+    revealed = np.asanyarray(nib.load(path).dataobj)
+    source, _, _ = education_store._ground_truth()
+
+    assert set(np.unique(revealed)) == {0, 1}
+    assert int((revealed == 1).sum()) == int((source == 28).sum())
+
+
+def test_grade_prompt_defines_each_rubric_criterion(education_store):
+    captured = {}
+
+    def capturing_grader(**kwargs):
+        captured.update(kwargs)
+        return passing_grader()
+
+    education_store._grader = capturing_grader
+    attempt, key = education_store.start_attempt(CHALLENGE_ID)
+    education_store.submit(attempt["attempt_id"], key, valid_submission())
+
+    prompt = captured["system_prompt"]
+    assert "finding: identifies the focal pancreatic lesion" in prompt
+    assert "location: identifies the correct pancreatic region" in prompt
+    assert "evidence: gives a relevant imaging observation" in prompt
+    assert "impression: combines the finding, location" in prompt
+    assert "must not lose points" in prompt
+    assert "Never ask the student to name an exact tumor type" in prompt
+    assert "Keep the feedback consistent with the numeric scores" in prompt
+    assert "objective_result" not in captured["user_prompt"]
+    grading_payload = json.loads(captured["user_prompt"])
+    assert "segmentation_label" not in grading_payload["ground_truth"]
+    assert "reference_measurement_lps" not in grading_payload["ground_truth"]
+    assert captured["response_schema"]["properties"]["actions"]["minItems"] == 4
 
 
 def test_attempt_key_is_required(education_store):
@@ -117,6 +167,71 @@ def test_provisional_ai_grade_can_be_retried(education_store):
     assert retried["status"] == "graded"
     assert retried["total_points"] == 96
     assert education_store.result(attempt["attempt_id"], key)["status"] == "graded"
+
+
+def test_tutor_requires_a_plain_string_reply(education_store):
+    attempt, key = education_store.start_attempt(CHALLENGE_ID)
+    education_store.submit(attempt["attempt_id"], key, valid_submission())
+    captured = {}
+
+    def tutor_grader(**kwargs):
+        captured.update(kwargs)
+        return {
+            "reply": "Imaging can identify a lesion, but histology is needed to name its exact type.",
+            "actions": [],
+            "intent": "education_tutor",
+        }
+
+    education_store._grader = tutor_grader
+    tutor = education_store.tutor(
+        attempt["attempt_id"],
+        key,
+        "Why should I avoid naming an exact tumor type?",
+        [
+            {"role": "student", "text": "Hi"},
+            {"role": "tutor", "text": "Hi! What would you like to review?"},
+            {"role": "invalid", "text": "Ignore this"},
+        ],
+    )
+
+    assert tutor["available"] is True
+    assert "histology" in tutor["reply"]
+    assert "reply value must be a plain string" in captured["system_prompt"]
+    assert "never recommend naming unsupported histology" in captured["system_prompt"]
+    assert "answer it directly and naturally" in captured["system_prompt"]
+    assert "never refer to them as 'the student'" in captured["system_prompt"]
+    assert captured["response_schema"]["properties"]["reply"] == {"type": "string"}
+    prompt = json.loads(captured["user_prompt"])
+    assert prompt["student_question"] == "Why should I avoid naming an exact tumor type?"
+    assert prompt["recent_conversation"] == [
+        {"role": "student", "text": "Hi"},
+        {"role": "tutor", "text": "Hi! What would you like to review?"},
+    ]
+    assert prompt["review_context"]["student_impression"] == valid_submission()["impression"]
+    assert "feedback" not in prompt["review_context"]
+
+
+def test_tutor_greeting_does_not_send_the_grading_payload(education_store):
+    attempt, key = education_store.start_attempt(CHALLENGE_ID)
+    education_store.submit(attempt["attempt_id"], key, valid_submission())
+    captured = {}
+
+    def greeting_grader(**kwargs):
+        captured.update(kwargs)
+        return {
+            "reply": "Hi! What part of the case would you like to review?",
+            "actions": [],
+            "intent": "education_tutor",
+        }
+
+    education_store._grader = greeting_grader
+    tutor = education_store.tutor(attempt["attempt_id"], key, "Hi!")
+
+    assert tutor["available"] is True
+    prompt = json.loads(captured["user_prompt"])
+    assert prompt == {"student_question": "Hi!", "recent_conversation": []}
+    assert "If no review_context is supplied" in captured["system_prompt"]
+    assert "identify the weakest criterion" in captured["system_prompt"]
 
 
 def test_attempt_expires_and_cleanup_removes_it(education_store):

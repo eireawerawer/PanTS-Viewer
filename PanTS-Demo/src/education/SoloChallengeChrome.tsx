@@ -26,7 +26,7 @@ export function SoloChallengeHeader({ controller }: { controller: SoloChallengeC
 		<header className="edu-header">
 			<div className="edu-header__identity">
 				<span className="edu-header__index">01</span>
-				<div><strong>Solo Challenge</strong><span>Case {controller.challenge.case_id} · Pancreatic lesion</span></div>
+				<div><strong>Solo Challenge</strong><span>Case {controller.challenge.case_id} · Pancreas CT</span></div>
 			</div>
 			<div className="edu-header__prompt">Find · measure · interpret</div>
 			<div className="edu-header__actions">
@@ -95,9 +95,9 @@ export function SoloChallengeDock({
 						{controller.marker && <code>{controller.marker.map((value) => Math.round(value)).join(", ")} mm</code>}
 					</section>
 					<section className="edu-task-section">
-						<div className="edu-task-section__label"><span>03</span><strong>Maximum axial diameter</strong>{measurement && <IconCheck size={16} />}</div>
-						<p>Draw one length measurement across the widest axial appearance.</p>
-						<button type="button" className="edu-secondary-action" onClick={onActivateMeasure}><IconRulerMeasure size={17} /> Activate length tool</button>
+						<div className="edu-task-section__label"><span>03</span><strong>Measure the abnormal area</strong>{measurement && <IconCheck size={16} />}</div>
+						<p>In the axial (top-down) CT view, draw a line across the widest part of the abnormal area. This records its size in millimeters.</p>
+						<button type="button" className="edu-secondary-action" onClick={onActivateMeasure}><IconRulerMeasure size={17} /> Start measuring</button>
 						{measurement && <code>{measurement.value}</code>}
 					</section>
 					<section className="edu-task-section">
@@ -121,6 +121,7 @@ function ChallengeResult({ controller }: { controller: SoloChallengeController }
 	const [question, setQuestion] = useState("");
 	const [messages, setMessages] = useState<Array<{ role: "student" | "tutor"; text: string }>>([]);
 	const [sending, setSending] = useState(false);
+	const tutorUnavailable = result.status === "provisional";
 	const scoreRows = useMemo(() => [
 		["Localization", result.scores.localization.points, 35],
 		["Measurement", result.scores.measurement.points, 15],
@@ -138,7 +139,7 @@ function ChallengeResult({ controller }: { controller: SoloChallengeController }
 			const response = await fetch(`${API_BASE}/api/education/attempts/${controller.attempt.attempt_id}/tutor`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", "X-Attempt-Key": controller.attempt.attempt_key },
-				body: JSON.stringify({ message: text }),
+				body: JSON.stringify({ message: text, history: messages.slice(-6) }),
 			});
 			const body = await response.json();
 			if (!response.ok) throw new Error(body.error || "Tutor unavailable");
@@ -162,9 +163,13 @@ function ChallengeResult({ controller }: { controller: SoloChallengeController }
 				))}
 			</div>
 			<section className="edu-result__truth">
-				<span className="edu-kicker">Ground truth revealed</span>
+				<span className="edu-kicker">Correct answer</span>
 				<h3>{result.ground_truth.correct_finding_label}</h3>
-				<p>Centered near the <strong>{result.ground_truth.location}</strong> · reference axial diameter <strong>{result.ground_truth.reference_diameter_mm} mm</strong>.</p>
+				<div className="edu-truth-facts">
+					<div><span>Location</span><strong>{result.ground_truth.location}</strong></div>
+					<div><span>Widest size</span><strong>{result.ground_truth.reference_diameter_mm} mm</strong></div>
+				</div>
+				<h4>What to remember</h4>
 				<ul>{result.ground_truth.teaching_points.map((point) => <li key={point}>{point}</li>)}</ul>
 			</section>
 			<section className="edu-result__feedback">
@@ -181,12 +186,31 @@ function ChallengeResult({ controller }: { controller: SoloChallengeController }
 			<section className="edu-tutor">
 				<div><IconMessageCircle size={18} /><strong>Discuss this case</strong></div>
 				{messages.map((message, index) => <p key={`${message.role}-${index}`} data-role={message.role}>{message.text}</p>)}
+				{sending && (
+					<p className="edu-tutor__pending" data-role="tutor" role="status" aria-label="AI tutor is thinking">
+						<span aria-hidden="true"><i /><i /><i /></span>
+					</p>
+				)}
 				<form onSubmit={(event) => { event.preventDefault(); void send(); }}>
-					<textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="Ask why the measurement or impression was scored this way…" disabled={result.status === "provisional" || sending} />
-					<button disabled={!question.trim() || result.status === "provisional" || sending}><IconSend size={16} /></button>
+					<textarea
+						value={question}
+						onChange={(event) => setQuestion(event.target.value)}
+						placeholder={tutorUnavailable
+							? "AI tutor becomes available after the impression grade is complete."
+							: "Ask why the measurement or impression was scored this way…"}
+						disabled={tutorUnavailable || sending}
+					/>
+					<button
+						type="submit"
+						aria-label="Send question to AI tutor"
+						title="Send question"
+						disabled={!question.trim() || tutorUnavailable || sending}
+					>
+						<IconSend size={16} />
+					</button>
 				</form>
 			</section>
-			<a className="edu-finish" href="/case/35">Exit to case 35</a>
+			<a className="edu-finish" href="/case/35" onClick={controller.clearSession}>Exit to case 35</a>
 		</div>
 	);
 }

@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { emptyDurableState } from "./protocol";
+import { emptyDurableState, liveQuizHostSecretKey } from "./protocol";
 import type { LiveRoomEvent } from "./types";
 import { useLiveRoom } from "./useLiveRoom";
 
@@ -43,12 +43,14 @@ const options = (name = "Tester") => ({
 		geometry_hash: "hash",
 		dimensions: [4, 4, 2],
 		latest_seq: 0,
+		mode: "review" as const,
 	},
 	roomKey: "secret",
 	name,
 	maskUrl: "blob:mask",
 	maskSequence: 0,
 	initialState: emptyDurableState(),
+	initialQuiz: null,
 });
 
 function connect(socket: MockWebSocket) {
@@ -185,6 +187,38 @@ describe("useLiveRoom socket lifecycle", () => {
 		});
 		expect(result.current.pendingEvents).toHaveLength(2);
 		expect(result.current.pendingEvents.every((delivery) => delivery.replayed)).toBe(true);
+		unmount();
+	});
+
+	it("keeps the host credential tab-local and restores private quiz state", () => {
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		const quizOptions = {
+			...options(),
+			metadata: { ...options().metadata, mode: "quiz" as const, quiz_pack_id: "radworld-case-35-v1", quiz_timer_seconds: 30 },
+			initialQuiz: {
+				phase: "lobby" as const, question_index: -1, question_count: 4, current_question: null,
+				deadline_at: null, remaining_seconds: 30, timer_paused: false, response_count: 0,
+				eligible_count: 0, reveal: null, leaderboard: [],
+				consistency_summary: { consistent: 0, inconsistent: 0, incomplete: 0 },
+				round_completed: false, host_connected: false,
+			},
+		};
+		sessionStorage.setItem(liveQuizHostSecretKey(quizOptions.metadata.room_id), "host-secret");
+		const { result, unmount } = renderHook(() => useLiveRoom(quizOptions));
+		const socket = MockWebSocket.instances[0];
+		act(() => socket.emit("open"));
+		const hello = JSON.parse(socket.sent[0]);
+		expect(hello.quiz_host_secret).toBe("host-secret");
+
+		act(() => socket.emit("message", { data: JSON.stringify({
+			type: "room.ready",
+			self: { participant_id: result.current.participantId, name: "Tester", color: "#fff", role: "host" },
+			participants: [], events: [],
+			quiz: { state: { ...quizOptions.initialQuiz, phase: "question_open", question_index: 0 }, own_submissions: { organ: { choice_id: "pancreas", answered_at: "now", response_ms: 200, name: "Tester" } }, eligible: true },
+		}) }));
+		expect(result.current.isHost).toBe(true);
+		expect(result.current.quizEligible).toBe(true);
+		expect(result.current.quizOwnSubmissions.organ.choice_id).toBe("pancreas");
 		unmount();
 	});
 });

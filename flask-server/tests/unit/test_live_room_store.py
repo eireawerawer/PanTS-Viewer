@@ -184,9 +184,10 @@ def test_atomic_sequences_and_event_id_idempotency(room_store):
         results = list(pool.map(lambda index: commit_chat(store, metadata["room_id"], key, index), range(24)))
     sequences = sorted(event["seq"] for event, _ in results)
     assert sequences == list(range(1, 25))
+    original = next(event for event, _ in results if event["event_id"] == "event-3")
     first, duplicate = commit_chat(store, metadata["room_id"], key, 3)
     assert duplicate is True
-    assert first["seq"] == 4
+    assert first["seq"] == original["seq"]
     assert store.get_metadata(metadata["room_id"], key)["latest_seq"] == 24
 
 
@@ -262,7 +263,7 @@ def test_export_contains_required_artifacts(room_store):
         } <= names
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["case_id"] == "35"
-        assert "research use only" in manifest["disclaimer"].lower()
+        assert "research and education use only" in manifest["disclaimer"].lower()
 
 
 def test_restart_replays_event_after_stale_snapshot_files(room_store):

@@ -6,6 +6,7 @@ import {
 	consumeCreatorAutoJoinName,
 	emptyDurableState,
 	liveRoomCreatorAutoJoinKey,
+	liveQuizHostSecretKey,
 	roomKeyFromFragment,
 } from "./protocol";
 import type { LiveRoomEvent } from "./types";
@@ -62,5 +63,11 @@ describe("Live Room protocol helpers", () => {
 		expect(consumeCreatorAutoJoinName(roomId, "Creator")).toBe("Creator");
 		expect(sessionStorage.getItem(key)).toBeNull();
 		expect(consumeCreatorAutoJoinName(roomId, "Creator")).toBeNull();
+	});
+
+	it("uses a separate tab-scoped key for the quiz host credential", () => {
+		const roomId = "00000000-0000-4000-8000-000000000001";
+		expect(liveQuizHostSecretKey(roomId)).toBe(`bodymaps.live-room.${roomId}.quiz-host-secret`);
+		expect(liveQuizHostSecretKey(roomId)).not.toBe(liveRoomCreatorAutoJoinKey(roomId));
 	});
 });

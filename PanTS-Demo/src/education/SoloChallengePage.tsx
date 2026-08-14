@@ -3,6 +3,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { API_BASE } from "../helpers/constants";
 import VisualizationPage from "../routes/VisualizationPage";
+import {
+	clearSoloChallengeSession,
+	readSoloChallengeSession,
+	writeSoloChallengeSession,
+} from "./soloChallengeSession";
 import type { EducationAttempt, EducationChallenge, EducationResult, SoloChallengeController } from "./types";
 import "./soloChallenge.css";
 
@@ -16,16 +21,18 @@ async function responseJson<T>(response: Response): Promise<T> {
 
 export default function SoloChallengePage() {
 	const { challengeId = CHALLENGE_ID } = useParams<{ challengeId: string }>();
+	const [restoredSession] = useState(() => readSoloChallengeSession(challengeId));
 	const [challenge, setChallenge] = useState<EducationChallenge | null>(null);
-	const [attempt, setAttempt] = useState<EducationAttempt | null>(null);
+	const [attempt, setAttempt] = useState<EducationAttempt | null>(restoredSession?.attempt ?? null);
 	const [loading, setLoading] = useState(true);
 	const [starting, setStarting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [now, setNow] = useState(Date.now());
-	const [findingChoice, setFindingChoice] = useState("");
-	const [impression, setImpression] = useState("");
-	const [marker, setMarker] = useState<[number, number, number] | null>(null);
-	const [result, setResult] = useState<EducationResult | null>(null);
+	const [findingChoice, setFindingChoice] = useState(restoredSession?.findingChoice ?? "");
+	const [impression, setImpression] = useState(restoredSession?.impression ?? "");
+	const [marker, setMarker] = useState<[number, number, number] | null>(restoredSession?.marker ?? null);
+	const [measurement, setMeasurement] = useState(restoredSession?.measurement ?? null);
+	const [result, setResult] = useState<EducationResult | null>(restoredSession?.result ?? null);
 	const [submitting, setSubmitting] = useState(false);
 	const [retryingGrade, setRetryingGrade] = useState(false);
 	const [taskDockOpen, setTaskDockOpen] = useState(true);
@@ -44,6 +51,41 @@ export default function SoloChallengePage() {
 		return () => window.clearInterval(timer);
 	}, [attempt, result]);
 
+	useEffect(() => {
+		if (!attempt) return;
+		writeSoloChallengeSession(challengeId, {
+			attempt,
+			findingChoice,
+			impression,
+			marker,
+			measurement,
+			result,
+		});
+	}, [attempt, challengeId, findingChoice, impression, marker, measurement, result]);
+
+	useEffect(() => {
+		if (!attempt || result) return;
+		let cancelled = false;
+		void fetch(`${API_BASE}/api/education/attempts/${attempt.attempt_id}/result`, {
+			headers: { "X-Attempt-Key": attempt.attempt_key },
+		}).then(async (response) => {
+			if (cancelled || response.status === 400) return;
+			if ([401, 404, 410].includes(response.status)) {
+				clearSoloChallengeSession(challengeId);
+				setAttempt(null);
+				setFindingChoice("");
+				setImpression("");
+				setMarker(null);
+				setMeasurement(null);
+				return;
+			}
+			if (response.ok) setResult(await responseJson<EducationResult>(response));
+		}).catch(() => {
+			// A temporary result lookup failure should not discard recoverable local work.
+		});
+		return () => { cancelled = true; };
+	}, [attempt, challengeId, result]);
+
 	const remainingSeconds = useMemo(() => {
 		if (!attempt) return challenge?.time_limit_seconds ?? 300;
 		return Math.max(0, Math.ceil((new Date(attempt.deadline_at).getTime() - now) / 1000));
@@ -54,6 +96,11 @@ export default function SoloChallengePage() {
 		setError(null);
 		try {
 			const response = await fetch(`${API_BASE}/api/education/challenges/${challengeId}/attempts`, { method: "POST" });
+			setFindingChoice("");
+			setImpression("");
+			setMarker(null);
+			setMeasurement(null);
+			setResult(null);
 			setAttempt(await responseJson<EducationAttempt>(response));
 			setNow(Date.now());
 		} catch (caught) {
@@ -105,6 +152,10 @@ export default function SoloChallengePage() {
 		}
 	}, [attempt, result, retryingGrade]);
 
+	const clearSession = useCallback(() => {
+		clearSoloChallengeSession(challengeId);
+	}, [challengeId]);
+
 	if (loading) return <ChallengeState title="Loading challenge…" />;
 	if (!challenge || error && !attempt) return <ChallengeState title="Challenge unavailable" detail={error ?? undefined} />;
 
@@ -143,6 +194,8 @@ export default function SoloChallengePage() {
 		setImpression,
 		marker,
 		setMarker,
+		measurement,
+		setMeasurement,
 		result,
 		submitting,
 		retryingGrade,
@@ -151,6 +204,7 @@ export default function SoloChallengePage() {
 		retryGrade,
 		taskDockOpen,
 		setTaskDockOpen,
+		clearSession,
 	};
 	return <VisualizationPage soloChallenge={controller} />;
 }

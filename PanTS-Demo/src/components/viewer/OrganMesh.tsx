@@ -1,4 +1,5 @@
 import { useGLTF } from "@react-three/drei";
+import type { Color } from "@cornerstonejs/core/types";
 import { useEffect, useMemo } from "react";
 import * as THREE from "three";
 import { segmentation_category_colors } from '../../helpers/constants';
@@ -7,12 +8,13 @@ type OrganMeshProps = {
   organ: OrganMeshInfo;
   visible: boolean;
   opacity?: number;
+  color?: Color;
 };
 
 export const rgbToHex = (r: number, g: number, b: number, _a: number) => 
   '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
 
-export function OrganMesh({ organ, visible, opacity = 1 }: OrganMeshProps) {
+export function OrganMesh({ organ, visible, opacity = 1, color }: OrganMeshProps) {
   const gltf = useGLTF(organ.url);
   const object = useMemo(() => {
     return gltf.scene.clone(true);
@@ -23,7 +25,7 @@ export function OrganMesh({ organ, visible, opacity = 1 }: OrganMeshProps) {
       if (!(child instanceof THREE.Mesh)) return;
       
       child.material = new THREE.MeshStandardMaterial({
-        color: new THREE.Color(rgbToHex(...segmentation_category_colors[organ.id])),
+        color: new THREE.Color(rgbToHex(...(color ?? segmentation_category_colors[organ.id]))),
         roughness: 0.75,
         metalness: 0.0,
         transparent: opacity < 1,
@@ -33,7 +35,7 @@ export function OrganMesh({ organ, visible, opacity = 1 }: OrganMeshProps) {
 
       child.frustumCulled = true;
     });
-  }, [object, organ.id, opacity]);
+  }, [object, organ.id, opacity, color]);
 
   return <primitive object={object} visible={visible} />;
 }

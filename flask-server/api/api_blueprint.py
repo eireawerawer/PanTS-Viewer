@@ -3,7 +3,13 @@ from werkzeug.utils import secure_filename
 from services.nifti_processor import NiftiProcessor
 from services.session_manager import SessionManager, generate_uuid
 from services.auto_segmentor import run_auto_segmentation, cancel_session, cancel_all_inference
-from services.mesh_generation import generate_mesh_manifest, generate_organ_glb_bytes, LABELS as MESH_LABELS
+from services.mesh_generation import (
+    ensure_case_meshes,
+    generate_mesh_manifest,
+    generate_organ_glb_bytes,
+    LABELS as MESH_LABELS,
+    safe_filename,
+)
 from services.inference_job_queue import InferenceJobQueue
 from services.intent_parser import parse_intent
 from services.ollama_client import (
@@ -316,8 +322,10 @@ def get_mesh_manifest(case_id):
 def get_mesh_file(display_id, filename):
     # Both segments come straight from the URL and are joined into a path;
     # apply the same id-guard + secure_filename barrier as the other routes.
-    if not _is_safe_id(display_id):
+    if not _is_safe_id(display_id) or not re.fullmatch(r"PanTS_\d{8}", display_id):
         return jsonify({"error": "Invalid id"}), 400
+    if not re.fullmatch(r"[A-Za-z0-9_-]+\.glb", filename):
+        return jsonify({"error": "Invalid mesh filename"}), 400
     mesh_path = os.path.join(Constants.MESH_PATH, secure_filename(display_id), secure_filename(filename))
     try:
         response = send_file(

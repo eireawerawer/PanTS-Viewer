@@ -5,7 +5,9 @@ import {
 	applyCommittedEvent,
 	chunkMaskRanges,
 	liveRoomApiUrl,
+	liveQuizHostSecretKey,
 	liveRoomWebSocketUrl,
+	loadLiveQuizRevealMask,
 } from "./protocol";
 import type {
 	LiveRoomConnectionState,
@@ -16,6 +18,8 @@ import type {
 	LiveRoomMaskPatch,
 	LiveRoomMetadata,
 	LiveRoomParticipant,
+	LiveQuizState,
+	LiveQuizSubmission,
 } from "./types";
 
 type Options = {
@@ -25,6 +29,7 @@ type Options = {
 	maskUrl: string;
 	maskSequence: number;
 	initialState: LiveRoomDurableState;
+	initialQuiz: LiveQuizState | null;
 };
 
 type IncomingMessage = {
@@ -42,6 +47,15 @@ type IncomingMessage = {
 	reason?: string;
 	message?: string;
 	fatal?: boolean;
+	self?: LiveRoomParticipant;
+	quiz?: LiveQuizState | {
+		state?: LiveQuizState;
+		own_submissions?: Record<string, LiveQuizSubmission>;
+		eligible?: boolean;
+	};
+	submission?: LiveQuizSubmission;
+	question_id?: string;
+	quiz_host_secret?: string;
 };
 
 type TransientMessageType = "presence.update" | "view.update";
@@ -60,7 +74,7 @@ function getParticipantId(roomId: string): string {
 }
 
 export function useLiveRoom(options: Options): LiveRoomController {
-	const { metadata, roomKey, name, maskUrl, maskSequence, initialState } = options;
+	const { metadata, roomKey, name, maskUrl: initialMaskUrl, maskSequence, initialState, initialQuiz } = options;
 	const participantId = useMemo(() => getParticipantId(metadata.room_id), [metadata.room_id]);
 	const [connectionState, setConnectionState] = useState<LiveRoomConnectionState>("connecting");
 	const [participants, setParticipants] = useState<LiveRoomParticipant[]>([]);
@@ -69,6 +83,11 @@ export function useLiveRoom(options: Options): LiveRoomController {
 	const [followingId, setFollowingId] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [undoNotice, setUndoNotice] = useState<string | null>(null);
+	const [maskUrl, setMaskUrl] = useState(initialMaskUrl);
+	const [quiz, setQuiz] = useState<LiveQuizState | null>(initialQuiz);
+	const [quizOwnSubmissions, setQuizOwnSubmissions] = useState<Record<string, LiveQuizSubmission>>({});
+	const [quizEligible, setQuizEligible] = useState(false);
+	const [selfRole, setSelfRole] = useState<LiveRoomParticipant["role"]>(metadata.mode === "quiz" ? "student" : "reviewer");
 	const websocketRef = useRef<WebSocket | null>(null);
 	const lastSeqRef = useRef(maskSequence);
 	const reconnectAttemptRef = useRef(0);
@@ -79,6 +98,12 @@ export function useLiveRoom(options: Options): LiveRoomController {
 	const transientTimerRef = useRef<Partial<Record<TransientMessageType, number>>>({});
 	const undoTimerRef = useRef<number | null>(null);
 	const bufferedEventsRef = useRef(new Map<number, LiveRoomEventDelivery>());
+	const quizRevealMaskRef = useRef<string | null>(null);
+	const hostSecretRef = useRef(sessionStorage.getItem(liveQuizHostSecretKey(metadata.room_id)) || "");
+	const isHost = selfRole === "host";
+	const collaborationLocked = metadata.mode === "quiz" && Boolean(
+		quiz && ["question_open", "question_closed"].includes(quiz.phase)
+	);
 
 	const sendFrame = useCallback((message: Record<string, unknown>): boolean => {
 		const socket = websocketRef.current;
@@ -116,6 +141,8 @@ export function useLiveRoom(options: Options): LiveRoomController {
 
 	const acceptCommittedEvents = useCallback((events: LiveRoomEvent[], replayed: boolean) => {
 		for (const event of events) {
+			const eventQuiz = (event.payload as { quiz?: LiveQuizState }).quiz;
+			if (eventQuiz) setQuiz(eventQuiz);
 			if (event.seq <= lastSeqRef.current) continue;
 			const existing = bufferedEventsRef.current.get(event.seq);
 			bufferedEventsRef.current.set(event.seq, {
@@ -161,6 +188,9 @@ export function useLiveRoom(options: Options): LiveRoomController {
 				participant_id: participantId,
 				name,
 				last_seq: lastSeqRef.current,
+				...(metadata.mode === "quiz" && hostSecretRef.current
+					? { quiz_host_secret: hostSecretRef.current }
+					: {}),
 			}));
 		});
 
@@ -177,7 +207,13 @@ export function useLiveRoom(options: Options): LiveRoomController {
 				setConnectionState("connected");
 				setError(null);
 				if (Array.isArray(message.participants)) setParticipants(message.participants);
+				if (message.self?.role) setSelfRole(message.self.role);
 				if (message.snapshot?.state) setState(message.snapshot.state);
+				if (message.quiz && "state" in message.quiz) {
+					if (message.quiz.state) setQuiz(message.quiz.state);
+					setQuizOwnSubmissions(message.quiz.own_submissions ?? {});
+					setQuizEligible(Boolean(message.quiz.eligible));
+				}
 				const events = Array.isArray(message.events) ? message.events as LiveRoomEvent[] : [];
 				acceptCommittedEvents([...events].sort((a, b) => a.seq - b.seq), true);
 				flushTransient("presence.update");
@@ -188,9 +224,34 @@ export function useLiveRoom(options: Options): LiveRoomController {
 				acceptCommittedEvents([message.event as LiveRoomEvent], false);
 				return;
 			}
+			if (message.type === "quiz.state" && message.quiz && !("state" in message.quiz)) {
+				setQuiz(message.quiz as LiveQuizState);
+				return;
+			}
+			if (message.type === "quiz.personal" && message.quiz && "state" in message.quiz) {
+				if (message.quiz.state) setQuiz(message.quiz.state);
+				setQuizOwnSubmissions(message.quiz.own_submissions ?? {});
+				setQuizEligible(Boolean(message.quiz.eligible));
+				return;
+			}
+			if (message.type === "quiz.answer.accepted" && message.question_id && message.submission) {
+				setQuizOwnSubmissions((current) => ({ ...current, [message.question_id!]: message.submission! }));
+				return;
+			}
+			if (message.type === "quiz.host.promoted") {
+				if (message.quiz_host_secret) {
+					hostSecretRef.current = message.quiz_host_secret;
+					sessionStorage.setItem(liveQuizHostSecretKey(metadata.room_id), message.quiz_host_secret);
+				}
+				if (message.quiz && !("state" in message.quiz)) setQuiz(message.quiz as LiveQuizState);
+				setSelfRole("host");
+				return;
+			}
 			if (message.type === "presence.changed") {
 				if (Array.isArray(message.participants)) {
 					setParticipants(message.participants);
+					const self = message.participants.find((item) => item.participant_id === participantId);
+					if (self?.role) setSelfRole(self.role);
 				} else if (message.participant?.participant_id) {
 					const participant = message.participant;
 					setParticipants((current) => {
@@ -258,7 +319,7 @@ export function useLiveRoom(options: Options): LiveRoomController {
 			if (websocketRef.current !== socket) return;
 			setError("Connection lost. Reconnecting…");
 		});
-	}, [acceptCommittedEvents, flushTransient, metadata.room_id, name, participantId, roomKey]);
+	}, [acceptCommittedEvents, flushTransient, metadata.mode, metadata.room_id, name, participantId, roomKey]);
 
 	useEffect(() => {
 		stoppedRef.current = false;
@@ -280,8 +341,27 @@ export function useLiveRoom(options: Options): LiveRoomController {
 		};
 	}, [connect, sendFrame]);
 
+	useEffect(() => {
+		const shouldReveal = Boolean(quiz?.reveal?.viewer_cue?.show_lesion_overlay);
+		if (!shouldReveal || quizRevealMaskRef.current) return;
+		let active = true;
+		void loadLiveQuizRevealMask(metadata.room_id, roomKey).then((url) => {
+			if (!active) {
+				URL.revokeObjectURL(url);
+				return;
+			}
+			quizRevealMaskRef.current = url;
+			setMaskUrl(url);
+		}).catch((caught) => setError(caught instanceof Error ? caught.message : "Quiz reveal failed"));
+		return () => { active = false; };
+	}, [metadata.room_id, quiz?.reveal?.viewer_cue?.show_lesion_overlay, roomKey]);
+
+	useEffect(() => () => {
+		if (quizRevealMaskRef.current) URL.revokeObjectURL(quizRevealMaskRef.current);
+	}, []);
+
 	const sendDurable = useCallback<LiveRoomController["sendDurable"]>((type, payload, eventId) => {
-		if (connectionState !== "connected") return false;
+		if (connectionState !== "connected" || collaborationLocked) return false;
 		if (type === "mask.patch") {
 			const patch = payload as unknown as LiveRoomMaskPatch;
 			if (!patch.ranges.length) return false;
@@ -300,7 +380,7 @@ export function useLiveRoom(options: Options): LiveRoomController {
 			}));
 		}
 		return sendFrame({ type, event_id: eventId || crypto.randomUUID(), payload });
-	}, [connectionState, sendFrame]);
+	}, [collaborationLocked, connectionState, sendFrame]);
 
 	const sendChat = useCallback((text: string) => sendDurable("chat.add", {
 		message: { id: crypto.randomUUID(), author: name, text },
@@ -359,6 +439,12 @@ export function useLiveRoom(options: Options): LiveRoomController {
 		);
 	}, [metadata.room_id, roomKey]);
 
+	const startQuiz = useCallback(() => connectionState === "connected" && sendFrame({ type: "quiz.start" }), [connectionState, sendFrame]);
+	const answerQuiz = useCallback((choiceId: string) => connectionState === "connected" && sendFrame({ type: "quiz.answer", choice_id: choiceId }), [connectionState, sendFrame]);
+	const closeQuiz = useCallback(() => connectionState === "connected" && sendFrame({ type: "quiz.close" }), [connectionState, sendFrame]);
+	const revealQuiz = useCallback(() => connectionState === "connected" && sendFrame({ type: "quiz.reveal" }), [connectionState, sendFrame]);
+	const advanceQuiz = useCallback(() => connectionState === "connected" && sendFrame({ type: "quiz.advance" }), [connectionState, sendFrame]);
+
 	return {
 		metadata,
 		roomKey,
@@ -373,6 +459,11 @@ export function useLiveRoom(options: Options): LiveRoomController {
 		followingId,
 		error,
 		undoNotice,
+		quiz,
+		quizOwnSubmissions,
+		quizEligible,
+		isHost,
+		collaborationLocked,
 		sendDurable,
 		sendPresence,
 		sendView,
@@ -384,5 +475,10 @@ export function useLiveRoom(options: Options): LiveRoomController {
 		stopFollowing,
 		copyShareLink,
 		downloadExport,
+		startQuiz,
+		answerQuiz,
+		closeQuiz,
+		revealQuiz,
+		advanceQuiz,
 	};
 }

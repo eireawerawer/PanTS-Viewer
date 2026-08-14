@@ -57,6 +57,10 @@ def create_nifti_multi_dict(seg_filenames: list[str], segmentation_path: str):
     return nifti_multi_dict
 
 
+@unittest.skipUnless(
+    os.path.exists("test-sessions/test-045/ct.nii.gz"),
+    "external NIfTI test fixtures are not installed",
+)
 class TestNiftiProcessorFunctions(unittest.TestCase):
 
     def setUp(self):

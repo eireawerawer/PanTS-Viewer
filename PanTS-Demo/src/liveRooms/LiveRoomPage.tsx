@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import VisualizationPage from "../routes/VisualizationPage";
 import { bootstrapLiveRoom, consumeCreatorAutoJoinName, roomKeyFromFragment } from "./protocol";
-import type { LiveRoomDurableState, LiveRoomMetadata } from "./types";
+import type { LiveQuizState, LiveRoomDurableState, LiveRoomMetadata } from "./types";
 import { useLiveRoom } from "./useLiveRoom";
 import "./liveRooms.css";
 
@@ -12,6 +12,7 @@ type Bootstrap = {
 	state: LiveRoomDurableState;
 	maskUrl: string;
 	maskSequence: number;
+	quiz: LiveQuizState | null;
 };
 
 function JoinDialog({ initialName, onJoin }: { initialName: string; onJoin: (name: string) => void }) {
@@ -24,8 +25,8 @@ function JoinDialog({ initialName, onJoin }: { initialName: string; onJoin: (nam
 			}}>
 				<div className="lr-join__mark"><IconUsersGroup size={24} /></div>
 				<span className="lr-eyebrow">BodyMaps Live Room</span>
-				<h1>Join scan review</h1>
-				<p>Everyone in room can navigate, annotate, edit masks, write notes, and chat.</p>
+				<h1>Join Live Room</h1>
+				<p>Enter a display name to join synchronized scan review or a private-answer quiz.</p>
 				<label className="lr-field">
 					<span>Display name</span>
 					<input autoFocus maxLength={32} value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" />
@@ -62,6 +63,7 @@ function ConnectedRoom({ bootstrap, roomKey, name }: { bootstrap: Bootstrap; roo
 		maskUrl: bootstrap.maskUrl,
 		maskSequence: bootstrap.maskSequence,
 		initialState: bootstrap.state,
+		initialQuiz: bootstrap.quiz,
 	});
 	return <VisualizationPage liveRoom={controller} />;
 }

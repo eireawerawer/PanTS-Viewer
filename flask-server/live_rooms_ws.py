@@ -31,6 +31,7 @@ from services.live_room_store import (
     RoomExpired,
     RoomNotFound,
     isoformat,
+    parse_time,
     utcnow,
 )
 
@@ -46,6 +47,7 @@ MAX_FRAME_BYTES = 512 * 1024
 MAX_MASK_CHUNKS = 256
 MAX_MASK_CHUNK_RANGES = 50_000
 MASK_CHUNK_TTL_SECONDS = 60
+HOST_PROMOTION_GRACE_SECONDS = 15
 ROOM_PATH = re.compile(r"^/ws/live-rooms/([0-9a-f-]{36})$")
 
 
@@ -57,6 +59,9 @@ class Peer:
     participant_id: str
     name: str
     color: str
+    role: str = "student"
+    host_secret: str = ""
+    connected_at: float = field(default_factory=time.monotonic)
     presence: dict[str, Any] = field(default_factory=dict)
     limits: dict[str, deque[float]] = field(default_factory=lambda: defaultdict(deque))
     mask_chunks: dict[str, dict[int, list[dict[str, int]]]] = field(default_factory=dict)
@@ -77,6 +82,7 @@ class Peer:
             "participant_id": self.participant_id,
             "name": self.name,
             "color": self.color,
+            "role": self.role,
             **self.presence,
         }
 
@@ -99,6 +105,8 @@ class LiveRoomWebSocketService:
         self.store = store
         self.rooms: dict[str, dict[str, Peer]] = defaultdict(dict)
         self.lock = asyncio.Lock()
+        self.deadline_tasks: dict[str, asyncio.Task] = {}
+        self.promotion_tasks: dict[str, asyncio.Task] = {}
 
     @staticmethod
     async def send_json(websocket: ServerConnection, message: dict[str, Any]) -> None:
@@ -126,6 +134,110 @@ class LiveRoomWebSocketService:
         encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
         await asyncio.gather(*(peer.websocket.send(encoded) for peer in peers), return_exceptions=True)
 
+    async def _broadcast_quiz_event(self, room_id: str, event: dict[str, Any]) -> None:
+        await self.broadcast(room_id, {"type": "event.committed", "event": event, "duplicate": False})
+
+    async def _connected_students(self, room_id: str) -> list[dict[str, str]]:
+        async with self.lock:
+            return [
+                {"participant_id": peer.participant_id, "name": peer.name}
+                for peer in self.rooms.get(room_id, {}).values()
+                if peer.role != "host"
+            ]
+
+    async def _connected_student_ids(self, room_id: str) -> set[str]:
+        return {item["participant_id"] for item in await self._connected_students(room_id)}
+
+    async def _send_quiz_personal(self, room_id: str) -> None:
+        async with self.lock:
+            peers = list(self.rooms.get(room_id, {}).values())
+        for peer in peers:
+            try:
+                context = await asyncio.to_thread(
+                    self.store.quiz_context,
+                    room_id,
+                    peer.room_key,
+                    peer.participant_id,
+                )
+                if context:
+                    await self.send_json(peer.websocket, {"type": "quiz.personal", "quiz": context})
+            except (ConnectionClosed, LiveRoomError):
+                continue
+
+    def _cancel_deadline(self, room_id: str) -> None:
+        task = self.deadline_tasks.pop(room_id, None)
+        if task and task is not asyncio.current_task():
+            task.cancel()
+
+    def _schedule_deadline(self, room_id: str, quiz: dict[str, Any]) -> None:
+        self._cancel_deadline(room_id)
+        deadline = quiz.get("deadline_at")
+        if quiz.get("phase") != "question_open" or quiz.get("timer_paused") or not deadline:
+            return
+        delay = max(0.0, (parse_time(str(deadline)) - utcnow()).total_seconds())
+        self.deadline_tasks[room_id] = asyncio.create_task(self._deadline_worker(room_id, delay))
+
+    async def _deadline_worker(self, room_id: str, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            result = await asyncio.to_thread(self.store.close_quiz_if_due, room_id)
+            if result:
+                quiz, event = result
+                await self._broadcast_quiz_event(room_id, event)
+                await self.broadcast(room_id, {"type": "quiz.state", "quiz": quiz})
+        except asyncio.CancelledError:
+            return
+        except LiveRoomError as exc:
+            logger.warning("Quiz deadline failed room=%s error=%s", room_id, exc)
+        finally:
+            if self.deadline_tasks.get(room_id) is asyncio.current_task():
+                self.deadline_tasks.pop(room_id, None)
+
+    def _schedule_promotion(self, room_id: str, delay: float = HOST_PROMOTION_GRACE_SECONDS) -> None:
+        existing = self.promotion_tasks.get(room_id)
+        if existing and not existing.done():
+            return
+        self.promotion_tasks[room_id] = asyncio.create_task(self._promotion_worker(room_id, delay))
+
+    async def _promotion_worker(self, room_id: str, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            async with self.lock:
+                peers = list(self.rooms.get(room_id, {}).values())
+                if any(peer.role == "host" for peer in peers):
+                    return
+                candidate = min(peers, key=lambda peer: peer.connected_at, default=None)
+            if not candidate:
+                return
+            secret, quiz, event = await asyncio.to_thread(
+                self.store.promote_quiz_host, room_id, candidate.participant_id
+            )
+            candidate.role = "host"
+            candidate.host_secret = secret
+            await self.send_json(candidate.websocket, {
+                "type": "quiz.host.promoted",
+                "quiz_host_secret": secret,
+                "quiz": quiz,
+            })
+            async with self.lock:
+                participants = [peer.public() for peer in self.rooms.get(room_id, {}).values()]
+            await self.broadcast(room_id, {
+                "type": "presence.changed",
+                "change": "host_promoted",
+                "participant": candidate.public(),
+                "participants": participants,
+            })
+            await self._broadcast_quiz_event(room_id, event)
+            await self.broadcast(room_id, {"type": "quiz.state", "quiz": quiz})
+            self._schedule_deadline(room_id, quiz)
+        except asyncio.CancelledError:
+            return
+        except LiveRoomError as exc:
+            logger.warning("Quiz host promotion failed room=%s error=%s", room_id, exc)
+        finally:
+            if self.promotion_tasks.get(room_id) is asyncio.current_task():
+                self.promotion_tasks.pop(room_id, None)
+
     async def join(self, websocket: ServerConnection, room_id: str, hello: dict[str, Any]) -> Peer:
         if hello.get("type") != "hello" or hello.get("protocol") != 1:
             raise LiveRoomError("First frame must be a protocol 1 hello")
@@ -139,6 +251,24 @@ class LiveRoomWebSocketService:
         if not name:
             raise LiveRoomError("Display name is required")
         metadata = await asyncio.to_thread(self.store.verify_key, room_id, room_key)
+        role = "reviewer" if metadata.get("mode", "review") == "review" else "student"
+        host_secret = str(hello.get("quiz_host_secret", ""))
+        host_event: dict[str, Any] | None = None
+        if metadata.get("mode") == "quiz" and host_secret:
+            quiz_state, host_event = await asyncio.to_thread(
+                self.store.connect_quiz_host,
+                room_id,
+                room_key,
+                host_secret,
+                participant_id,
+            )
+            role = "host"
+            metadata = await asyncio.to_thread(self.store.verify_key, room_id, room_key)
+            promotion = self.promotion_tasks.pop(room_id, None)
+            if promotion:
+                promotion.cancel()
+        else:
+            quiz_state = None
 
         existing: Peer | None = None
         async with self.lock:
@@ -151,7 +281,17 @@ class LiveRoomWebSocketService:
                 raise error
             used_colors = {peer.color for peer in self.rooms[room_id].values() if peer.participant_id != participant_id}
             color = next((value for value in self.COLORS if value not in used_colors), self.COLORS[active_count % len(self.COLORS)])
-            peer = Peer(websocket, room_id, room_key, participant_id, name, color)
+            peer = Peer(
+                websocket,
+                room_id,
+                room_key,
+                participant_id,
+                name,
+                color,
+                role=role,
+                host_secret=host_secret if role == "host" else "",
+                connected_at=existing.connected_at if existing else time.monotonic(),
+            )
             self.rooms[room_id][participant_id] = peer
             participants = [item.public() for item in self.rooms[room_id].values()]
 
@@ -173,12 +313,34 @@ class LiveRoomWebSocketService:
         }
         if last_seq == 0:
             ready["snapshot"] = await asyncio.to_thread(self.store.get_snapshot, room_id, room_key)
+        if metadata.get("mode") == "quiz":
+            context = await asyncio.to_thread(self.store.quiz_context, room_id, room_key, participant_id)
+            ready["quiz"] = context
+            if quiz_state is None and context:
+                quiz_state = context["state"]
         await self.send_json(websocket, ready)
         await self.broadcast(
             room_id,
             {"type": "presence.changed", "change": "joined", "participant": peer.public(), "participants": participants},
             exclude=participant_id,
         )
+        if host_event:
+            await self.broadcast(
+                room_id,
+                {"type": "event.committed", "event": host_event, "duplicate": False},
+                exclude=participant_id,
+            )
+        if quiz_state:
+            self._schedule_deadline(room_id, quiz_state)
+            # A participant may arrive before the creator opens the room. Host
+            # promotion is only recovery for a host that previously claimed
+            # the room, not a way to seize an unclaimed creator credential.
+            if (
+                not quiz_state.get("host_connected")
+                and role != "host"
+                and metadata.get("quiz_host_participant_id") is not None
+            ):
+                self._schedule_promotion(room_id, 0)
         logger.info("participant joined room=%s participant=%s count=%d", room_id, participant_id, len(participants))
         return peer
 
@@ -202,6 +364,32 @@ class LiveRoomWebSocketService:
                 "participants": participants,
             },
         )
+        if peer.role == "host":
+            result = await asyncio.to_thread(self.store.disconnect_quiz_host, peer.room_id, peer.participant_id)
+            if result:
+                quiz, event = result
+                self._cancel_deadline(peer.room_id)
+                await self._broadcast_quiz_event(peer.room_id, event)
+                await self.broadcast(peer.room_id, {"type": "quiz.state", "quiz": quiz})
+                self._schedule_promotion(peer.room_id)
+        connected_students = {
+            item.participant_id
+            for item in self.rooms.get(peer.room_id, {}).values()
+            if item.role != "host"
+        }
+        try:
+            closed = await asyncio.to_thread(
+                self.store.close_quiz_if_all_answered,
+                peer.room_id,
+                connected_students,
+            )
+        except (RoomNotFound, RoomExpired):
+            closed = None
+        if closed:
+            quiz, event = closed
+            self._cancel_deadline(peer.room_id)
+            await self._broadcast_quiz_event(peer.room_id, event)
+            await self.broadcast(peer.room_id, {"type": "quiz.state", "quiz": quiz})
 
     async def commit(self, peer: Peer, message: dict[str, Any]) -> None:
         event_type = str(message.get("type", ""))
@@ -277,8 +465,78 @@ class LiveRoomWebSocketService:
             {"type": "event.committed", "event": event, "duplicate": duplicate},
         )
 
+    async def handle_quiz(self, peer: Peer, message: dict[str, Any]) -> None:
+        event_type = str(message.get("type", ""))
+        if not peer.allow("quiz", 120, 60):
+            await self.error(peer.websocket, "Quiz command rate limit exceeded")
+            return
+        event: dict[str, Any] | None = None
+        if event_type == "quiz.start":
+            roster = await self._connected_students(peer.room_id)
+            quiz, event = await asyncio.to_thread(
+                self.store.start_quiz,
+                peer.room_id,
+                peer.room_key,
+                peer.host_secret,
+                peer.participant_id,
+                roster,
+            )
+        elif event_type == "quiz.answer":
+            connected = await self._connected_student_ids(peer.room_id)
+            quiz, submission, event = await asyncio.to_thread(
+                self.store.answer_quiz,
+                peer.room_id,
+                peer.room_key,
+                peer.participant_id,
+                peer.name,
+                str(message.get("choice_id", "")),
+                connected,
+            )
+            await self.send_json(peer.websocket, {
+                "type": "quiz.answer.accepted",
+                "question_id": (quiz.get("current_question") or {}).get("id"),
+                "submission": submission,
+            })
+        elif event_type == "quiz.close":
+            quiz, event = await asyncio.to_thread(
+                self.store.close_quiz_question,
+                peer.room_id,
+                peer.room_key,
+                peer.host_secret,
+                peer.participant_id,
+            )
+        elif event_type == "quiz.reveal":
+            quiz, event = await asyncio.to_thread(
+                self.store.reveal_quiz_question,
+                peer.room_id,
+                peer.room_key,
+                peer.host_secret,
+                peer.participant_id,
+            )
+        elif event_type == "quiz.advance":
+            roster = await self._connected_students(peer.room_id)
+            quiz, event = await asyncio.to_thread(
+                self.store.advance_quiz,
+                peer.room_id,
+                peer.room_key,
+                peer.host_secret,
+                peer.participant_id,
+                roster,
+            )
+        else:
+            raise LiveRoomError("Unknown quiz command")
+
+        if event:
+            await self._broadcast_quiz_event(peer.room_id, event)
+        await self.broadcast(peer.room_id, {"type": "quiz.state", "quiz": quiz})
+        await self._send_quiz_personal(peer.room_id)
+        self._schedule_deadline(peer.room_id, quiz)
+
     async def handle_message(self, peer: Peer, message: dict[str, Any]) -> None:
         event_type = str(message.get("type", ""))
+        if event_type in {"quiz.start", "quiz.answer", "quiz.close", "quiz.reveal", "quiz.advance"}:
+            await self.handle_quiz(peer, message)
+            return
         if event_type in DURABLE_TYPES:
             await self.commit(peer, message)
             return

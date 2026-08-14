@@ -11,6 +11,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import type { CinePane } from "../helpers/CornerstoneNifti2";
 import type { LiveRoomController } from "./types";
+import LiveQuizDock from "./LiveQuizDock";
 
 function formatCountdown(expiresAt: string, now: number): string {
 	const remaining = Math.max(0, new Date(expiresAt).getTime() - now);
@@ -43,9 +44,9 @@ export function LiveRoomHeader({ room, dockOpen, onToggleDock }: {
 		<header className="lr-header">
 			<div className="lr-header__identity">
 				<span className="lr-live-dot" data-state={room.connectionState} />
-				<div><strong>Live Room</strong><span>Case {room.metadata.case_id} · {room.metadata.resolution}</span></div>
+				<div><strong>{room.metadata.mode === "quiz" ? "Live Quiz" : "Live Room"}</strong><span>Case {room.metadata.case_id} · {room.metadata.resolution}</span></div>
 			</div>
-			<div className="lr-header__warning">Anyone with link can edit</div>
+			<div className="lr-header__warning">{room.metadata.mode === "quiz" ? "Private answers · reveal together" : "Anyone with link can edit"}</div>
 			<div className="lr-header__actions">
 				<span className="lr-status" data-state={room.connectionState}>{statusLabel}</span>
 				<span className="lr-countdown" title="Room deletes automatically at expiration">{formatCountdown(room.metadata.expires_at, now)}</span>
@@ -65,7 +66,19 @@ export function LiveRoomHeader({ room, dockOpen, onToggleDock }: {
 	);
 }
 
-export function LiveRoomDock({ room, crosshair, activePlane, onClose }: {
+export function LiveRoomDock(props: {
+	room: LiveRoomController;
+	crosshair: [number, number, number] | null;
+	activePlane: CinePane;
+	onClose: () => void;
+}) {
+	if (props.room.metadata.mode === "quiz") {
+		return <LiveQuizDock room={props.room} onClose={props.onClose} />;
+	}
+	return <ReviewLiveRoomDock {...props} />;
+}
+
+function ReviewLiveRoomDock({ room, crosshair, activePlane, onClose }: {
 	room: LiveRoomController;
 	crosshair: [number, number, number] | null;
 	activePlane: CinePane;

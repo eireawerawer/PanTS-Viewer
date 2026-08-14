@@ -5,11 +5,13 @@ from __future__ import annotations
 import threading
 import time
 from collections import defaultdict, deque
+from io import BytesIO
 
 from flask import Blueprint, jsonify, request, send_file
 
 from constants import Constants
 from services.live_room_store import LiveRoomError, LiveRoomStore
+from services.live_quiz import QUIZ_PACK_ID
 
 
 live_rooms_blueprint = Blueprint("live_rooms", __name__)
@@ -72,10 +74,43 @@ def create_live_room():
     body = request.get_json(silent=True) or {}
     case_id = str(body.get("case_id", ""))
     resolution = str(body.get("resolution", "low")).lower()
-    metadata, room_key = get_live_room_store().create_room(case_id, resolution)
+    mode = str(body.get("mode", "review")).lower()
+    host_secret = None
+    if mode == "quiz":
+        timer = body.get("quiz_timer_seconds", 30)
+        if timer == "untimed":
+            timer = None
+        if timer is not None:
+            try:
+                timer = int(timer)
+            except (TypeError, ValueError) as exc:
+                raise LiveRoomError("Quiz timer must be untimed, 15, 30, or 60 seconds") from exc
+        playlist_id = body.get("quiz_playlist_id")
+        pack_id = body.get("quiz_pack_id")
+        if not playlist_id and not pack_id:
+            pack_id = QUIZ_PACK_ID
+        excluded = body.get("quiz_exclude_pack_ids") or []
+        if not isinstance(excluded, list) or not all(isinstance(item, str) for item in excluded):
+            raise LiveRoomError("quiz_exclude_pack_ids must be a string list")
+        metadata, room_key, host_secret = get_live_room_store().create_quiz_room(
+            case_id,
+            resolution,
+            quiz_pack_id=str(pack_id or QUIZ_PACK_ID),
+            quiz_playlist_id=str(playlist_id) if playlist_id else None,
+            quiz_playlist_seed=str(body.get("quiz_playlist_seed", "default")),
+            quiz_exclude_pack_ids=excluded,
+            quiz_timer_seconds=timer,
+        )
+    else:
+        if mode != "review":
+            raise LiveRoomError("mode must be 'review' or 'quiz'")
+        metadata, room_key = get_live_room_store().create_room(case_id, resolution)
     base = (Constants.BASE_PATH or "").rstrip("/")
     share_url = f"{base}/live/{metadata['room_id']}#{room_key}"
-    return jsonify({**metadata, "room_key": room_key, "share_url": share_url}), 201
+    response = {**metadata, "room_key": room_key, "share_url": share_url}
+    if host_secret:
+        response["quiz_host_secret"] = host_secret
+    return jsonify(response), 201
 
 
 @live_rooms_blueprint.get("/live-rooms/health")
@@ -129,3 +164,14 @@ def live_room_report(room_id: str):
         conditional=False,
     )
 
+
+@live_rooms_blueprint.get("/live-rooms/<room_id>/quiz/reveal-segmentation.nii.gz")
+def live_quiz_reveal_segmentation(room_id: str):
+    payload = get_live_room_store().get_quiz_reveal_segmentation(room_id, _room_key())
+    return send_file(
+        BytesIO(payload),
+        mimetype="application/gzip",
+        as_attachment=False,
+        download_name=f"{room_id}-quiz-reveal.nii.gz",
+        conditional=False,
+    )

@@ -119,7 +119,7 @@ type ReportMeasurements = {
 function getReportMeasurements(organ: string, comments: string): ReportMeasurements {
   const section = getReportSection(organ, comments);
   const volumeMatch = section?.match(/volume:\s*([\d.]+)\s*cc/i);
-  const huMatch = section?.match(/Mean HU value:\s*([\d.]+)(?:\s*\+\/\-\s*([\d.]+))?/i);
+  const huMatch = section?.match(/Mean HU value:\s*([\d.]+)(?:\s*\+\/-\s*([\d.]+))?/i);
   const sizeMatch = section?.match(/Size:\s*([^().]+?)\s*cm/i);
 
   return {
@@ -430,7 +430,9 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
       });
       const j = await r.json();
       setPlain2(j.plain_language || []);
-    } catch {} finally { setPLoad(false); }
+    } catch {
+      // Plain-language text is optional; retain the original report on failure.
+    } finally { setPLoad(false); }
   }, [data, plain2]);
 
   useEffect(() => { if (data) fetchPlain(); }, [data]);
