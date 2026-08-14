@@ -266,12 +266,18 @@ def get_image_preview(clabel_id):
     path = os.path.join(Constants.PANTS_PATH, "profile_only", get_panTS_id(secure_filename(clabel_id)), "profile.jpg")
     if not os.path.exists(path):
         return jsonify({"error": f"File not found: {path} "}), 404
-    return send_file(
+    resp = send_file(
         path,
-        mimetype="image/jpg",   
+        mimetype="image/jpg",
         as_attachment=False,
-        download_name=f"{clabel_id}_slice.jpg"
+        download_name=f"{clabel_id}_slice.jpg",
+        max_age=31536000,
     )
+    # Profile thumbnails are content-stable (regenerated only by an offline batch),
+    # so let the browser cache them hard — repeat visits / shuffle / back-nav then
+    # render instantly with zero network instead of revalidating every card.
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
 
 
 # ---------------------------------------------------------------------------

@@ -47,7 +47,8 @@ export default function CaseGrid({
     }
     setRevealAll(false);
     // Safety cap: never let one slow/stuck thumbnail hold the whole grid hostage.
-    const t = setTimeout(() => setRevealAll(true), 6000);
+    // Kept short since thumbnails are small, eager-loaded, and immutably cached.
+    const t = setTimeout(() => setRevealAll(true), 2500);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idsKey]);
