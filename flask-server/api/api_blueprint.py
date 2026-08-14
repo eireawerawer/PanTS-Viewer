@@ -2216,6 +2216,35 @@ def _all_dataset_df() -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if len(frames) > 1 else DF
 
 
+from functools import lru_cache as _lru_cache
+
+
+@_lru_cache(maxsize=1)
+def _all_dataset_prepared() -> pd.DataFrame:
+    """Concat + sort-cols for the full (scope=all) dataset. DF/DF_CV are loaded once
+    at startup, so this is deterministic — cache it. /api/random was rebuilding it on
+    every shuffle. Callers must .copy() before mutating (the cached frame is shared)."""
+    frames = [DF]
+    if DF_CV is not None:
+        frames.append(DF_CV)
+    base = pd.concat(frames, ignore_index=True) if len(frames) > 1 else DF.copy()
+    return ensure_sort_cols(base)
+
+
+@_lru_cache(maxsize=8)
+def _ranked_all(n: int) -> pd.DataFrame:
+    """Quality-ranked full scope=all frame for pick-size n. This is the expensive part
+    of /api/random for scope=all (rank over the whole ~32k-row library) and it's
+    deterministic for a given n, so cache it. The caller applies recent-exclusion and
+    the rotating offset on top per request. Reproduces the route's df_full selection."""
+    base = _all_dataset_prepared().copy()
+    complete = base[base["__complete"]] if "__complete" in base.columns else base
+    base_cap = _has_tumor_capacity(base, n)
+    complete_cap = _has_tumor_capacity(complete, n)
+    df_full = complete if (len(complete) >= n and (not base_cap or complete_cap)) else base
+    return rank_quality_results(df_full, balance_sex=True, balance_age=True)
+
+
 def _has_both_tumor_cohorts(df: pd.DataFrame) -> bool:
     if "__tumor01" not in df.columns:
         return False
@@ -2265,54 +2294,62 @@ def api_random_topk_rotate_norand():
     """Select quality-ranked, tumor-balanced recommendations in random order."""
     try:
         scope = (request.args.get("scope", "filtered") or "filtered").strip().lower()
-        base_df = (
-            _all_dataset_df().copy()
-            if scope == "all"
-            else apply_filters(select_dataset_df()).copy()
-        )
-        base_df = ensure_sort_cols(base_df)
-
         try:
             n = int(request.args.get("n") or 3)
         except Exception:
             n = 3
-        n = max(1, min(n, len(base_df))) if len(base_df) else 1
-
-        complete_df = (
-            base_df[base_df["__complete"]]
-            if "__complete" in base_df.columns
-            else base_df
-        )
-        base_can_balance = _has_tumor_capacity(base_df, n)
-        complete_can_balance = _has_tumor_capacity(complete_df, n)
-        df_full = (
-            complete_df
-            if len(complete_df) >= n and (not base_can_balance or complete_can_balance)
-            else base_df
-        )
 
         recent_ids = [
             value.strip()
             for value in (request.args.get("recent") or "").split(",")
             if value.strip()
         ]
-        df_full, used_recent = _exclude_recent_cases(df_full, recent_ids, n)
 
-        has_sex_filter = scope != "all" and any(
-            key in request.args for key in ("sex", "sex[]", "sex_is_null")
-        )
-        has_age_filter = scope != "all" and any(
-            key in request.args
-            for key in ("age_bin", "age_bin[]", "age_from", "age_to", "age_is_null")
-        )
-        has_tumor_filter = scope != "all" and any(
-            key in request.args for key in ("tumor", "tumor_is_null")
-        )
-        df = rank_quality_results(
-            df_full,
-            balance_sex=not has_sex_filter,
-            balance_age=not has_age_filter,
-        )
+        if scope == "all":
+            # Cached fast path: the quality-ranked full library is deterministic for a
+            # given n, so rank once (cached) and reuse it. recent-exclusion and the
+            # rotating offset are applied per request on top. This removes the
+            # per-shuffle concat + sort + full re-rank of ~32k rows that made it slow.
+            total_len = len(_all_dataset_prepared())
+            n = max(1, min(n, total_len)) if total_len else 1
+            df = _ranked_all(n)
+            df, used_recent = _exclude_recent_cases(df, recent_ids, n)
+            # Defensive copy: downstream (select_balanced_tumor_results / iloc) must not
+            # mutate the shared cached frame. A ~32k-row copy is negligible next to the
+            # ranking we just avoided recomputing.
+            df = df.copy()
+            has_tumor_filter = False
+        else:
+            base_df = ensure_sort_cols(apply_filters(select_dataset_df()).copy())
+            n = max(1, min(n, len(base_df))) if len(base_df) else 1
+            complete_df = (
+                base_df[base_df["__complete"]]
+                if "__complete" in base_df.columns
+                else base_df
+            )
+            base_can_balance = _has_tumor_capacity(base_df, n)
+            complete_can_balance = _has_tumor_capacity(complete_df, n)
+            df_full = (
+                complete_df
+                if len(complete_df) >= n and (not base_can_balance or complete_can_balance)
+                else base_df
+            )
+            df_full, used_recent = _exclude_recent_cases(df_full, recent_ids, n)
+            has_sex_filter = any(
+                key in request.args for key in ("sex", "sex[]", "sex_is_null")
+            )
+            has_age_filter = any(
+                key in request.args
+                for key in ("age_bin", "age_bin[]", "age_from", "age_to", "age_is_null")
+            )
+            has_tumor_filter = any(
+                key in request.args for key in ("tumor", "tumor_is_null")
+            )
+            df = rank_quality_results(
+                df_full,
+                balance_sex=not has_sex_filter,
+                balance_age=not has_age_filter,
+            )
         if len(df) == 0:
             return jsonify({"items": [], "total": 0, "meta": {"k": 0, "used_recent": 0}}), 200
 
