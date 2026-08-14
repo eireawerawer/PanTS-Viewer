@@ -292,7 +292,6 @@ export function useLiveRoom(options: Options): LiveRoomController {
 			if (message.type === "quiz.host.promoted") {
 				if (message.quiz_host_secret) {
 					hostSecretRef.current = message.quiz_host_secret;
-					sessionStorage.setItem(liveQuizHostSecretKey(metadata.room_id), message.quiz_host_secret);
 				}
 				if (message.quiz && !("state" in message.quiz)) setQuiz(message.quiz as LiveQuizState);
 				setSelfRole("host");
