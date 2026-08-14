@@ -5,7 +5,8 @@ import SiteFooter from "../../components/SiteFooter";
 import styles from "./LandingPage.module.css";
 
 const TARGETS = {
-  ctVolumes: 36_390,
+  // Fallback only (the live count is fetched from /api/search?dataset=all).
+  ctVolumes: 32_768,
   medicalCenters: 145,
   annotatedStructures: 993_000,
   organClasses: segmentation_categories.length,
@@ -37,7 +38,7 @@ export default function LandingPage() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_BASE}/api/search?per_page=1`)
+    fetch(`${API_BASE}/api/search?per_page=1&dataset=all`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!cancelled && d && typeof d.total === "number") setCtVolumes(d.total);
