@@ -32,6 +32,8 @@ export interface ChatAttachment {
   label?: string;
   /** Where the attachment came from — screenshots are added/removed as a set. */
   source?: "screenshot" | "upload";
+  /** Extracted text of an attached document (e.g. a PDF), sent to the model. */
+  textContent?: string;
 }
 
 export interface ChatMessage {

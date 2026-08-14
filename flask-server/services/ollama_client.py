@@ -325,6 +325,54 @@ def chat_json(
         return _extract_json_object(repaired_content)
 
 
+def chat_with_tools(
+    *,
+    model: str | None,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    timeout: float | None = None,
+    temperature: float = 0.1,
+) -> dict[str, Any]:
+    """One non-streaming /api/chat round with native Ollama tool calling.
+
+    Returns the raw assistant message dict: {"content": str, "tool_calls":
+    [...]}. Callers run the agent loop (execute tools, append results, call
+    again). Raises OllamaUnavailable on transport errors and on servers too
+    old to know the "tools" field, so callers can fall back to the plain
+    single-shot path. llama3.1 and qwen3 both support tools; the caller is
+    responsible for appending "/no_think" to the user message for qwen3.
+    """
+    selected_model = str(model or DEFAULT_OLLAMA_MODEL).strip()
+
+    if not selected_model:
+        raise ValueError("An Ollama model name is required.")
+    if not messages:
+        raise ValueError("At least one message is required.")
+
+    payload: dict[str, Any] = {
+        "model": selected_model,
+        "stream": False,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "messages": messages,
+        "tools": tools,
+        "options": {
+            "temperature": temperature,
+            "num_ctx": OLLAMA_NUM_CTX,
+        },
+        "think": OLLAMA_THINK,
+    }
+
+    data = _post_chat(
+        payload,
+        timeout if timeout is not None else OLLAMA_CHAT_TIMEOUT,
+    )
+
+    message = data.get("message")
+    if not isinstance(message, dict):
+        raise OllamaInvalidResponse("Ollama returned no message for the tool call.")
+    return message
+
+
 def chat_stream(
     *,
     model: str | None,
