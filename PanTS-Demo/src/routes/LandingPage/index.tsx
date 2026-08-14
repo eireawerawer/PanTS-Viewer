@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { segmentation_categories } from "../../helpers/constants";
+import { segmentation_categories, API_BASE } from "../../helpers/constants";
 import Header from "../../components/Header";
 import SiteFooter from "../../components/SiteFooter";
 import styles from "./LandingPage.module.css";
@@ -31,6 +31,24 @@ const easeOutCubic = (progress: number): number => {
 
 export default function LandingPage() {
   const [animationProgress, setAnimationProgress] = useState(0);
+  // Pull the live CT-volume count so the hero stat reflects the real library size
+  // (PanTS + CancerVerse) instead of a hardcoded figure. Falls back to TARGETS.
+  const [ctVolumes, setCtVolumes] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/search?per_page=1`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d && typeof d.total === "number") setCtVolumes(d.total);
+      })
+      .catch(() => {
+        /* keep the fallback target on any failure */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const prefersReducedMotion = window.matchMedia(
@@ -66,7 +84,9 @@ export default function LandingPage() {
 
   const stats = [
     {
-      value: getAnimatedValue(TARGETS.ctVolumes).toLocaleString("en-US"),
+      value: getAnimatedValue(ctVolumes ?? TARGETS.ctVolumes).toLocaleString(
+        "en-US",
+      ),
       label: "CT Volumes",
     },
     {

@@ -13,6 +13,11 @@ type Props = {
 	onToggleSave?: () => void;
 	compareSelected?: boolean;
 	onToggleCompare?: () => void;
+	// When the grid coordinates a synchronized reveal, it holds every card hidden
+	// (spinner) until the whole batch has settled, then flips `reveal` true for all
+	// of them at once. `onSettled` fires once, when this card's image loads or fails.
+	reveal?: boolean;
+	onSettled?: () => void;
 };
 
 export default function Preview({
@@ -22,11 +27,22 @@ export default function Preview({
 	onToggleSave,
 	compareSelected = false,
 	onToggleCompare,
+	reveal = true,
+	onSettled,
 }: Props) {
 	const navigate = useNavigate();
 	const [imgLoaded, setImgLoaded] = useState(false);
 	const [imgError, setImgError] = useState(false);
 	const [hovered, setHovered] = useState(false);
+	// Report "settled" exactly once (load or terminal error) so the grid can count
+	// down to an all-at-once reveal without a broken thumbnail double-counting.
+	const settledRef = useRef(false);
+	const settle = () => {
+		if (!settledRef.current) {
+			settledRef.current = true;
+			onSettled?.();
+		}
+	};
 	// Warm the low-res CT only after a short hover dwell, so skimming across the grid
 	// doesn't fire a fetch per card. Cleared on mouse-leave.
 	const prefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -55,6 +71,7 @@ export default function Preview({
 			setThumbUrl(proxyThumbUrl); // local failed — retry via the same-origin HF proxy
 		} else {
 			setImgError(true); // both sources failed
+			settle(); // count it as settled so one dead thumbnail can't stall the grid
 		}
 	};
 	const tumorLabel =
@@ -121,18 +138,23 @@ export default function Preview({
 						alt={`Case ${id} CT scan`}
 						loading="lazy"
 						decoding="async"
-						onLoad={() => setImgLoaded(true)}
+						onLoad={() => {
+							setImgLoaded(true);
+							settle();
+						}}
 						onError={handleImgError}
 						className="w-full h-full object-contain object-center"
 						style={{
 							objectPosition: "center",
-							opacity: imgLoaded ? (hovered ? 1 : 0.97) : 0,
+							// Only reveal once the image is loaded AND the grid has released
+							// the batch, so cards appear together rather than popping in.
+							opacity: imgLoaded && reveal ? (hovered ? 1 : 0.97) : 0,
 							transform: hovered ? "scale(1.05)" : "scale(1)",
 							transition: "opacity 0.4s, transform 0.5s",
 						}}
 					/>
 				)}
-				{!imgLoaded && !imgError && (
+				{(!imgLoaded || !reveal) && !imgError && (
 					<div className="absolute inset-0 flex items-center justify-center">
 						<div
 							className="w-7 h-7 rounded-full animate-spin"
