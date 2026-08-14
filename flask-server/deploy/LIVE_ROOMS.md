@@ -52,4 +52,3 @@ Vite proxies `/api` to Flask and `/ws` to `VITE_WS_BASE` (default `ws://127.0.0.
 - Room key exists only in URL fragment and `X-Room-Key`; never add fragment or key to analytics/logs.
 - Room access is bearer-link collaboration, not privacy-grade authorization.
 - Canonical `image_only` and `mask_only` stay read-only. Exports materialize under session directory only.
-

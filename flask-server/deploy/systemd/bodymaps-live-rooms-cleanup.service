@@ -9,4 +9,3 @@ WorkingDirectory=/home/visitor/PanTS-Viewer/flask-server
 ExecStart=/home/visitor/PanTS-Viewer/flask-server/.venv/bin/python scripts/cleanup_live_rooms.py
 NoNewPrivileges=true
 PrivateTmp=true
-
