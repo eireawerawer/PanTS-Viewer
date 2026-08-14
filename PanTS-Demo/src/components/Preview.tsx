@@ -136,7 +136,10 @@ export default function Preview({
 					<img
 						src={thumbUrl}
 						alt={`Case ${id} CT scan`}
-						loading="lazy"
+						// Eager, not lazy: the grid holds a synchronized reveal until every
+						// card settles, and a lazy image below the fold never fires onLoad
+						// until scrolled — which stalled the whole reveal to the safety cap.
+						loading="eager"
 						decoding="async"
 						onLoad={() => {
 							setImgLoaded(true);
