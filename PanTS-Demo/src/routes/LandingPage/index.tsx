@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { segmentation_categories } from "../../helpers/constants";
 import Header from "../../components/Header";
 import SiteFooter from "../../components/SiteFooter";
@@ -31,7 +30,6 @@ const easeOutCubic = (progress: number): number => {
 };
 
 export default function LandingPage() {
-  const navigate = useNavigate();
   const [animationProgress, setAnimationProgress] = useState(0);
 
   useEffect(() => {
@@ -108,22 +106,6 @@ export default function LandingPage() {
               )}
             </div>
           ))}
-        </div>
-        <div className={styles.heroActions}>
-          <button
-            type="button"
-            className={styles.btnPrimary}
-            onClick={() => navigate("/dashboard")}
-          >
-            Browse Dataset
-          </button>
-          <button
-            type="button"
-            className={styles.btnSecondary}
-            onClick={() => navigate("/upload")}
-          >
-            Upload Dataset
-          </button>
         </div>
       </main>
       <SiteFooter />

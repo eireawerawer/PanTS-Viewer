@@ -1897,7 +1897,11 @@ const UploadPage: React.FC = () => {
                     width: "36px", height: "36px", borderRadius: "8px", flexShrink: 0,
                     background: "rgba(15, 23, 42, 0.04)", border: "1px solid rgba(15, 23, 42, 0.12)",
                     display: "flex", alignItems: "center", justifyContent: "center",
-                  }}><div className="upload-spinner" /></div>
+                  }}>{/* A static pulsing dot per scan instead of a spinning wheel:
+                       multiple in-flight scans shouldn't each spin. The single
+                       spinner lives in the batch ProcessingSummaryBar. */}
+                    <span className="animate-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: "#0F172A", display: "block" }} />
+                  </div>
                   <div>
                     <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
                     <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
