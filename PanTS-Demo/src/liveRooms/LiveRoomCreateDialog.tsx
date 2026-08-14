@@ -2,7 +2,7 @@ import { IconArrowLeft, IconBolt, IconClipboardCheck, IconClockPlay, IconUsersGr
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { API_BASE } from "../helpers/constants";
-import { liveQuizHostSecretKey, liveRoomCreatorAutoJoinKey } from "./protocol";
+import { liveRoomCreatorAutoJoinKey } from "./protocol";
 import "./liveRooms.css";
 
 type Props = {
@@ -117,9 +117,6 @@ export default function LiveRoomCreateDialog({ caseId, open, onClose }: Props) {
 			sessionStorage.setItem("bodymaps.live-room.name", cleanName);
 				sessionStorage.setItem(`bodymaps.live-room.${body.room_id}.case-id`, String(body.case_id));
 			sessionStorage.setItem(liveRoomCreatorAutoJoinKey(body.room_id), "1");
-			if (mode === "quiz" && body.quiz_host_secret) {
-				sessionStorage.setItem(liveQuizHostSecretKey(body.room_id), body.quiz_host_secret);
-			}
 			window.location.assign(body.share_url);
 		} catch (caught) {
 			setError(caught instanceof Error ? caught.message : "Could not create Live Room");
