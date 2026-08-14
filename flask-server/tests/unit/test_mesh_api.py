@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -39,8 +40,8 @@ def test_missing_mesh_cache_is_generated_once_and_served(tmp_path, monkeypatch):
     manifest = first.get_json()
     assert [organ["id"] for organ in manifest["organs"]] == [1, 14]
     assert manifest["center"] == [3.0, 3.0, -3.0]
-    assert manifest["bounds"]["min"] == [-3.0, -3.0, -4.0]
-    assert manifest["bounds"]["max"] == [4.0, 4.0, 3.0]
+    assert manifest["bounds"]["min"] == [-3.5, -3.5, -3.5]
+    assert manifest["bounds"]["max"] == [3.5, 3.5, 3.5]
     assert all(organ["url"].startswith("http://localhost/api/cases/PanTS_00000035/") for organ in manifest["organs"])
 
     manifest_path = mesh_path / "PanTS_00000035" / "manifest.json"
@@ -72,11 +73,13 @@ def test_mesh_endpoints_reject_invalid_or_missing_cases(tmp_path, monkeypatch):
     app = Flask(__name__)
     app.register_blueprint(api_blueprint, url_prefix="/api")
     client = app.test_client()
+    api_module = importlib.import_module("api.api_blueprint")
 
     assert client.get("/api/cases/not-numeric/mesh-manifest").status_code == 400
+    monkeypatch.setattr(api_module, "_ai_local_mask_path", lambda _case_id: None)
     assert client.get("/api/cases/36/mesh-manifest").status_code == 404
     assert client.get("/api/cases/not-a-case/render_only/liver.glb").status_code == 400
     assert client.get("/api/cases/PanTS_00000035/render_only/not-a-mesh.txt").status_code == 400
 
     monkeypatch.setattr(Constants, "PANTS_PATH", None)
-    assert client.get("/api/cases/35/mesh-manifest").status_code == 503
+    assert client.get("/api/cases/37/mesh-manifest").status_code == 404

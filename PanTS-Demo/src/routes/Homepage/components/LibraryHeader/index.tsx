@@ -10,7 +10,6 @@ interface Props {
   showSaved: boolean;
   setShowSaved: React.Dispatch<React.SetStateAction<boolean>>;
   savedCases: SavedCase[];
-  matchTotal: number | null;
   onBrowseAll: () => void;
   onShuffle: () => void;
 }
@@ -19,7 +18,6 @@ export default function LibraryHeader({
   showSaved,
   setShowSaved,
   savedCases,
-  matchTotal,
   onBrowseAll,
   onShuffle,
 }: Props) {
@@ -44,13 +42,6 @@ export default function LibraryHeader({
             ? "Back to browse"
             : `Saved${savedCases.length ? ` (${savedCases.length})` : ""}`}
         </button>
-        {!showSaved && matchTotal !== null && (
-          <span aria-live="polite" className={styles.matchTotal}>
-            {`${matchTotal.toLocaleString()} ${
-              matchTotal === 1 ? "case matches" : "cases match"
-            }`}
-          </span>
-        )}
       </div>
     </div>
   );

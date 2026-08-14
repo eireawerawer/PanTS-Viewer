@@ -125,7 +125,52 @@ def nifti_world_to_three(world_xyz: np.ndarray) -> np.ndarray:
     return np.column_stack([x, y, z])
 
 
-def compute_global_center(shape, affine: np.ndarray) -> np.ndarray:
+def compute_global_center(data: np.ndarray, affine: np.ndarray) -> np.ndarray:
+    """Center of the nonzero-label bounding box, in Three.js coordinates.
+
+    This MUST match the convention of the pre-bake scripts
+    (services/preprocess_meshes.py, scripts/precompute_meshes_local.py):
+    every generator centers on the same point so pre-baked and on-demand
+    meshes for one case can mix in the same cache without misalignment.
+    Falls back to the full-volume center when the labelmap is empty.
+    """
+    nz = np.where(data != 0)
+
+    if len(nz[0]) == 0:
+        nx, ny, nzdim = data.shape[:3]
+        mins = np.zeros(3, dtype=float)
+        maxs = np.array([nx - 1, ny - 1, nzdim - 1], dtype=float)
+    else:
+        mins = np.array([axis.min() for axis in nz], dtype=float)
+        maxs = np.array([axis.max() for axis in nz], dtype=float)
+
+    corners = np.array(
+        [
+            [mins[0], mins[1], mins[2]],
+            [mins[0], mins[1], maxs[2]],
+            [mins[0], maxs[1], mins[2]],
+            [mins[0], maxs[1], maxs[2]],
+            [maxs[0], mins[1], mins[2]],
+            [maxs[0], mins[1], maxs[2]],
+            [maxs[0], maxs[1], mins[2]],
+            [maxs[0], maxs[1], maxs[2]],
+        ],
+        dtype=float,
+    )
+
+    world = nib.affines.apply_affine(affine, corners)
+    three = nifti_world_to_three(world)
+
+    return (three.min(axis=0) + three.max(axis=0)) / 2.0
+
+
+def compute_volume_bounds_three(shape, affine: np.ndarray) -> dict:
+    """Full-volume extents in Three.js coordinates, centered on the volume.
+
+    Ported verbatim from services/preprocess_meshes.py so on-demand manifests
+    carry the same "bounds" field the pre-baked ones do (the 3D crosshair in
+    the viewer only renders when bounds are present).
+    """
     nx, ny, nz = shape[:3]
 
     corners_ijk = np.array(
@@ -145,7 +190,13 @@ def compute_global_center(shape, affine: np.ndarray) -> np.ndarray:
     world = nib.affines.apply_affine(affine, corners_ijk)
     three = nifti_world_to_three(world)
 
-    return (three.min(axis=0) + three.max(axis=0)) / 2.0
+    center = (three.min(axis=0) + three.max(axis=0)) / 2.0
+    three_centered = three - center
+
+    return {
+        "min": three_centered.min(axis=0).tolist(),
+        "max": three_centered.max(axis=0).tolist(),
+    }
 
 def load_clean_label_data(label_nifti_path: str):
     img = nib.load(str(label_nifti_path))
@@ -179,30 +230,22 @@ def mesh_to_glb_bytes(mesh: trimesh.Trimesh) -> bytes:
     raise TypeError(f"Unexpected GLB export type: {type(exported)}")
 
 
-def generate_organ_glb_bytes(
-    organ_key: str,
-    label_nifti_path: str,
-) -> bytes:
+def _build_organ_mesh(
+    data: np.ndarray,
+    affine: np.ndarray,
+    label_id: int,
+    global_center: np.ndarray,
+) -> trimesh.Trimesh | None:
+    """Marching-cubes one organ label into a cleaned, centered trimesh.
 
-
-    img, data = load_clean_label_data(label_nifti_path)
-
-    label_id = None
-    for key, meta in LABELS.items():
-        if meta["key"] == organ_key:
-            label_id = key
-            break
-
-    if label_id is None:
-        raise ValueError(f"Unknown organ key: {organ_key}")
-    
+    Returns None when the label has no voxels in this case.
+    """
     mask = data == label_id
 
     if not mask.any():
-        raise ValueError(f"Organ {organ_key} with label {label_id} has no voxels.")
+        return None
 
-    global_center = compute_global_center(data.shape, img.affine)
-
+    # Padding prevents clipped surfaces when the mask touches the boundary.
     padded = np.pad(mask.astype(np.uint8), pad_width=1, mode="constant")
 
     verts_ijk, faces, normals, values = measure.marching_cubes(
@@ -212,9 +255,9 @@ def generate_organ_glb_bytes(
         allow_degenerate=False,
     )
 
-    verts_ijk -= 1.0
+    verts_ijk -= 1.0  # undo padding
 
-    verts_world = nib.affines.apply_affine(img.affine, verts_ijk)
+    verts_world = nib.affines.apply_affine(affine, verts_ijk)
     verts_three = nifti_world_to_three(verts_world)
     verts_three -= global_center
 
@@ -234,7 +277,102 @@ def generate_organ_glb_bytes(
     mesh.remove_unreferenced_vertices()
     mesh.merge_vertices()
 
+    return mesh
+
+
+def generate_organ_glb_bytes(
+    organ_key: str,
+    label_nifti_path: str,
+) -> bytes:
+
+    img, data = load_clean_label_data(label_nifti_path)
+
+    label_id = None
+    for key, meta in LABELS.items():
+        if meta["key"] == organ_key:
+            label_id = key
+            break
+
+    if label_id is None:
+        raise ValueError(f"Unknown organ key: {organ_key}")
+
+    global_center = compute_global_center(data, img.affine)
+
+    mesh = _build_organ_mesh(data, img.affine, label_id, global_center)
+    if mesh is None:
+        raise ValueError(f"Organ {organ_key} with label {label_id} has no voxels.")
+
     return mesh_to_glb_bytes(mesh)
+
+
+def _write_atomic(path: str, payload: bytes) -> None:
+    """Write to a temp file then rename, so readers never see a partial file
+    and a crash mid-write can't poison the cache."""
+    tmp_path = f"{path}.part"
+    with open(tmp_path, "wb") as handle:
+        handle.write(payload)
+    os.replace(tmp_path, path)
+
+
+def bake_case_meshes(
+    display_id: str,
+    label_nifti_path: str,
+    out_dir: str,
+    route_base: str = "cases",
+) -> dict:
+    """Generate EVERY organ GLB plus manifest.json for one case in a single
+    pass over the labelmap, writing atomically into out_dir.
+
+    This is the one-volume-load path used when a case has no pre-baked
+    meshes: loading the labelmap once and meshing all organs costs a fraction
+    of the memory of answering each organ's GLB request independently.
+    Returns the manifest dict (same shape the pre-bake scripts produce,
+    including "bounds", which the viewer's 3D crosshair requires).
+    """
+    img, data = load_clean_label_data(label_nifti_path)
+
+    global_center = compute_global_center(data, img.affine)
+    bounds = compute_volume_bounds_three(data.shape, img.affine)
+    present_labels = set(np.unique(data).astype(int).tolist())
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    manifest = {
+        "caseId": display_id,
+        "center": global_center.tolist(),
+        "organs": [],
+        "bounds": bounds,
+        "affine": img.affine.tolist(),
+    }
+
+    for label_id, meta in LABELS.items():
+        if label_id not in present_labels:
+            continue
+
+        mesh = _build_organ_mesh(data, img.affine, label_id, global_center)
+        if mesh is None:
+            continue
+
+        filename = f"{safe_filename(meta['key'])}.glb"
+        _write_atomic(os.path.join(out_dir, filename), mesh_to_glb_bytes(mesh))
+
+        manifest["organs"].append(
+            {
+                "id": label_id,
+                "key": meta["key"],
+                "name": meta["name"],
+                "url": f"{os.getenv('API_ORIGIN', 'http://localhost:5001')}/api/{route_base}/{display_id}/render_only/{filename}",
+                "vertices": int(len(mesh.vertices)),
+                "faces": int(len(mesh.faces)),
+            }
+        )
+
+    _write_atomic(
+        os.path.join(out_dir, "manifest.json"),
+        json.dumps(manifest, indent=2).encode("utf-8"),
+    )
+
+    return manifest
 
 
 def generate_mesh_manifest(
@@ -248,9 +386,8 @@ def generate_mesh_manifest(
     img, data = load_clean_label_data(label_nifti_path)
 
     present_labels = set(np.unique(data).astype(int).tolist())
-    # nz = np.where(data.shape != 0)
-    # print(nz.shape)
-    global_center = compute_global_center(data.shape, img.affine)
+    global_center = compute_global_center(data, img.affine)
+    bounds = compute_volume_bounds_three(data.shape, img.affine)
 
     organs = []
 
@@ -259,9 +396,8 @@ def generate_mesh_manifest(
 
         if label_id not in present_labels:
             continue
-        
+
         filename = f"{safe_filename(meta['key'])}.glb"
-        # print('key', key)
 
         organs.append(
             {
@@ -277,5 +413,7 @@ def generate_mesh_manifest(
         "affine": img.affine.tolist(),
         "center": global_center.tolist(),
         "organs": organs,
+        # The viewer's 3D crosshair only renders when bounds are present.
+        "bounds": bounds,
     }
 

@@ -30,7 +30,6 @@ export default function Homepage() {
             showSaved={dash.showSaved}
             setShowSaved={dash.setShowSaved}
             savedCases={dash.savedCases}
-            matchTotal={dash.matchTotal}
             onBrowseAll={dash.handleBrowseAll}
             onShuffle={dash.handleShuffle}
           />
@@ -51,6 +50,19 @@ export default function Homepage() {
               facetData={dash.facetData}
               toggleMulti={dash.toggleMulti}
             />
+          )}
+
+          {/* Match count sits at the bottom-left of the library card — below the
+              filters (Study Year / Any) when they're open — rather than floating. */}
+          {!dash.showSaved && dash.matchTotal !== null && (
+            <div
+              aria-live="polite"
+              className="mt-4 text-sm font-medium text-gray-500"
+            >
+              {`${dash.matchTotal.toLocaleString()} ${
+                dash.matchTotal === 1 ? "case matches" : "cases match"
+              }`}
+            </div>
           )}
         </div>
 

@@ -93,49 +93,6 @@ npm install
 npm run dev
 ```
 
-# Roles, and the usage dashboard
-
-Two roles live in the `user_role` table, granted from **Settings → People** by
-anyone who already holds `admin`:
-
-- **admin** — sees Settings → Usage, and can grant or revoke roles.
-- **annotator** — reserved for editing and creating segmentation masks. It can
-  be granted today, but **nothing reads it yet**; it gates no behaviour.
-
-Two guards exist so this can't strand itself: you cannot remove your own admin,
-and you cannot remove the last one.
-
-#### The first admin
-
-Nobody can grant a role until someone is an admin, so bootstrap it with either:
-
-```
-ADMIN_EMAILS=you@example.com,them@example.com
-```
-
-Those addresses are granted `admin` at startup (additive — it never revokes; an
-address with no account yet is picked up on the next boot after they sign up).
-Or do it without a restart:
-
-```bash
-python flask-server/scripts/grant_role.py --email you@example.com --role admin
-```
-
-`--revoke` takes a role away, and `--list` shows everyone who holds one.
-
-#### Usage
-
-**Settings → Usage** shows which features get used and which don't, how long
-people spend on each page, and how that splits by plan and account type — over a
-date range or all time.
-
-It needs **two** things, not one: the backend started with
-`ANALYTICS_DASHBOARD=true` (off by default, so a normal deploy doesn't serve
-per-account behaviour at all), *and* an admin session. With the flag off the
-endpoints 404 for everyone, admin included.
-
-The main site records the events either way — that half is always on.
-
 # Deploying Updates to the Server
 ---
 

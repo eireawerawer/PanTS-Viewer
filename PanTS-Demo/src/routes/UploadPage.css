@@ -510,6 +510,10 @@
   align-items: center;
   justify-content: space-between;
   padding: 10px 14px;
+  /* Shared row height so the (2-line) model rows and the (1-line) submenu rows
+     line up at the same height instead of the parent looking taller. */
+  min-height: 48px;
+  box-sizing: border-box;
   cursor: pointer;
   transition: background 0.1s;
 }
@@ -1251,6 +1255,9 @@
   align-items: center;
   gap: 8px;
   padding: 8px 14px 8px 8px;
+  /* Match .model-dropdown-item so every row in the menu is the same height. */
+  min-height: 48px;
+  box-sizing: border-box;
   cursor: pointer;
   transition: background 0.1s;
 }
