@@ -335,7 +335,9 @@ const UploadPage: React.FC = () => {
     e.target.value = ""; // allow re-picking the same folder later
     const candidates = files.filter(looksLikeDicom);
     if (!candidates.length) {
-      alert("No DICOM files (.dcm) found in the selected folder.");
+      alert(
+        "No DICOM files found. Pick the folder holding the .dcm slices — or, on a phone or tablet (where folders can't be picked), select the slice files themselves.",
+      );
       return;
     }
     setSelectedItems((prev) => [
@@ -1227,10 +1229,15 @@ const UploadPage: React.FC = () => {
             <input
               // Set the folder-picker attributes imperatively — passing webkitdirectory
               // as a JSX/spread prop doesn't reliably apply it, so the picker falls back
-              // to single files. directory is the Firefox spelling.
+              // to single files. The IDL property is set too: engines disagree on which
+              // one they read when it's applied after the element is parsed. On iOS and
+              // Android none of this has any effect (no browser there can pick a folder),
+              // so the picker hands back plain files — handleDicomInferenceSelect takes
+              // any file list, so selecting the slices themselves works there.
               ref={(el) => {
                 dicomUploadInputRef.current = el;
                 if (el) {
+                  el.webkitdirectory = true;
                   el.setAttribute("webkitdirectory", "");
                   el.setAttribute("directory", "");
                 }
