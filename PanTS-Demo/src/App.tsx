@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 import "./App.css";
+import AnalyticsRouteTracker from "./components/AnalyticsRouteTracker";
 import AuthModal from "./components/AuthModal";
 import { AnnotationProvider } from "./contexts/annotationContexts";
 import { AuthProvider } from "./contexts/authContext";
@@ -20,7 +21,17 @@ const UploadPage = lazy(() => import("./routes/UploadPage"));
 const LiveRoomPage = lazy(() => import("./liveRooms/LiveRoomPage"));
 const SoloChallengePage = lazy(() => import("./education/SoloChallengePage"));
 const QuizPracticePage = lazy(() => import("./education/QuizPracticePage"));
-const AccountPage = lazy(() => import("./routes/AccountPage"));
+const SettingsPage = lazy(() => import("./routes/Settings"));
+const ProfileSettings = lazy(() => import("./routes/Settings/ProfileSettings"));
+const PlanSettings = lazy(() => import("./routes/Settings/PlanSettings"));
+const HistorySettings = lazy(() => import("./routes/Settings/HistorySettings"));
+const PrivacySettings = lazy(() => import("./routes/Settings/PrivacySettings"));
+// Admin-only sections: split out so the charts and the account list stay out of
+// everyone else's bundle.
+const AnalyticsSettings = lazy(() => import("./routes/Settings/AnalyticsSettings"));
+const PeopleSettings = lazy(() => import("./routes/Settings/PeopleSettings"));
+const SignupRedirect = lazy(() => import("./routes/SignupRedirect"));
+const LegalPage = lazy(() => import("./routes/LegalPage"));
 const RotatingHeartLoader = lazy(() => import("./components/Loading"));
 
 const BASENAME = import.meta.env.VITE_BASENAME;
@@ -59,6 +70,7 @@ function App() {
         <AnnotationProvider>
           <div className="App">
             <BrowserRouter basename={BASENAME}>
+              <AnalyticsRouteTracker />
               <ScrollToTopButton />
               <Suspense fallback={<RouteFallback />}>
                 <Routes>
@@ -86,9 +98,24 @@ function App() {
                   />
                   <Route path="/test" element={<RotatingHeartLoader />} />
                   <Route path="/upload" element={<UploadPage />} />
-                  {/* Sign in/up is a popup, so old /login links just land on home. */}
+                  {/* Both sign in and sign up are the popup now. /login and
+                      /signup stay routable so old links don't 404. */}
                   <Route path="/login" element={<Navigate to="/" replace />} />
-                  <Route path="/account" element={<AccountPage />} />
+                  <Route path="/signup" element={<SignupRedirect />} />
+                  {/* Settings is a shell with a left nav; each section is its
+                      own URL so a link can point straight at one. */}
+                  <Route path="/account" element={<SettingsPage />}>
+                    <Route index element={<ProfileSettings />} />
+                    <Route path="plan" element={<PlanSettings />} />
+                    <Route path="history" element={<HistorySettings />} />
+                    <Route path="privacy" element={<PrivacySettings />} />
+                    {/* Admin-only. Both check the role themselves and the API
+                        refuses either way — the nav just doesn't offer them. */}
+                    <Route path="analytics" element={<AnalyticsSettings />} />
+                    <Route path="people" element={<PeopleSettings />} />
+                  </Route>
+                  <Route path="/terms" element={<LegalPage kind="terms" />} />
+                  <Route path="/privacy" element={<LegalPage kind="privacy" />} />
                   <Route
                     path="/api"
                     element={<Navigate to="/upload" replace />}
@@ -101,10 +128,11 @@ function App() {
                   />
                 </Routes>
               </Suspense>
+              {/* Global auth popup, above all routes. Inside the router so it
+                  can link to the legal pages. */}
+              <AuthModal />
             </BrowserRouter>
           </div>
-          {/* Global sign-in / sign-up popup, above all routes. */}
-          <AuthModal />
         </AnnotationProvider>
       </FileProvider>
     </AuthProvider>

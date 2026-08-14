@@ -7,6 +7,19 @@ import React, {
   useState,
 } from "react";
 
+// LesionSegmenter's four lesions, offered as a macOS-style submenu off the model
+// item. Only pancreatic is GT-validated; the rest are flagged experimental.
+const LESION_OPTIONS: {
+  id: "pancreatic" | "liver" | "kidney" | "colon";
+  label: string;
+  experimental?: boolean;
+}[] = [
+  { id: "pancreatic", label: "Pancreatic lesion" },
+  { id: "liver", label: "Liver lesion", experimental: true },
+  { id: "kidney", label: "Kidney lesion", experimental: true },
+  { id: "colon", label: "Colon lesion", experimental: true },
+];
+
 const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "None",
@@ -54,19 +67,30 @@ const DicomPreview = lazy(() => import("../components/CtPreview/DicomPreview"));
 import { API_BASE } from "../helpers/constants";
 import {
   addRecentUpload,
+  friendlyScanName,
+  renameRecentUpload,
   formatRelativeTime,
   groupUploads,
   isGroupInFlight,
   loadRecentUploads,
   recentStatusColor,
   removeRecentUpload,
+  splitByAge,
   updateRecentUploadStatus,
   type RecentUpload,
 } from "../helpers/recentUploads";
 import Header from "../components/Header";
 import ProcessingSummaryBar from "../components/ProcessingSummaryBar";
 import BatchDetailsModal from "../components/BatchDetailsModal";
+import { track } from "../helpers/analytics";
+import UpgradeDialog, { type UpgradeBlock } from "../components/UpgradeDialog";
 import { useAuth } from "../contexts/authContext";
+import {
+  canPostprocess,
+  isModelLocked,
+  maxConcurrentScans,
+  type PlanId,
+} from "../helpers/accountProfile";
 import { looksLikeDicom, setLocalDicomFiles } from "../helpers/dicomLocal";
 import { setLocalNiftiFile } from "../helpers/localNifti";
 import {
@@ -79,6 +103,7 @@ import {
   type PendingUpload,
 } from "../helpers/pendingUploads";
 import { postWithRetry, resolveResumeStart } from "../helpers/chunkUpload";
+import SiteFooter from "../components/SiteFooter";
 
 const parseApiResponse = async (res: Response): Promise<any> => {
   const contentType = res.headers.get("content-type") || "";
@@ -110,13 +135,22 @@ type SelectedItem =
 const UploadPage: React.FC = () => {
   const navigate = useNavigate();
   // Running inference requires an account, so any upload action while signed
-  // out opens the sign-up popup instead of proceeding.
-  const { isAuthenticated, promptAuth } = useAuth();
+  // out opens the auth popup instead of proceeding. It opens on sign-in: most
+  // people hitting this already have an account, and the popup switches to
+  // sign-up in one click for the ones who don't.
+  const { isAuthenticated, promptAuth, user, refreshUsage } = useAuth();
   const ensureAccount = (): boolean => {
     if (isAuthenticated) return true;
-    promptAuth("signup");
+    promptAuth();
     return false;
   };
+  // Everything the plan won't allow routes through one dialog; this is what's
+  // currently being explained (null = nothing blocked).
+  const [upgradeBlock, setUpgradeBlock] = useState<UpgradeBlock | null>(null);
+  const plan = user?.plan ?? "free";
+  // Cosmetic mirror of the server's rules — see helpers/accountProfile. The
+  // server still gets the final say via a 402, which lands in the same dialog.
+  const modelLocked = (id: string) => isAuthenticated && isModelLocked(plan, id);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Folder picker for a DICOM series (run inference, or view-only when model is "None").
   const dicomUploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -165,6 +199,12 @@ const UploadPage: React.FC = () => {
     | ""
   >("None");
   const [modelDropOpen, setModelDropOpen] = useState(false);
+  // LesionSegmenter computes liver/pancreatic/kidney/colon lesions in one pass;
+  // this selects which lesion to feature. Only pancreatic is GT-validated; the
+  // other three are surfaced as experimental.
+  const [lesionTarget, setLesionTarget] = useState<
+    "pancreatic" | "liver" | "kidney" | "colon"
+  >("pancreatic");
   const modelDropRef = useRef<HTMLDivElement>(null);
   const [preDropOpen, setPreDropOpen] = useState(false);
   const preDropRef = useRef<HTMLDivElement>(null);
@@ -176,6 +216,18 @@ const UploadPage: React.FC = () => {
   const [recentUploads, setRecentUploads] = useState<RecentUpload[]>(() =>
     loadRecentUploads(),
   );
+  // Inline rename of a scan in the history list: which one is being edited and
+  // the working text.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const startRename = (u: RecentUpload) => {
+    setRenamingId(u.sessionId);
+    setRenameValue(u.label);
+  };
+  const commitRename = () => {
+    if (renamingId) setRecentUploads(renameRecentUpload(renamingId, renameValue));
+    setRenamingId(null);
+  };
   // Which batch's "View details" popup is open (null = none).
   const [detailsBatchId, setDetailsBatchId] = useState<string | null>(null);
   // Sub-state of each Active card: "waiting" | "uploading" | "queued" | "running".
@@ -221,6 +273,7 @@ const UploadPage: React.FC = () => {
       alert("Please select .nii or .nii.gz files only");
       return;
     }
+    track("upload_files_selected");
     setSelectedItems((prev) => [
       ...prev,
       ...filteredFiles.map((f) => ({
@@ -235,7 +288,7 @@ const UploadPage: React.FC = () => {
     e.preventDefault();
     setIsDragOver(false);
     // Inlined (not via ensureAccount) so the memoized closure sees fresh auth.
-    if (!isAuthenticated) { promptAuth("signup"); return; }
+    if (!isAuthenticated) { promptAuth(); return; }
     if (!e.dataTransfer.files) return;
     const filteredFiles = Array.from(e.dataTransfer.files).filter((file) =>
       allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
@@ -244,6 +297,7 @@ const UploadPage: React.FC = () => {
       alert("Please drop .nii or .nii.gz files only");
       return;
     }
+    track("upload_files_selected");
     setSelectedItems((prev) => [
       ...prev,
       ...filteredFiles.map((f) => ({
@@ -383,6 +437,7 @@ const UploadPage: React.FC = () => {
   // kills a queued/running server job.
   const cancelRun = (upload: RecentUpload) => {
     const sid = upload.sessionId;
+    track("upload_cancel_inference");
     stopPolling(sid);
     setPhase(sid);
 
@@ -571,6 +626,9 @@ const UploadPage: React.FC = () => {
       inferFd.append("session_id", sid);
       inferFd.append("model_name", model);
       inferFd.append("uploaded_filename", uploadedName);
+      if (model === "LesionSegmenter") {
+        inferFd.append("lesion_target", lesionTarget);
+      }
       const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
         method: "POST",
         body: inferFd,
@@ -578,11 +636,27 @@ const UploadPage: React.FC = () => {
         signal: controller.signal,
       });
       const data = await parseApiResponse(res);
+      // 402 is the plan refusing, not a failure — the server's reason drives
+      // the upgrade dialog. The scan goes to Cancelled rather than Failed:
+      // nothing broke, it just never ran.
+      if (res.status === 402 && data?.code === "plan_limit") {
+        await deletePendingUpload(sid);
+        setPhase(sid);
+        setRecentUploads(updateRecentUploadStatus(sid, "Cancelled"));
+        setUpgradeBlock({
+          reason: data.reason, message: data.message, feature: data.feature,
+          limit: data.limit, used: data.used, resetsAt: data.resets_at ?? null,
+          plan: (data.plan as PlanId) ?? "free",
+        });
+        if (foreground) setMessage("");
+        return;
+      }
       if (!res.ok) throw new Error(data.error || "Failed to start inference");
 
       // Queued server-side now - nothing here is needed to finish the run, so
       // drop the resumable record.
       await deletePendingUpload(sid);
+      refreshUsage(); // a scan was just spent; keep the settings counter honest
       setSessionId(sid);
       setPhase(sid, "queued"); // server queues for the GPU; poll refines this
       if (foreground) setMessage(`${model} inference started. Session: ${sid}`);
@@ -907,15 +981,21 @@ const UploadPage: React.FC = () => {
     batch?: { batchId: string; batchLabel: string },
   ) => {
     const sid = crypto.randomUUID();
-    const label = (item.kind === "dicom" ? item.label : item.file.name) || sid;
+    const ts = Date.now();
+    // Keep the raw filename for reference, but name the scan meaningfully by
+    // default (model + date); the user can rename it later.
+    const sourceName = (item.kind === "dicom" ? item.label : item.file.name) || undefined;
+    const label = friendlyScanName(model, ts);
 
+    track("upload_start_inference");
     setRecentUploads(
       addRecentUpload({
         sessionId: sid,
         label,
+        sourceName,
         model,
         status: "Processing",
-        timestamp: Date.now(),
+        timestamp: ts,
         isReconstruction: model === "OpenVAE",
         batchId: batch?.batchId,
         batchLabel: batch?.batchLabel,
@@ -977,6 +1057,18 @@ const UploadPage: React.FC = () => {
 
     if (!first) {
       alert("Select a file to upload first.");
+      return;
+    }
+
+    // Caught here rather than per-file, so a plan that runs one scan at a time
+    // says so before anything uploads instead of accepting the first and
+    // rejecting the rest one 402 at a time.
+    const slots = maxConcurrentScans(plan as PlanId);
+    const running = recentUploads.filter((u) => u.status === "Processing").length;
+    if (items.length + running > slots) {
+      setUpgradeBlock({
+        reason: "concurrent_scans", limit: slots, used: running, plan: plan as PlanId,
+      });
       return;
     }
 
@@ -1351,8 +1443,13 @@ const UploadPage: React.FC = () => {
                   <span>
                     {selectedModel === "None"
                       ? "None (view scan)"
-                      : MODEL_OPTIONS.find((m) => m.id === selectedModel)
-                          ?.label || "Select a model"}
+                      : selectedModel === "LesionSegmenter"
+                        ? `LesionSegmenter — ${
+                            LESION_OPTIONS.find((l) => l.id === lesionTarget)
+                              ?.label ?? "Pancreatic lesion"
+                          }`
+                        : MODEL_OPTIONS.find((m) => m.id === selectedModel)
+                            ?.label || "Select a model"}
                   </span>
                   <svg
                     className={`model-dropdown-chevron${modelDropOpen ? " rotated" : ""}`}
@@ -1372,11 +1469,25 @@ const UploadPage: React.FC = () => {
                 </button>
                 {modelDropOpen && (
                   <div className="model-dropdown-menu">
-                    {MODEL_OPTIONS.map((m) => (
+                    {MODEL_OPTIONS.map((m) => {
+                      // Locked models stay visible with an "Upgrade" pill rather
+                      // than being hidden — you can't want what you can't see,
+                      // and ChatGPT's model picker works the same way.
+                      const locked = modelLocked(m.id);
+                      const hasSubmenu = !locked && m.id === "LesionSegmenter";
+                      return (
                       <div
                         key={m.id}
-                        className={`model-dropdown-item${selectedModel === m.id ? " selected" : ""}`}
+                        className={`model-dropdown-item${selectedModel === m.id ? " selected" : ""}${locked ? " locked" : ""}${hasSubmenu ? " has-submenu" : ""}`}
                         onClick={() => {
+                          if (locked) {
+                            setModelDropOpen(false);
+                            setUpgradeBlock({
+                              reason: "model_locked", feature: m.label, plan: plan as PlanId,
+                            });
+                            return;
+                          }
+                          track("upload_select_model");
                           setSelectedModel(m.id as typeof selectedModel);
                           setModelDropOpen(false);
                         }}
@@ -1390,7 +1501,25 @@ const UploadPage: React.FC = () => {
                           </span>
                         </div>
                         <div className="model-dropdown-item-side">
-                          {selectedModel === m.id && (
+                          {locked && <span className="model-dropdown-lock">Donate</span>}
+                          {hasSubmenu ? (
+                            <svg
+                              className="model-submenu-arrow"
+                              width="7"
+                              height="10"
+                              viewBox="0 0 7 10"
+                              fill="none"
+                            >
+                              <path
+                                d="M1 1l4 4-4 4"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          ) : (
+                            !locked && selectedModel === m.id && (
                             <svg
                               width="12"
                               height="12"
@@ -1406,10 +1535,57 @@ const UploadPage: React.FC = () => {
                                 strokeLinejoin="round"
                               />
                             </svg>
+                            )
                           )}
                         </div>
+                        {hasSubmenu && (
+                          <div className="model-submenu" role="menu">
+                            {LESION_OPTIONS.map((l) => (
+                              <div
+                                key={l.id}
+                                role="menuitemradio"
+                                aria-checked={lesionTarget === l.id}
+                                className={`model-submenu-item${lesionTarget === l.id ? " selected" : ""}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedModel("LesionSegmenter");
+                                  setLesionTarget(l.id);
+                                  setModelDropOpen(false);
+                                }}
+                              >
+                                <span className="model-submenu-check">
+                                  {lesionTarget === l.id && (
+                                    <svg
+                                      width="12"
+                                      height="12"
+                                      viewBox="0 0 12 12"
+                                      fill="none"
+                                    >
+                                      <path
+                                        d="M2 6l3 3 5-5"
+                                        stroke="currentColor"
+                                        strokeWidth="1.5"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                      />
+                                    </svg>
+                                  )}
+                                </span>
+                                <span className="model-submenu-label">
+                                  {l.label}
+                                  {l.experimental && (
+                                    <span className="model-submenu-exp">
+                                      experimental
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -1460,11 +1636,22 @@ const UploadPage: React.FC = () => {
                         label: "ShapeKit",
                         desc: "Clean up and smooth organ outlines",
                       },
-                    ].map((opt) => (
+                    ].map((opt) => {
+                      const locked =
+                        opt.id !== "" && isAuthenticated && !canPostprocess(plan);
+                      return (
                       <div
                         key={opt.id}
-                        className={`model-dropdown-item${postValue === opt.id ? " selected" : ""}`}
+                        className={`model-dropdown-item${postValue === opt.id ? " selected" : ""}${locked ? " locked" : ""}`}
                         onClick={() => {
+                          if (locked) {
+                            setPostDropOpen(false);
+                            setUpgradeBlock({
+                              reason: "postprocessing", feature: opt.label, plan: plan as PlanId,
+                            });
+                            return;
+                          }
+                          track("upload_select_postprocessing");
                           setPostValue(opt.id);
                           setPostDropOpen(false);
                         }}
@@ -1478,7 +1665,8 @@ const UploadPage: React.FC = () => {
                           </span>
                         </div>
                         <div className="model-dropdown-item-side">
-                          {postValue === opt.id && (
+                          {locked && <span className="model-dropdown-lock">Donate</span>}
+                          {!locked && postValue === opt.id && (
                             <svg
                               width="12"
                               height="12"
@@ -1497,7 +1685,8 @@ const UploadPage: React.FC = () => {
                           )}
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -1587,10 +1776,10 @@ const UploadPage: React.FC = () => {
         {!isAuthenticated && (
           <div className="upload-account-banner">
             <span>
-              <button type="button" className="upload-account-link" onClick={() => promptAuth("signup")}>
+              <button type="button" className="upload-account-link" onClick={() => promptAuth()}>
                 Sign in
               </button>{" "}
-              to run inference on the server and get notified when it's done.
+              to run inference.
             </span>
           </div>
         )}
@@ -1602,7 +1791,9 @@ const UploadPage: React.FC = () => {
         {(() => {
           const groups = groupUploads(recentUploads);
           const inFlight = groups.filter(isGroupInFlight);
-          const finished = groups.filter(g => !isGroupInFlight(g));
+          // Only the last day stays here. Anything older is history, and lives
+          // in settings — this page is for the work in front of you.
+          const { recent: finished, older } = splitByAge(groups.filter(g => !isGroupInFlight(g)));
 
           // Only the upload needs this tab open; past that the job lives in the
           // server's queue. Rides along on each card's status line rather than as
@@ -1698,13 +1889,13 @@ const UploadPage: React.FC = () => {
               phase === "queued" ? "Queued for GPU" : "Running…";
             return (
               <div style={{
-                background: "#f5f5f5", border: "1px solid rgba(0,45,114,0.14)", borderRadius: "12px",
+                background: "#f5f5f5", border: "1px solid rgba(15, 23, 42, 0.14)", borderRadius: "12px",
                 padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between",
               }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
                   <div style={{
                     width: "36px", height: "36px", borderRadius: "8px", flexShrink: 0,
-                    background: "rgba(0,45,114,0.04)", border: "1px solid rgba(0,45,114,0.12)",
+                    background: "rgba(15, 23, 42, 0.04)", border: "1px solid rgba(15, 23, 42, 0.12)",
                     display: "flex", alignItems: "center", justifyContent: "center",
                   }}><div className="upload-spinner" /></div>
                   <div>
@@ -1718,7 +1909,7 @@ const UploadPage: React.FC = () => {
                   </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                  <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: phase === "queued" ? "#6a6a6a" : "#002D72" }}>{phaseLabel}</span>
+                  <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: phase === "queued" ? "#6a6a6a" : "#0F172A" }}>{phaseLabel}</span>
                   <button className="active-cancel-btn" onClick={() => cancelRun(u)}>Cancel</button>
                 </div>
               </div>
@@ -1731,7 +1922,31 @@ const UploadPage: React.FC = () => {
               <div style={{ display: "flex", alignItems: "center", gap: "16px", minWidth: 0 }}>
                 <FileIcon />
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
+                  {renamingId === u.sessionId ? (
+                    <input
+                      autoFocus
+                      value={renameValue}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitRename();
+                        else if (e.key === "Escape") setRenamingId(null);
+                      }}
+                      style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", border: "1px solid rgba(15, 23, 42, 0.3)", borderRadius: "6px", padding: "2px 6px", width: "100%", maxWidth: "260px" }}
+                    />
+                  ) : (
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0 }}>
+                      <span title={u.sourceName || undefined} style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.label}</span>
+                      <button
+                        title="Rename scan"
+                        onClick={(e) => { e.stopPropagation(); startRename(u); }}
+                        style={{ background: "none", border: "none", cursor: "pointer", padding: "2px", color: "#6a6a6a", flexShrink: 0, lineHeight: 0 }}
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                      </button>
+                    </div>
+                  )}
                   <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
                     {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}
                   </div>
@@ -1769,8 +1984,8 @@ const UploadPage: React.FC = () => {
                   </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
-                  <button style={smallBtn} onClick={() => setDetailsBatchId(batchId)}>View details</button>
-                  <button style={{ ...smallBtn, background: "#002d72", color: "#fff", borderColor: "#002d72" }} onClick={() => downloadBatch(uploads)}>Download</button>
+                  <button style={smallBtn} onClick={() => { track("upload_open_batch_details"); setDetailsBatchId(batchId); }}>View details</button>
+                  <button style={{ ...smallBtn, background: "#0F172A", color: "#fff", borderColor: "#0F172A" }} onClick={() => downloadBatch(uploads)}>Download</button>
                   <RemoveBtn onClick={() => removeBatch(uploads)} />
                 </div>
               </div>
@@ -1801,7 +2016,7 @@ const UploadPage: React.FC = () => {
                       <ProcessingSummaryBar key={g.batchId} title={g.label} running={running.length}
                         done={done} statusLabel={statusLabel}
                         closeNote={closeNote} closeReady={!closeInfo.active}
-                        onViewDetails={() => setDetailsBatchId(g.batchId)}
+                        onViewDetails={() => { track("upload_open_batch_details"); setDetailsBatchId(g.batchId); }}
                         onCancelAll={() => running.forEach(u => cancelRun(u))} />
                     );
                   })}
@@ -1817,10 +2032,18 @@ const UploadPage: React.FC = () => {
                       : <CompletedBatchBar key={g.batchId} batchId={g.batchId} label={g.label} uploads={g.uploads} />
                   )}
                 </div>
+                {older.length > 0 && (
+                  <button type="button" className="upload-history-link"
+                    onClick={() => navigate("/account/history")}>
+                    {older.length} older {older.length === 1 ? "scan" : "scans"} in History →
+                  </button>
+                )}
               </div>
             </>
           );
         })()}
+
+        <UpgradeDialog block={upgradeBlock} onClose={() => setUpgradeBlock(null)} />
 
         {/* Batch "View details" popup */}
         {(() => {
@@ -1840,6 +2063,7 @@ const UploadPage: React.FC = () => {
           );
         })()}
       </div>
+      <SiteFooter />
     </div>
   );
 };

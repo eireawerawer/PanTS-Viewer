@@ -1,3 +1,4 @@
+import { getEnabledElement } from "@cornerstonejs/core";
 import type { RenderingEngine } from "@cornerstonejs/core";
 import type { Color, ColorLUT } from "@cornerstonejs/core/types";
 import type { vtkVolumeProperty } from '@kitware/vtk.js/Rendering/Core/VolumeProperty';
@@ -42,6 +43,7 @@ import { createPortal } from "react-dom";
 import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
 import { useLocation, useParams } from "react-router-dom";
 import AISidebar from "../components/AIAssistant/AISidebar";
+import { track } from "../helpers/analytics";
 import { buildViewerActions } from "../components/AIAssistant/assistantActions";
 import MeasurementPanel from "../components/MeasurementPanel/MeasurementPanel";
 import { SegmentationMeshViewer } from "../components/viewer/MeshViewer";
@@ -89,6 +91,7 @@ import {
     BIDIRECTIONAL_TOOL,
     captureViewportImages,
     centerOnCursor,
+    clearMaskEditCursor,
     clearMeasurements,
     createNewAnnotationClass,
 	createSegmentationShadow,
@@ -333,10 +336,40 @@ const CT_PRESETS = [
 	{ name: "Angio", width: 600, center: 150 }, // contrast-enhanced vessels (CTA)
 ] as const;
 
-// Rough px/mm scale — Cornerstone panes don't expose a fixed px-per-mm ratio without
-// reading viewport spacing per pane, so this is a visual approximation, not a
-// pixel-exact brush footprint. Good enough for "see roughly how big this is."
-const PX_PER_MM_APPROX = 2.2;
+// Used only as a fallback for the very first frame or two, before a pane's
+// Cornerstone viewport has actually been enabled yet — see getPanePxPerMm
+// below for the real, per-pane, per-zoom-level calculation that replaced
+// this as a fixed guess.
+const PX_PER_MM_FALLBACK = 2.2;
+
+// The brush-size dotted overlay used to just multiply diameterMm by the
+// fixed PX_PER_MM_APPROX guess above and by the toolbar's own zoomLevel
+// number — neither of which reflects a given pane's actual voxel spacing
+// (axial/sagittal/coronal can each have different mm-per-voxel along their
+// in-plane axes) or the viewport's real current zoom. That mismatch is why
+// the overlay never quite matched the brush's real footprint. This instead
+// asks Cornerstone directly, for the specific pane being drawn, how many
+// on-screen canvas pixels correspond to 1mm of real-world distance right
+// now — which already bakes in that pane's true spacing AND its current
+// zoom, so diameterMm * getPanePxPerMm(...) is the brush's actual size.
+function getPanePxPerMm(paneEl: HTMLDivElement | null): number {
+	if (!paneEl || typeof window === "undefined") return PX_PER_MM_FALLBACK;
+	try {
+		const enabled = getEnabledElement(paneEl);
+		const viewport = enabled?.viewport;
+		if (!viewport || typeof viewport.canvasToWorld !== "function") return PX_PER_MM_FALLBACK;
+		const p0 = viewport.canvasToWorld([0, 0]);
+		const p1 = viewport.canvasToWorld([100, 0]);
+		const dx = p1[0] - p0[0];
+		const dy = p1[1] - p0[1];
+		const dz = p1[2] - p0[2];
+		const worldMm = Math.sqrt(dx * dx + dy * dy + dz * dz);
+		if (!worldMm || !Number.isFinite(worldMm)) return PX_PER_MM_FALLBACK;
+		return 100 / worldMm;
+	} catch {
+		return PX_PER_MM_FALLBACK;
+	}
+}
 // Measurement tools (+ the magnify loupe, which shares the same primary-mouse-tool slot)
 // shown inside the collapsible "Measure" flyout, so the toolbar isn't crowded with one
 // button per tool (matches the split-button pattern OHIF uses). `key` is the keyboard
@@ -400,6 +433,86 @@ function useToolbarFlyout() {
 	return { open, pos, groupRef, btnRef, menuRef, toggle, close };
 }
 
+// One-time "click here to close" nudge shown next to the closing anchor
+// (the highlighted/red first point) on the Lasso/Scissors live-wire
+// overlay, the moment the cursor first gets close enough to actually close
+// the loop. Fades away automatically after a few seconds rather than
+// needing a dismiss click, since by the time it fades the person has
+// almost always already seen the highlighted anchor itself. Resets the
+// moment the loop is closed/cancelled (anchor goes away), so it can show
+// again on the next shape.
+const CLOSE_LOOP_HINT_VISIBLE_MS = 3000;
+const CLOSE_LOOP_HINT_FADE_MS = 300;
+function CloseLoopHint({ nearClose, anchor }: { nearClose: boolean; anchor: [number, number] | undefined }) {
+	const [visible, setVisible] = useState(false);
+	const [fading, setFading] = useState(false);
+	// Tracks whether this hint has already been shown for the CURRENT loop
+	// in progress, so it only ever fires once per shape rather than
+	// re-triggering every time the cursor wanders in and out of range.
+	const shownThisLoopRef = useRef(false);
+	const fadeTimerRef = useRef<number | null>(null);
+	const hideTimerRef = useRef<number | null>(null);
+
+	const clearTimers = () => {
+		if (fadeTimerRef.current) window.clearTimeout(fadeTimerRef.current);
+		if (hideTimerRef.current) window.clearTimeout(hideTimerRef.current);
+		fadeTimerRef.current = null;
+		hideTimerRef.current = null;
+	};
+
+	// No anchor means there's no shape in progress (just closed, cancelled,
+	// or not started yet) — reset so the next shape can show the hint again.
+	useEffect(() => {
+		if (anchor) return;
+		shownThisLoopRef.current = false;
+		setVisible(false);
+		setFading(false);
+		clearTimers();
+	}, [anchor]);
+
+	useEffect(() => {
+		if (!nearClose || !anchor || shownThisLoopRef.current) return;
+		shownThisLoopRef.current = true;
+		setFading(false);
+		setVisible(true);
+		fadeTimerRef.current = window.setTimeout(() => setFading(true), CLOSE_LOOP_HINT_VISIBLE_MS);
+		hideTimerRef.current = window.setTimeout(() => setVisible(false), CLOSE_LOOP_HINT_VISIBLE_MS + CLOSE_LOOP_HINT_FADE_MS);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [nearClose, anchor]);
+
+	useEffect(() => () => clearTimers(), []);
+
+	if (!visible || !anchor) return null;
+	return (
+		<div
+			aria-hidden="true"
+			style={{
+				position: "absolute",
+				left: anchor[0] + 14,
+				top: anchor[1],
+				transform: "translateY(-130%)",
+				background: "rgba(15, 23, 42, 0.55)",
+				border: "1px solid rgba(104, 172, 229, 0.55)",
+				borderRadius: 6,
+				color: "rgba(255, 255, 255, 0.9)",
+				fontFamily: "system-ui, sans-serif",
+				fontSize: 11,
+				fontWeight: 700,
+				padding: "5px 9px",
+				whiteSpace: "nowrap",
+				pointerEvents: "none",
+				zIndex: 40,
+				boxShadow: "0 6px 16px -6px rgba(0,0,0,0.35)",
+				backdropFilter: "blur(2px)",
+				opacity: fading ? 0 : 0.85,
+				transition: `opacity ${CLOSE_LOOP_HINT_FADE_MS}ms ease`,
+			}}
+		>
+			Click here to close the lasso
+		</div>
+	);
+}
+
 type VisualizationPageProps = {
 	liveRoom?: LiveRoomController;
 	soloChallenge?: SoloChallengeController;
@@ -443,19 +556,31 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	
 	const [showAnnotationToolbar, setShowAnnotationToolbar] = useState(false);
 	const [isEditRendering, setIsEditRendering] = useState(false);
+	// Mirrors SegmentsPopup's "something is currently being deleted" state up
+	// to AnnotationToolbar's ribbon, same as isEditRendering does for a
+	// paint/erase/scissors commit — drives the "Deleting…" indicator on the
+	// right side of the toolbar while a class delete is in flight.
+	const [isDeletingSegment, setIsDeletingSegment] = useState(false);
 	useEffect(() => {
 		if (!showAnnotationToolbar) setEditMode((m) => (m === "brush" || m === "eraser" || m === "lasso" ? null : m));
 	}, [showAnnotationToolbar]);
 
-	// Refs into UI that lives outside AnnotationToolbar (the segments popup,
-	// the slice-jump overlay) so its Overview walkthrough can spotlight them
-	// anyway. The popup itself attaches these to its outer panel / drag
-	// header; SliceJumpInput is wrapped below since it doesn't take a ref
-	// prop of its own. See AnnotationToolbar's own doc-comment for details —
-	// the first-run "seen it once" logic now lives there too.
+	// Refs into UI outside AnnotationToolbar (segments popup, slice-jump
+	// overlay) so its Overview walkthrough can still spotlight them.
 	const annotationPopupRef = useRef<HTMLDivElement>(null);
 	const annotationPopupDragRef = useRef<HTMLDivElement>(null);
 	const annotationPopupMinRef = useRef<HTMLButtonElement>(null);
+	// Lets the topbar's auto-close handler below distinguish "this click was
+	// the pencil button itself" from "this click was some other toolbar
+	// control", so the two handlers don't double-toggle annotation mode.
+	const annotatePencilRef = useRef<HTMLButtonElement>(null);
+	// Wraps the standalone Undo/Redo buttons so the topbar's "close the
+	// annotation ribbon on any other click" handler (below) can exclude
+	// them too — otherwise clicking Undo while the ribbon is open bubbles
+	// up and immediately closes the ribbon, which reads as "undo closed
+	// the toolbar I just opened." Undo/redo should never affect ribbon
+	// visibility, only mask/measurement history.
+	const undoRedoGroupRef = useRef<HTMLDivElement>(null);
 	const sliceJumpWrapRef = useRef<HTMLDivElement>(null);
 
 	useEffect(() => {
@@ -564,6 +689,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	
 	const [outlineOpacityValue, setOutlineOpacityValue] = useState(0);
 	// Current/total slice per MPR pane, for the "245/519" caption + drag scrollbar.
+	// One event per case actually opened in the viewer — not per re-render, and
+	// not for a viewer opened on a local file, which has no case behind it.
+	useEffect(() => {
+		if (pantsCase || sessionId) track("viewer_open_case");
+	}, [pantsCase, sessionId]);
+
 	// Populated by subscribeToSliceChanges once the volume is ready; null until then.
 	const [sliceInfo, setSliceInfo] = useState<Record<CinePane, SliceInfo | null>>({
 		axial: null,
@@ -650,6 +781,23 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// floating gear reveals it — so the viewer opens clean/full-bleed.
 	const [showToolbar, setShowToolbar] = useState(false);
 	const topbarRef = useRef<HTMLDivElement>(null);
+	// Keep --vp-topbar-h in sync with the real toolbar height (it wraps to
+	// multiple rows on narrow screens) so anything docked below it — the
+	// annotation ribbon — always sits flush under it instead of guessing a
+	// fixed pixel value.
+	useEffect(() => {
+		const el = topbarRef.current;
+		const root = document.documentElement;
+		if (!showToolbar || !el) {
+			root.style.setProperty("--vp-topbar-h", "0px");
+			return;
+		}
+		const sync = () => root.style.setProperty("--vp-topbar-h", `${el.getBoundingClientRect().height}px`);
+		sync();
+		const ro = new ResizeObserver(sync);
+		ro.observe(el);
+		return () => ro.disconnect();
+	}, [showToolbar]);
 	const stageRef = useRef<HTMLDivElement>(null);
 	const [showOrganDetails, setShowOrganDetails] = useState(false);
 	const [loading, setLoading] = useState(true);
@@ -700,6 +848,15 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		if (tool && !hasActiveTarget) return; // no target picked — refuse to activate anything
 		setActiveToolbarTool(tool);
 		setEditMode(tool ? TOOLBAR_TO_EDIT_MODE[tool] ?? null : null);
+		// setMaskBrushSize's very first call (from the slider) is the only
+		// thing that ever pushes diameterMm into Cornerstone's tool group —
+		// if the group wasn't ready yet at that point (e.g. the user paints
+		// before ever touching the slider), the brush silently falls back to
+		// Cornerstone's own default instead of the 10mm the slider shows.
+		// Re-push it here, every time paint/erase is actually selected, so
+		// what gets painted always matches the slider by the time the brush
+		// can be used — cheap and idempotent if it was already applied.
+		if (tool === "paint" || tool === "erase") setMaskBrushSize(diameterMm);
 	  };
 
 	
@@ -710,6 +867,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const [diameterMm, setDiameterMm] = useState(10);
 	const [scissorsOptions, setScissorsOptions] = useState<ScissorsOptions>({
 		operation: "eraseInside",
+		magnetEnabled: true,
 	});
 
 	const [activeSegment, setActiveSegmentState] = useState<number | null>(null);
@@ -717,15 +875,14 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const [levelTraceOperation, setLevelTraceOperation] = useState<LevelTraceOperation>("fillInside");
 	const [segmentColorsHex, setSegmentColorsHex] = useState<Record<number, string>>({});
 	const [segmentVisibility, setSegmentVisibility] = useState<Record<number, boolean>>({});
+	// "Show only target class's mask" toggle state — on by default. See the
+	// isolation effect below for how this actually filters visibility.
+	const [showOnlyTargetMask, setShowOnlyTargetMask] = useState(true);
 	// Existing-organ dropdown in SegmentsPopup — lets the brush target one of the
 	// 32 static catalog organs without listing them all as rows.
 	const [activeCatalogOrganId, setActiveCatalogOrganId] = useState<number | null>(null);
 	const hasSegments = checkBoxData.length > 0;
-	// Static catalog organs (the 32-organ PanTS set) live entirely in the local nifti's
-	// ground-truth labelmap. They're included in checkBoxData at load, so masking scope
-	// (inside/outside this/all/visible segments) resolves for them the same way it does
-	// for runtime-created custom classes — no special-casing needed.
-	
+
 
 	// keep MaskBrush target in sync with the popup's active segment
 	useEffect(() => {
@@ -747,13 +904,32 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	}
 	}, [activeToolbarTool]);
 
-	const setActiveSegment = (id: number) => setActiveSegmentState(id);
+	const setActiveSegment = (id: number | null) => setActiveSegmentState(id);
+
+	// Shared by both "select a custom class" and "select an existing organ"
+	// (see onSelect/handleSelectCatalogOrgan below): moves both the 2D MPR
+	// crosshair and the 3D crosshair to the centroid of whatever class was
+	// just targeted, on axial/sagittal/coronal at once — same mechanism the
+	// sidebar's "jump to organ" already uses (handleJumpToOrgan below), just
+	// triggered from the popup's own row click instead. No-ops quietly if
+	// the class has no voxels yet (nothing painted into it) or centroid data
+	// isn't available for it.
+	const jumpCrosshairToSegmentCentroid = (label: number) => {
+		const centroid = getOrganCentroids()?.[label];
+		if (!centroid) return;
+		moveCornerstoneCrosshairToMm(centroid);
+		setCrosshairMm(centroid);
+	};
 
 	// Selecting an existing organ from the dropdown targets the brush at it
 	// exactly like clicking a custom-segment row does.
 	const handleSelectCatalogOrgan = (id: number | null) => {
 		setActiveCatalogOrganId(id);
-		if (id != null) setActiveSegmentState(id);
+		// Keep activeSegment in lockstep in both directions — deselecting
+		// (id === null) must clear activeSegment too, or a stale id lingers
+		// and SegmentsPopup keeps showing a target as active.
+		setActiveSegmentState(id);
+		if (id != null) jumpCrosshairToSegmentCentroid(id);
 	};
 	const handleRenameSegment = (id: number, name: string): boolean => {
 		const dup = checkBoxData.some((s) => s.id !== id && s.label.toLowerCase() === name.toLowerCase());
@@ -768,6 +944,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	};
 
 	const handleToggleSegmentVisibility = (id: number) => {
+	track("viewer_toggle_organ");
 	setSegmentVisibility((prev) => {
 		const next = { ...prev, [id]: prev[id] === false ? true : false };
 		setCheckState((cs) => {
@@ -806,11 +983,16 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	setCheckState((prev) => { const n = [...prev]; n[id] = false; return n; });
 	setSegmentColorsHex((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
 	setSegmentVisibility((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
-	if (activeCatalogOrganId === id) setActiveCatalogOrganId(null);
-	if (activeSegment === id) setActiveSegmentState(checkBoxData.find((s) => s.id !== id)?.id ?? null);
+	// Deleting a class should always leave nothing targeted — not fall back
+	// to auto-picking another remaining class as the new target — so the
+	// person has to deliberately pick their next target rather than
+	// unknowingly keep painting into whatever class happened to be next in
+	// the list.
+	setActiveCatalogOrganId(null);
+	setActiveSegmentState(null);
 	};
 
-	const renderAnnotationFlyout = (tool: Exclude<PrimaryEditTool, null>) => {
+	const renderAnnotationFlyout = (tool: Exclude<PrimaryEditTool, null>, onApplied: () => void, onCloseSettings: () => void, onGuidedControlsChange: (controls: import("../components/segmentation/SliceAnchorPickerUI").GuidedFlowControls | null) => void) => {
 	switch (tool) {
 		case "margin": {
 			const marginInfo = activeSegment ? getActualMarginMm(3) : null;
@@ -823,12 +1005,16 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			}}			
 				actualMm={marginInfo?.mm ?? null}
 				actualVoxels={marginInfo?.voxels ?? null}
+				onApplied={onApplied}
+				onBusyChange={setIsEditRendering}
 			  />
 			);
 		  }
 		  case "islands":
 			return (
 			  <IslandsPanel
+				onCloseSettings={onCloseSettings}
+				onGuidedControlsChange={onGuidedControlsChange}
 				onApply={(op, min) => {
 					const r = applyIslandsOperation(op, min, islandSeedVoxel ?? undefined, maskFilter);
 				  if (r) {
@@ -858,6 +1044,15 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 							for (const s of r.createdSegments!) next[s.id] = colorToHex(s.color);
 							return next;
 						});
+						// Same "just-created class becomes the target" behavior as
+						// handleCreateClass above — otherwise the edit target is left
+						// pointed at whatever the split just broke apart, which is a
+						// confusing thing to keep painting into. Picks the first of
+						// the new classes (order matches newLabelForComponent's
+						// insertion order on the backend, which isn't otherwise
+						// meaningful, but it has to be one of them).
+						setActiveSegmentState(r.createdSegments[0].id);
+						setActiveCatalogOrganId(null);
 					}
 				  }
 				}}
@@ -867,6 +1062,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				hasSelectedIsland={islandSeedVoxel != null && !islandPickInvalid}
 				pickedInvalid={islandPickInvalid}
 				targetKey={activeCatalogOrganId ?? activeSegment}
+				onApplied={onApplied}
+				onBusyChange={setIsEditRendering}
 			  />
 			);
 			case "logicalOperators":
@@ -885,6 +1082,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					  const r = applyLogicalOperator(op, target, src, bypass, maskFilter);
 					  if (r) sessionRef.current?.log("edit", `Logical op ${op} (${r.changedVoxels.toLocaleString()} vox)`, 2000);
 					}}
+					onApplied={onApplied}
+					onBusyChange={setIsEditRendering}
 				  />
 				);
 		case "growFromSeeds":
@@ -898,6 +1097,10 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			clearScribbles={smartFill.clearScribbles}
 			hasForegroundMarks={smartFill.hasForegroundMarks}
 			hasBackgroundMarks={smartFill.hasBackgroundMarks}
+			onApplied={onApplied}
+			onCloseSettings={onCloseSettings}
+			onGuidedControlsChange={onGuidedControlsChange}
+			onBusyChange={setIsEditRendering}
 			/>
 		);
 		case "fillBetweenSlices":
@@ -908,6 +1111,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			segmentIndex={activeSegment ?? 1}
 			maskFilter={maskFilter}
 			onLog={(d) => sessionRef.current?.log("edit", d, 2000)}
+			onApplied={onApplied}
+			onCloseSettings={onCloseSettings}
+			onGuidedControlsChange={onGuidedControlsChange}
 			/>
 		);
 		case "copyAcrossSlices":
@@ -918,6 +1124,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			segmentIndex={activeSegment ?? 1}
 			maskFilter={maskFilter}
 			onLog={(d) => sessionRef.current?.log("edit", d, 2000)}
+			onApplied={onApplied}
+			onCloseSettings={onCloseSettings}
+			onGuidedControlsChange={onGuidedControlsChange}
 			/>
 		);
 		case "hollow":
@@ -926,6 +1135,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			segmentIndex={activeSegment ?? 1}
 			maskFilter={maskFilter}
 			onLog={(d) => sessionRef.current?.log("edit", d, 2000)}
+			onApplied={onApplied}
+			onBusyChange={setIsEditRendering}
 			/>
 		);
 		case "smoothing":
@@ -936,6 +1147,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				const r = applySmoothing(kernelMm, applyToVisible, ids, maskFilter);
 				if (r) sessionRef.current?.log("edit", `Smoothing ${method} (${r.changedVoxels.toLocaleString()} vox)`, 2000);
 			}}
+			onApplied={onApplied}
+			onBusyChange={setIsEditRendering}
 			/>
 		);
 		case "levelTracing":
@@ -945,6 +1158,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					onOperationChange={setLevelTraceOperation}
 					toleranceHu={levelTraceTolerance}
 					onToleranceChange={setLevelTraceTolerance}
+					onCloseSettings={onCloseSettings}
 				/>
 			);
 	}
@@ -1017,9 +1231,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	);
 
 
-	// Resolves what the BRUSH is allowed to overwrite, given the same maskingArea/ids
-	// every other tool's maskFilter already encodes. Brush locking is per-segment (not
-	// per-voxel), so "outside X" unlocks every segment except X; "inside X" unlocks
+	// Applies live pointer-driven edits (brush/eraser/scissors/level tracing):
+	// shows the "applying" indicator and commits the brush's mask guard.
 	useEffect(() => {
 		const isLiveCommitTool =
 			editMode === "brush" ||
@@ -1104,6 +1317,11 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		operation: levelTraceOperation,
 		activeSegmentIndex: activeSegment,
 		maskFilter,
+		// Lets the hook re-derive its cached preview outline (voxel-space,
+		// camera-independent) against the new camera the instant zoom changes,
+		// instead of leaving it drawn at old canvas pixels until the next
+		// mousemove happens to refresh it.
+		cameraVersion: zoomLevel,
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 1500),
 	});
 
@@ -1123,6 +1341,37 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	useEffect(() => { windowRef.current = { w: windowWidth, c: windowCenter }; }, [windowWidth, windowCenter]);
 	useEffect(() => { checkStateRef.current = checkState; }, [checkState]);
 	useEffect(() => { checkBoxDataRef.current = checkBoxData; }, [checkBoxData]);
+
+	// "Show only target class's mask" — one effect, driven directly off the
+	// toggle + whatever's currently targeted:
+	//   - ON: only the targeted class stays visible, everything else hides.
+	//     Re-runs whenever the target changes too, so switching targets
+	//     while the toggle is on automatically swaps which mask shows.
+	//   - OFF: every class goes back to visible. This used to try to
+	//     restore a snapshot of per-class visibility taken via a ref, but
+	//     that snapshot was captured on mount (before segments had even
+	//     loaded) and never refreshed afterward, so switching off almost
+	//     always restored stale/empty state instead of actually revealing
+	//     the other masks. Unconditionally showing everything on
+	//     toggle-off is simpler and is what "show only target mask" -> off
+	//     actually promises.
+	const isolationTargetKey = activeCatalogOrganId ?? activeSegment;
+	useEffect(() => {
+		// No target selected — always show every mask, whether or not "show
+		// only target mask" is on. Isolating to a single class only makes
+		// sense once something is actually targeted; with nothing targeted,
+		// silently leaving whatever was isolated before (or hiding
+		// everything) both read as the mask having vanished for no reason.
+		if (isolationTargetKey == null) {
+			setCheckState((prev) => prev.map(() => true));
+			return;
+		}
+		if (showOnlyTargetMask) {
+			setCheckState((prev) => prev.map((_, id) => id === isolationTargetKey));
+		} else {
+			setCheckState((prev) => prev.map(() => true));
+		}
+	}, [showOnlyTargetMask, isolationTargetKey]);
 	// 3D pane rendering mode: organ meshes (dataset cases) or shaded GPU volume
 	// rendering of the CT itself (the only 3D option for local DICOM).
 	const [threeDMode, setThreeDMode] = useState<"mesh" | "volume">(isLocal ? "volume" : "mesh");
@@ -1221,6 +1470,23 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(null);
 			releasePrimaryMouseTools();
+		} else if (editMode === "lasso" || activeToolbarTool === "levelTracing") {
+			// Scissors/lasso (editMode "lasso") and level tracing (its own hook,
+			// keyed off activeToolbarTool rather than editMode) all place their
+			// points via plain clicks on the pane, same as smart fill's
+			// scribbling — so the crosshair tool needs to be OFF here too, not
+			// just left to whatever `crosshairToolActive` (the user's saved
+			// navigation preference) happens to be. Previously this fell
+			// through to the plain `else` below, which re-enabled Crosshairs
+			// whenever `crosshairToolActive` was true (the default) — so the
+			// crosshair stayed live and interactive under the polygon/trace
+			// clicks even though the toolbar's own crosshair button visually
+			// showed itself as deselected (its active-state check already
+			// excludes any editMode) — nothing in the UI hinted navigation was
+			// still armed underneath.
+			setActiveMeasurementTool(null);
+			setActiveMaskEditTool(null);
+			toggleCrosshairTool(false);
 		} else if (activeMeasureTool) {
 			setActiveMaskEditTool(null);
 			setActiveMeasurementTool(activeMeasureTool);
@@ -1229,7 +1495,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			setActiveMeasurementTool(null);
 			toggleCrosshairTool(crosshairToolActive);
 		}
-	}, [editMode, activeMeasureTool, crosshairToolActive]);
+	}, [editMode, activeToolbarTool, activeMeasureTool, crosshairToolActive]);
 
 
 
@@ -1409,6 +1675,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					const measurement = serializeMeasurement(m.uid);
 					if (measurement) sendLiveRoomDurable("measurement.upsert", { measurement });
 				}
+			}
+			if (kind === "completed") {
+				track("viewer_measure");
 			}
 			if (kind === "completed" && sessionRef.current) {
 				sessionRef.current.log("measure", `${toolDisplayName(m.tool)} measured: ${m.value}`);
@@ -2671,6 +2940,25 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		}
 	};
 
+	const handleToggleAnnotationToolbar = () => {
+		const opening = !showAnnotationToolbar;
+		setShowAnnotationToolbar(opening);
+		if (!opening) {
+			// Closing (deselecting the Annotate button): drop whatever class
+			// was targeted — the isolation effect above reacts to
+			// activeCatalogOrganId/activeSegment both going null by putting
+			// every segmentation mask back to visible — and back out of
+			// whatever tool/edit mode was active, so the toolbar and popup
+			// (both driven by the same `open`/`showAnnotationToolbar` prop)
+			// close together instead of the target/tool state lingering
+			// invisibly after the UI has visually gone away.
+			setActiveCatalogOrganId(null);
+			setActiveSegmentState(null);
+			setEditMode(null);
+			setActiveToolbarTool(null);
+		}
+	};
+
 	const handleToggleStats = () => {
 		// The right-side slot is shared by stats / metadata / measurements / mask editing.
 		setShowMetadata(false);
@@ -2697,6 +2985,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		if (liveRoom?.metadata.mode === "quiz") return;
 		const opening = !showAISidebar;
 
+		if (opening) track("assistant_open");
 		setShowAISidebar(opening);
 
 		if (opening) {
@@ -2829,7 +3118,15 @@ const aiAvailableOrgans = useMemo(() => {
 		});
 		setLabelColorMap((prev) => ({ ...prev, [result.segmentIndex]: result.color }));
 		setSegmentColorsHex((prev) => ({ ...prev, [result.segmentIndex]: colorHex }));
-	
+
+		// A brand-new class is almost always the thing the person immediately
+		// wants to draw into — targeting it automatically saves the extra
+		// "now go click it in the list" round trip every other tool already
+		// spares them for. Also drops any catalog-organ target, since a
+		// custom class and a catalog organ are mutually exclusive targets.
+		setActiveSegmentState(result.segmentIndex);
+		setActiveCatalogOrganId(null);
+
 		sessionRef.current?.log("edit", `Created new class "${trimmed}"`, 2000);
 		return newOrgan;
 	};
@@ -2887,9 +3184,16 @@ const aiAvailableOrgans = useMemo(() => {
 		});
 	};
 
-	const handlePaneHoverLeave = () => {
+	const handlePaneHoverLeave = (pane: CinePane) => () => {
 		if (liveRoom?.metadata.mode === "review") liveRoom.sendPresence({ cursor: null });
 		setHoverOrganTip((t) => (t.visible ? { ...t, visible: false } : t));
+		// Without this, BrushTool can leave its circular cursor painted in the
+		// pane you just moved out of instead of it reading as one cursor that
+		// travels with the mouse across axial/sagittal/coronal — see
+		// clearMaskEditCursor's own comment in CornerstoneNifti2 for why.
+		if (activeToolbarTool === "paint" || activeToolbarTool === "erase") {
+			clearMaskEditCursor(pane);
+		}
 	};
 
 	const navBack = () => {
@@ -2909,7 +3213,7 @@ const aiAvailableOrgans = useMemo(() => {
 	return (
 		<div
 			ref={vpRootRef}
-			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${liveRoom ? " is-live-room" : ""}${soloChallenge ? " is-solo-challenge" : ""}${quizPractice ? " is-quiz-practice" : ""}`}
+			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${showAnnotationToolbar ? " annotation-open" : ""}${liveRoom ? " is-live-room" : ""}${soloChallenge ? " is-solo-challenge" : ""}${quizPractice ? " is-quiz-practice" : ""}`}
 			onPointerDownCapture={(event) => {
 				if (!liveRoom?.followingId) return;
 				const target = event.target as HTMLElement;
@@ -2941,7 +3245,25 @@ const aiAvailableOrgans = useMemo(() => {
 			{/* ---- Top toolbar (PYCAD-style). Lives in normal flow, so it sits ABOVE the
 			     viewports and never overlays them. Shown/hidden by the gear button. ---- */}
 			{showToolbar && (
-				<div className="vp-topbar" ref={topbarRef}>
+				<div
+					className="vp-topbar"
+					ref={topbarRef}
+					onClick={(e) => {
+						// Clicking any OTHER control in the main toolbar while the
+						// annotation ribbon is open closes it — same as clicking the
+						// pencil again. The pencil button is excluded here since its
+						// own onClick already toggles the state; without the
+						// exclusion this bubbling handler would immediately flip it
+						// back off right after turning it on.
+						if (
+							showAnnotationToolbar &&
+							!annotatePencilRef.current?.contains(e.target as Node) &&
+							!undoRedoGroupRef.current?.contains(e.target as Node)
+						) {
+							setShowAnnotationToolbar(false);
+						}
+					}}
+				>
 					{/* Gear (hides the bar) + home, in-flow so there's no dead corner space */}
 					<button
 						className="vp-iconbtn"
@@ -3022,7 +3344,7 @@ const aiAvailableOrgans = useMemo(() => {
 												{LAYOUT_PRESETS.map(({ id, label }) => (
 													<button
 														key={id}
-														onClick={() => setLayoutPreset(id)}
+														onClick={() => { track("viewer_change_layout"); setLayoutPreset(id); }}
 														className={`vp-seg__btn ${layoutPreset === id ? "vp-seg__btn--active" : ""}`}
 													>{label}</button>
 												))}
@@ -3388,31 +3710,37 @@ const aiAvailableOrgans = useMemo(() => {
 
 											{/* Undo/redo stay standalone (not grouped) — they're used constantly
 											    during a review and shouldn't cost an extra click to reach. Cover
-											    measurements as well as mask edits; ⌘Z/⇧⌘Z work everywhere too. */}
-											<button
-											className="vp-tool"
-											onClick={() => liveRoom ? liveRoom.requestUndo() : undoMaskEdit()}
-											disabled={collaborationDisabled}
-												aria-label="Undo"
-											>
-												<IconArrowBackUp size={20} color="white" />
-												<span className="vp-tool__tip">Undo (⌘Z) — measurements & mask edits</span>
-											</button>
-											<button
-											className="vp-tool"
-											onClick={() => redoMaskEdit()}
-											disabled={Boolean(liveRoom)}
-												aria-label="Redo"
-											>
-												<IconArrowForwardUp size={20} color="white" />
-												<span className="vp-tool__tip">Redo (⇧⌘Z)</span>
-											</button>
+											    measurements as well as mask edits; ⌘Z/⇧⌘Z work everywhere too.
+											    Wrapped in undoRedoGroupRef so clicking either button never closes
+											    an already-open annotation ribbon (see the topbar's onClick above) —
+											    undo/redo history is independent of ribbon visibility. */}
+											<div ref={undoRedoGroupRef} style={{ display: "contents" }}>
+												<button
+													className="vp-tool"
+													onClick={() => liveRoom ? liveRoom.requestUndo() : undoMaskEdit()}
+													disabled={collaborationDisabled}
+													aria-label="Undo"
+												>
+													<IconArrowBackUp size={20} color="white" />
+													<span className="vp-tool__tip">Undo (⌘Z) — measurements & mask edits</span>
+												</button>
+												<button
+													className="vp-tool"
+													onClick={() => redoMaskEdit()}
+													disabled={Boolean(liveRoom)}
+													aria-label="Redo"
+												>
+													<IconArrowForwardUp size={20} color="white" />
+													<span className="vp-tool__tip">Redo (⇧⌘Z)</span>
+												</button>
+											</div>
 											
 											{!isLocal && !soloChallenge && liveRoom?.metadata.mode !== "quiz" && (
 												<button
+													ref={annotatePencilRef}
 													className={`vp-tool ${showAnnotationToolbar ? "vp-tool--active" : ""}`}
 													disabled={collaborationDisabled}
-													onClick={() => setShowAnnotationToolbar((v) => !v)}
+													onClick={handleToggleAnnotationToolbar}
 													aria-label="Annotate"
 													aria-pressed={showAnnotationToolbar}
 												>
@@ -3600,7 +3928,7 @@ const aiAvailableOrgans = useMemo(() => {
 											{!isLocal && !soloChallenge && (
 												<button
 													className="vp-tool"
-													onClick={() => setShowReportScreen(true)}
+													onClick={() => { track("report_open"); setShowReportScreen(true); }}
 													aria-label="Open report"
 												>
 													<IconReport size={20} color="white" />
@@ -3765,7 +4093,7 @@ const aiAvailableOrgans = useMemo(() => {
 								activeDrawTool.handleMouseMove("axial")(e);
 								levelTracing.handleMouseMove("axial")(e);
 							}}
-							onMouseLeave={handlePaneHoverLeave}
+							onMouseLeave={handlePaneHoverLeave("axial")}
 							onWheel={focusedPane.handleWheel("axial")}
 						></div>
 						{!loading && renderPaneOverlays("axial")}
@@ -3777,12 +4105,12 @@ const aiAvailableOrgans = useMemo(() => {
 								{smartFill.preview.axial.fg
 									.filter((p) => p.slice === (sliceInfo.axial?.current ?? -1))
 									.map((p, i) => (
-										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#22d3ee" stroke="#08090b" strokeWidth={1.5} />
+										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#E76F51" stroke="#08090b" strokeWidth={1.5} />
 									))}
 								{smartFill.preview.axial.bg
 									.filter((p) => p.slice === (sliceInfo.axial?.current ?? -1))
 									.map((p, i) => (
-										<circle key={`bg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#f43f5e" stroke="#08090b" strokeWidth={1.5} />
+										<circle key={`bg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#000000" stroke="#08090b" strokeWidth={1.5} />
 									))}
 							</svg>
 						)}
@@ -3795,6 +4123,9 @@ const aiAvailableOrgans = useMemo(() => {
 							livePreviewPath={activeDrawTool.livePreviewPath}
 						/>
 						)}
+						{editMode === "lasso" && activeDrawTool.pane === "axial" && (
+							<CloseLoopHint nearClose={activeDrawTool.nearClose} anchor={activeDrawTool.cornersCanvas[0]} />
+						)}
 						{activeToolbarTool === "levelTracing" && levelTracing.previewPane === "axial" && levelTracing.previewPath && (
 						<svg
 							className="vp-leveltrace-overlay"
@@ -3802,8 +4133,8 @@ const aiAvailableOrgans = useMemo(() => {
 						>
 							<polygon
 								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
-								fill="rgba(234, 179, 8, 0.22)"
-								stroke="#eab308"
+								fill="rgba(15, 23, 42, 0.22)"
+								stroke="#0F172A"
 								strokeWidth={2}
 							/>
 						</svg>
@@ -3814,8 +4145,8 @@ const aiAvailableOrgans = useMemo(() => {
 							<div
 								className="vp-brush-preview"
 								style={{
-									width: diameterMm * PX_PER_MM_APPROX * zoomLevel,
-									height: diameterMm * PX_PER_MM_APPROX * zoomLevel,
+									width: diameterMm * getPanePxPerMm(axial_ref.current),
+									height: diameterMm * getPanePxPerMm(axial_ref.current),
 								}}
 							/>
 						)}
@@ -3843,7 +4174,7 @@ const aiAvailableOrgans = useMemo(() => {
 							activeDrawTool.handleMouseMove("sagittal")(e);
 							levelTracing.handleMouseMove("sagittal")(e);
 						}}
-						onMouseLeave={handlePaneHoverLeave}
+						onMouseLeave={handlePaneHoverLeave("sagittal")}
 						onWheel={focusedPane.handleWheel("sagittal")}
 					></div>
 						{!loading && renderPaneOverlays("sagittal")}
@@ -3855,12 +4186,12 @@ const aiAvailableOrgans = useMemo(() => {
 								{smartFill.preview.sagittal.fg
 									.filter((p) => p.slice === (sliceInfo.sagittal?.current ?? -1))
 									.map((p, i) => (
-										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#22d3ee" stroke="#08090b" strokeWidth={1.5} />
+										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#E76F51" stroke="#08090b" strokeWidth={1.5} />
 									))}
 								{smartFill.preview.sagittal.bg
 									.filter((p) => p.slice === (sliceInfo.sagittal?.current ?? -1))
 									.map((p, i) => (
-										<circle key={`bg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#f43f5e" stroke="#08090b" strokeWidth={1.5} />
+										<circle key={`bg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#000000" stroke="#08090b" strokeWidth={1.5} />
 									))}
 							</svg>
 						)}
@@ -3873,6 +4204,9 @@ const aiAvailableOrgans = useMemo(() => {
 								livePreviewPath={activeDrawTool.livePreviewPath}
 							/>
 						)}
+						{editMode === "lasso" && activeDrawTool.pane === "sagittal" && (
+							<CloseLoopHint nearClose={activeDrawTool.nearClose} anchor={activeDrawTool.cornersCanvas[0]} />
+						)}
 						{activeToolbarTool === "levelTracing" && levelTracing.previewPane === "sagittal" && levelTracing.previewPath && (
 						<svg
 							className="vp-leveltrace-overlay"
@@ -3880,8 +4214,8 @@ const aiAvailableOrgans = useMemo(() => {
 						>
 							<polygon
 								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
-								fill="rgba(234, 179, 8, 0.22)"
-								stroke="#eab308"
+								fill="rgba(15, 23, 42, 0.22)"
+								stroke="#0F172A"
 								strokeWidth={2}
 							/>
 						</svg>
@@ -3892,8 +4226,8 @@ const aiAvailableOrgans = useMemo(() => {
 							<div
 								className="vp-brush-preview"
 								style={{
-									width: diameterMm * PX_PER_MM_APPROX * zoomLevel,
-									height: diameterMm * PX_PER_MM_APPROX * zoomLevel,
+									width: diameterMm * getPanePxPerMm(sagittal_ref.current),
+									height: diameterMm * getPanePxPerMm(sagittal_ref.current),
 								}}
 							/>
 						)}
@@ -3924,7 +4258,7 @@ const aiAvailableOrgans = useMemo(() => {
 							activeDrawTool.handleMouseMove("coronal")(e);
 							levelTracing.handleMouseMove("coronal")(e);
 						}}
-						onMouseLeave={handlePaneHoverLeave}
+						onMouseLeave={handlePaneHoverLeave("coronal")}
 						onWheel={focusedPane.handleWheel("coronal")}
 					></div>
 					{!loading && renderPaneOverlays("coronal")}
@@ -3936,12 +4270,12 @@ const aiAvailableOrgans = useMemo(() => {
 								{smartFill.preview.coronal.fg
 									.filter((p) => p.slice === (sliceInfo.coronal?.current ?? -1))
 									.map((p, i) => (
-										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#22d3ee" stroke="#08090b" strokeWidth={1.5} />
+										<circle key={`fg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#E76F51" stroke="#08090b" strokeWidth={1.5} />
 									))}
 								{smartFill.preview.coronal.bg
 									.filter((p) => p.slice === (sliceInfo.coronal?.current ?? -1))
 									.map((p, i) => (
-										<circle key={`bg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#f43f5e" stroke="#08090b" strokeWidth={1.5} />
+										<circle key={`bg${i}`} cx={p.pos[0]} cy={p.pos[1]} r={5} fill="#000000" stroke="#08090b" strokeWidth={1.5} />
 									))}
 							</svg>
 						)}
@@ -3954,6 +4288,9 @@ const aiAvailableOrgans = useMemo(() => {
 								livePreviewPath={activeDrawTool.livePreviewPath}
 							/>
 						)}
+						{editMode === "lasso" && activeDrawTool.pane === "coronal" && (
+							<CloseLoopHint nearClose={activeDrawTool.nearClose} anchor={activeDrawTool.cornersCanvas[0]} />
+						)}
 
 						{activeToolbarTool === "levelTracing" && levelTracing.previewPane === "coronal" && levelTracing.previewPath && (
 						<svg
@@ -3962,8 +4299,8 @@ const aiAvailableOrgans = useMemo(() => {
 						>
 							<polygon
 								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
-								fill="rgba(234, 179, 8, 0.22)"
-								stroke="#eab308"
+								fill="rgba(15, 23, 42, 0.22)"
+								stroke="#0F172A"
 								strokeWidth={2}
 							/>
 						</svg>
@@ -3974,8 +4311,8 @@ const aiAvailableOrgans = useMemo(() => {
 							<div
 								className="vp-brush-preview"
 								style={{
-									width: diameterMm * PX_PER_MM_APPROX * zoomLevel,
-									height: diameterMm * PX_PER_MM_APPROX * zoomLevel,
+									width: diameterMm * getPanePxPerMm(coronal_ref.current),
+									height: diameterMm * getPanePxPerMm(coronal_ref.current),
 								}}
 							/>
 						)}
@@ -4000,8 +4337,8 @@ const aiAvailableOrgans = useMemo(() => {
 									No organ meshes for local DICOM
 									<span>(switch to Volume rendering above)</span>
 								</div>
-							) : (
-								<SegmentationMeshViewer caseId={caseId} crosshairMm={crosshairMm} checkState={meshCheckState} loading={loading} opacity={opacityValue} customOrgans={customOrgans} labelColorMap={labelColorMap} />
+											) : (
+								<SegmentationMeshViewer caseId={caseId} isSession={!!sessionId && !pantsCase} crosshairMm={crosshairMm} checkState={meshCheckState} loading={loading} opacity={opacityValue} customOrgans={customOrgans} labelColorMap={labelColorMap} />
 							)}
 						</div>
 						{!loading && (
@@ -4322,10 +4659,15 @@ const aiAvailableOrgans = useMemo(() => {
 				hasAnySegments={hasAnySegments}
 				scopeLocked={false}
 				isRendering={isEditRendering}
+				isDeletingSegment={isDeletingSegment}
+				targetKey={activeCatalogOrganId ?? activeSegment}
+				showOnlyTargetMask={showOnlyTargetMask}
+				onShowOnlyTargetMaskChange={setShowOnlyTargetMask}
 				popupRef={annotationPopupRef}
 				popupDragRef={annotationPopupDragRef}
 				popupMinRef={annotationPopupMinRef}
 				sliceJumpRef={sliceJumpWrapRef}
+				anchorRef={annotatePencilRef}
 			/>
 			<SegmentsPopup
 				open={showAnnotationToolbar}
@@ -4333,12 +4675,17 @@ const aiAvailableOrgans = useMemo(() => {
 				colors={segmentColorsHex}
 				visibility={segmentVisibility}
 				activeSegmentId={activeSegment}
-				onSelect={(id) => { setActiveSegment(id); setActiveCatalogOrganId(null); }}
+				onSelect={(id) => {
+					setActiveSegment(id);
+					setActiveCatalogOrganId(null);
+					if (id != null) jumpCrosshairToSegmentCentroid(id);
+				}}
 				onRename={handleRenameSegment}
 				onColorChange={handleSegmentColorChange}
 				onToggleVisibility={handleToggleSegmentVisibility}
 				onDelete={handleDeleteSegment}
 				onCreate={handleCreateClass}
+				onDeletingChange={setIsDeletingSegment}
 				organCatalog={organCatalog}
 				activeCatalogOrganId={activeCatalogOrganId}
 				onSelectCatalogOrgan={handleSelectCatalogOrgan}

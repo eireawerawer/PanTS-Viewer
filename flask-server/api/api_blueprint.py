@@ -75,6 +75,8 @@ import threading
 # directory before it touches os.path; secure_filename is the barrier at each
 # path-construction site.
 from .path_safety import is_safe_id as _is_safe_id
+from .auth import current_user
+from services import plan_store
 
 
 def _metadata_xlsx_path():
@@ -262,15 +264,17 @@ def get_preview(clabel_ids):
 def get_image_preview(clabel_id):
     if not _is_safe_id(clabel_id):
         return jsonify({"error": "Invalid id"}), 400
-    if get_dataset_from_case_id(secure_filename(clabel_id)) == "CancerVerse":
-        # No profile thumbnails for CancerVerse yet — let the frontend fall back.
-        return jsonify({"error": "No preview for CancerVerse case"}), 404
-    path = os.path.join(Constants.PANTS_PATH, "profile_only", get_panTS_id(secure_filename(clabel_id)), "profile.jpg")
+    safe_id = secure_filename(clabel_id)
+    if get_dataset_from_case_id(safe_id) == "CancerVerse":
+        # Generated offline by scripts/make_profile_previews.pY
+        path = os.path.join(Constants.CANCERVERSE_PATH, "profile_only", get_cancerverse_id(safe_id), "profile.jpg")
+    else:
+        path = os.path.join(Constants.PANTS_PATH, "profile_only", get_panTS_id(safe_id), "profile.jpg")
     if not os.path.exists(path):
         return jsonify({"error": f"File not found: {path} "}), 404
     return send_file(
         path,
-        mimetype="image/jpg",   
+        mimetype="image/jpg",
         as_attachment=False,
         download_name=f"{clabel_id}_slice.jpg"
     )
@@ -1001,6 +1005,14 @@ def _set_inference_job(session_id, **kwargs):
         inference_jobs[session_id] = current
         snapshot = dict(current)
     _persist_inference_job(session_id, snapshot)
+    # A run that has stopped no longer occupies one of the plan's concurrent
+    # slots. Best-effort: a bookkeeping failure must not break the status write
+    # that the polling frontend depends on.
+    if (snapshot.get("status") or "").lower() in ("completed", "failed", "cancelled"):
+        try:
+            plan_store.finish_inference(session_id)
+        except Exception as e:
+            print(f"[usage finish] {session_id}: {e}")
 
 
 def _get_inference_job(session_id):
@@ -1045,6 +1057,24 @@ def _uploaded_file_candidate(session_id, uploaded_filename):
 def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_path=None):
     if not _is_safe_id(session_id):
         return jsonify({"error": "Invalid session ID"}), 400
+
+    # Plan enforcement sits here rather than on the routes because both
+    # /run-inference and /auto_segment funnel through this function — one gate,
+    # no way to reach the GPU around it.
+    user = current_user()
+    if user is None:
+        return jsonify({"error": "Sign in to run inference"}), 401
+    # Captured in the request context so the background worker (which has none) can
+    # attribute the scan for per-IP quotas in the user-dataset gatekeeper. Use
+    # remote_addr (set by the trusted reverse proxy) rather than a client-supplied
+    # X-Forwarded-For, which an attacker could rotate per request to defeat the cap.
+    _collector_ip = request.remote_addr or ""
+    blocked = plan_store.check_inference(user["id"], model_name)
+    if blocked is not None:
+        # 402 Payment Required: the request is well-formed and the user is
+        # authenticated — the plan is what's missing.
+        return jsonify({"error": blocked["message"], "code": "plan_limit", **blocked}), 402
+
     session_path = os.path.join(SESSIONS_DIR, session_id)
     os.makedirs(session_path, exist_ok=True)
 
@@ -1067,6 +1097,10 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
         shutil.copy2(server_input_path, input_path)
     else:
         return jsonify({"error": "No CT file provided. Send MAIN_NIFTI or INPUT_SERVER_PATH."}), 400
+
+    # Metered only once the run is definitely going ahead — every early return
+    # above is a request that never reached the queue and mustn't cost a scan.
+    plan_store.record_inference(user["id"], session_id, model_name)
 
     # "queued": the worker thread starts immediately but real GPU work waits on
     # the segmentor's one-at-a-time lock; the on_start callback below flips the
@@ -1121,6 +1155,20 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
             _set_inference_job(session_id, status="completed", error=None,
                                zip_path=zip_path, output_mask_dir=output_mask_dir)
             print(f"✅ Finished segmentation and zipping for session {session_id}")
+
+            # Non-blocking: offer this scan+mask to the user-dataset gatekeeper,
+            # which decides (async) whether it's worth keeping. The result is
+            # already delivered above; this never affects the user, and is a no-op
+            # unless USER_DATASET_PATH is configured.
+            try:
+                from services.user_dataset import collect_user_scan_async
+                collect_user_scan_async(
+                    ct_path=input_path, output_mask_dir=output_mask_dir,
+                    model=model_name, user_id=user.get("id"), ip=_collector_ip,
+                    session_id=session_id,
+                )
+            except Exception as _ude:
+                print(f"[user_dataset] hook error (non-fatal): {_ude}")
         except Exception as e:
             # A killed subprocess surfaces here as CalledProcessError/RuntimeError;
             # if the user cancelled, keep "cancelled" rather than reporting failure.
@@ -1557,6 +1605,56 @@ def get_session_segmentation(session_id):
     response.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
     response.headers['Content-Encoding'] = 'gzip'
     return response
+
+
+def _session_seg_path(session_id):
+    """Return the combined_labels.nii.gz path for a finished session, or None."""
+    job = _get_inference_job(session_id) or {}
+    output_mask_dir = job.get("output_mask_dir")
+    if not output_mask_dir:
+        return None
+    seg_path = os.path.join(output_mask_dir, "combined_labels.nii.gz")
+    return seg_path if os.path.exists(seg_path) else None
+
+
+# 3D organ meshes for an UPLOADED scan. Unlike dataset cases (whose meshes are
+# pre-baked into MESH_PATH by preprocess_meshes.py), a session has no pre-baked
+# meshes, so we build them on demand from the session's combined_labels and cache
+# them next to it. Without these routes the 3D pane hangs on "Loading 3D
+# segmentation..." because /cases/<id>/mesh-manifest 404s for a session id.
+@api_blueprint.route('/sessions/<session_id>/mesh-manifest', methods=['GET'])
+def get_session_mesh_manifest(session_id):
+    if not _is_safe_id(session_id):
+        return jsonify({"error": "Invalid id"}), 400
+    seg_path = _session_seg_path(session_id)
+    if not seg_path:
+        return jsonify({"error": "Segmentation not ready for session"}), 404
+    manifest = generate_mesh_manifest(session_id, seg_path, route_base="sessions")
+    return jsonify(manifest)
+
+
+@api_blueprint.route('/sessions/<session_id>/render_only/<filename>', methods=['GET'])
+def get_session_mesh_file(session_id, filename):
+    if not _is_safe_id(session_id):
+        return jsonify({"error": "Invalid id"}), 400
+    filename = secure_filename(filename)
+    seg_path = _session_seg_path(session_id)
+    if not seg_path:
+        return jsonify({"error": "Segmentation not ready for session"}), 404
+    # Cache the generated GLB next to the mask so repeat views / organ toggles
+    # don't re-run marching cubes.
+    cache_dir = os.path.join(os.path.dirname(seg_path), "render_only")
+    os.makedirs(cache_dir, exist_ok=True)
+    glb_path = os.path.join(cache_dir, filename)
+    if not os.path.exists(glb_path):
+        organ_key = os.path.splitext(filename)[0]
+        try:
+            glb_bytes = generate_organ_glb_bytes(organ_key, seg_path)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 404
+        with open(glb_path, "wb") as f:
+            f.write(glb_bytes)
+    return send_file(glb_path, mimetype="model/gltf-binary", conditional=False)
 
 
 @api_blueprint.route('/session-reconstruction/<session_id>', methods=['GET'])
@@ -3687,6 +3785,29 @@ def ai_models():
         }), 200
 
 
+def _ai_gate():
+    """Whether this caller may send an assistant message. None means yes.
+
+    Two refusals, both shaped like an assistant reply so the sidebar can render
+    them in the thread rather than needing a special case:
+
+      401 — signed out. The assistant costs real compute, so it needs an
+            account, the same rule inference has. Leaving it open also made the
+            daily allowance pointless: signing out was an unlimited tier.
+      402 — signed in, but the plan's daily allowance is spent.
+    """
+    user = current_user()
+    blocked = plan_store.check_assistant(user["id"] if user else None)
+    if blocked is None:
+        return None
+    signed_out = blocked["reason"] == "auth_required"
+    code = "auth_required" if signed_out else "plan_limit"
+    return jsonify({
+        "reply": blocked["message"], "actions": [], "source": code,
+        "code": code, **blocked,
+    }), 401 if signed_out else 402
+
+
 @api_blueprint.route("/ai-command", methods=["POST"])
 def ai_command():
     try:
@@ -3709,6 +3830,12 @@ def ai_command():
                     "source": "validation",
                 }
             ), 400
+
+        blocked = _ai_gate()
+        if blocked is not None:
+            return blocked
+        # The gate guarantees a signed-in user past this point.
+        plan_store.record_ai_message(current_user()["id"])
 
         available_organs = body.get(
             "available_organs"
@@ -4036,6 +4163,13 @@ def ai_command_stream():
     body = request.get_json(force=True, silent=True) or {}
 
     message = str(body.get("message") or "").strip()
+
+    # Checked before the stream opens, so the client gets a plain 401/402 it can
+    # act on rather than an error event buried in a 200 response body.
+    blocked = _ai_gate()
+    if blocked is not None:
+        return blocked
+    plan_store.record_ai_message(current_user()["id"])
 
     available_organs = body.get("available_organs") or []
     if not isinstance(available_organs, list):

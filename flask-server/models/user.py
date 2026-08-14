@@ -37,6 +37,14 @@ class User(db.Model):
     # Display name the user chose. Nullable because accounts created before this
     # column existed have none — the client falls back to the email's local part.
     name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Billing plan id (services.plan_store.PLAN_IDS). Everyone starts on "free";
+    # nothing is charged, but the limits attached to it are enforced for real.
+    plan: Mapped[str] = mapped_column(String(16), nullable=False, default="free",
+                                      server_default="free")
+    # Self-reported patient/clinician/researcher/student. Gates nothing — it is
+    # here so activity can be grouped by it. Nullable because "not set" is the
+    # honest answer for anyone who never picked one.
+    account_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # Set when the user asks to delete their account. Non-null means the account
     # is scheduled for removal: it can't be used, but signing back in within the
     # grace window clears this and restores it.
@@ -55,6 +63,8 @@ class User(db.Model):
             "id": self.id,
             "email": self.email,
             "name": self.name,
+            "plan": self.plan or "free",
+            "account_type": self.account_type,
             "email_verified": self.email_verified_at is not None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

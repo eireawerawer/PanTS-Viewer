@@ -14,7 +14,7 @@
   border: none;
   cursor: pointer;
 
-  background: #002D72;
+  background: var(--ink);
   color: #ffffff;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
 
@@ -31,7 +31,7 @@
 }
 
 .btn:hover {
-  background: #00399a;
+  background: var(--ink-2);
 }
 
 .btn:active {

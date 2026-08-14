@@ -57,7 +57,7 @@ export default function NumberSliderField({
 	return (
 		<div className="atb-flyout__section">
 			{label && <span className="atb-flyout__label">{label}</span>}
-			<div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+			<div className="atb-flyout__slider-row">
 				<input
 					type="range"
 					min={min}
@@ -71,9 +71,8 @@ export default function NumberSliderField({
 					onBlur={() => onPreviewChange?.(false)}
 					className="atb-flyout__range"
 					aria-label={ariaLabel}
-					style={{ flex: 1 }}
 				/>
-				<div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+				<div className="atb-flyout__slider-readout">
 					<input
 						type="text"
 						inputMode="decimal"

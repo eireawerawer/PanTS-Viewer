@@ -1,5 +1,6 @@
 import { render, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { AuthProvider } from "../contexts/authContext";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // The CT viewer relies on WebGL (Niivue + Cornerstone) and a three.js loader,
@@ -137,11 +138,13 @@ beforeEach(() => {
 describe("viewer smoke test", () => {
 	it("VisualizationPage mounts for a dataset case without crashing", async () => {
 		const { container } = render(
-			<MemoryRouter initialEntries={["/case/1"]}>
-				<Routes>
-					<Route path="/case/:caseId" element={<VisualizationPage />} />
-				</Routes>
-			</MemoryRouter>
+			<AuthProvider>
+				<MemoryRouter initialEntries={["/case/1"]}>
+					<Routes>
+						<Route path="/case/:caseId" element={<VisualizationPage />} />
+					</Routes>
+				</MemoryRouter>
+			</AuthProvider>
 		);
 		expect(container.firstChild).toBeTruthy();
 		await waitFor(() => expect(renderVisualization).toHaveBeenCalled());
@@ -151,9 +154,11 @@ describe("viewer smoke test", () => {
 		const controller = quizController();
 
 		render(
-			<MemoryRouter initialEntries={["/learn/quiz/radworld-case-35-v1"]}>
-				<VisualizationPage quizPractice={controller} />
-			</MemoryRouter>
+			<AuthProvider>
+				<MemoryRouter initialEntries={["/learn/quiz/radworld-case-35-v1"]}>
+					<VisualizationPage quizPractice={controller} />
+				</MemoryRouter>
+			</AuthProvider>
 		);
 
 		await waitFor(() => expect(renderVisualization).toHaveBeenCalled());
@@ -188,9 +193,11 @@ describe("viewer smoke test", () => {
 		} as never);
 
 		render(
-			<MemoryRouter initialEntries={["/learn/quiz/radworld-case-35-v1"]}>
-				<VisualizationPage quizPractice={quizController("blob:reveal-mask")} />
-			</MemoryRouter>
+			<AuthProvider>
+				<MemoryRouter initialEntries={["/learn/quiz/radworld-case-35-v1"]}>
+					<VisualizationPage quizPractice={quizController("blob:reveal-mask")} />
+				</MemoryRouter>
+			</AuthProvider>
 		);
 
 		await waitFor(() => expect(ctUpdateRange).toHaveBeenCalled());

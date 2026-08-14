@@ -37,6 +37,9 @@ from models import job as _job  # noqa: F401,E402
 from models import user as _user  # noqa: F401,E402
 from models import auth_session as _auth_session  # noqa: F401,E402
 from models import oauth_identity as _oauth_identity  # noqa: F401,E402
+from models import usage_event as _usage_event  # noqa: F401,E402
+from models import analytics_event as _analytics_event  # noqa: F401,E402
+from models import user_role as _user_role  # noqa: F401,E402
 
 _engine = None
 _SessionLocal = None

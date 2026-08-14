@@ -1,6 +1,5 @@
-/* Global auth popup. Light / monochrome to match the app, World Labs layout. */
+/* Global auth popup. Light surface, ink primary per BRANDING.md. */
 
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
 .authm-backdrop {
 	position: fixed;
@@ -12,7 +11,7 @@
 	justify-content: center;
 	padding: 5vh 5vw;
 	animation: authm-fade 0.15s ease;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 }
 
 @keyframes authm-fade {
@@ -59,13 +58,12 @@
 .authm-logo {
 	width: 40px;
 	height: 40px;
-	border-radius: 11px;
 	margin-bottom: 12px;
 }
 
 .authm-title {
 	font-size: 22px;
-	font-weight: 700;
+	font-weight: 600;
 	color: #111111;
 	margin: 0 0 22px;
 }
@@ -83,7 +81,7 @@
 	background: #ffffff;
 	border: 1px solid rgba(0, 0, 0, 0.14);
 	color: #111111;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 14px;
 	font-weight: 500;
 	cursor: pointer;
@@ -104,7 +102,7 @@
 	width: 100%;
 	margin: 14px 0;
 	color: #b0b0b0;
-	font-family: 'JetBrains Mono', monospace;
+	font-family: "IBM Plex Mono", ui-monospace, monospace;
 	font-size: 11px;
 }
 .authm-divider::before,
@@ -122,17 +120,17 @@
 	width: 100%;
 	padding: 12px 16px;
 	border-radius: 10px;
-	background: #002d72;
+	background: var(--ink);
 	color: #ffffff;
-	border: 1px solid #002d72;
-	font-family: 'Space Grotesk', sans-serif;
+	border: 1px solid var(--ink);
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 14px;
 	font-weight: 600;
 	cursor: pointer;
 	transition: background 0.15s;
 }
 .authm-email-btn:hover {
-	background: #00399a;
+	background: var(--ink-2);
 }
 
 /* Email form */
@@ -157,35 +155,35 @@
 	border-radius: 10px;
 	border: 1px solid rgba(0, 0, 0, 0.12);
 	background: #fafafa;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 14px;
 	color: #111111;
 	transition: border-color 0.15s, background 0.15s;
 }
 .authm-input:focus {
 	outline: none;
-	border-color: #002d72;
+	border-color: var(--ink);
 	background: #ffffff;
 }
 .authm-error {
-	font-family: 'JetBrains Mono', monospace;
+	font-family: "IBM Plex Mono", ui-monospace, monospace;
 	font-size: 12px;
 	color: #ef4444;
 }
 .authm-submit {
 	padding: 12px 16px;
 	border-radius: 10px;
-	background: #002d72;
+	background: var(--ink);
 	color: #ffffff;
-	border: 1px solid #002d72;
-	font-family: 'Space Grotesk', sans-serif;
+	border: 1px solid var(--ink);
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 14px;
 	font-weight: 600;
 	cursor: pointer;
 	transition: background 0.2s;
 }
 .authm-submit:hover:not(:disabled) {
-	background: #00399a;
+	background: var(--ink-2);
 }
 .authm-submit:disabled {
 	opacity: 0.6;
@@ -195,7 +193,7 @@
 	background: none;
 	border: none;
 	padding: 2px;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 12px;
 	color: #6a6a6a;
 	cursor: pointer;
@@ -205,8 +203,28 @@
 	color: #111111;
 }
 
+/* Signup only — consent by continuing, in place of a checkbox. */
+.authm-fineprint {
+	width: 100%;
+	margin: 16px 0 0;
+	font-size: 11.5px;
+	line-height: 1.55;
+	color: #8f8f8f;
+	text-align: center;
+}
+.authm-fineprint a {
+	color: #6a6a6a;
+	text-decoration: underline;
+}
+.authm-fineprint a:hover {
+	color: var(--accent-deep);
+}
+
 .authm-toggle {
+	width: 100%;
 	margin-top: 20px;
+	padding-top: 16px;
+	border-top: 1px solid rgba(0, 0, 0, 0.07);
 	text-align: center;
 	font-size: 13px;
 	color: #6a6a6a;
@@ -217,7 +235,7 @@
 	padding: 0;
 	font: inherit;
 	font-weight: 600;
-	color: #002d72;
+	color: var(--accent-deep);
 	cursor: pointer;
 	text-decoration: underline;
 }

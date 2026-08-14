@@ -1,5 +1,5 @@
 // helpers/viewer/useLevelTracing.ts
-import { useRef, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import {
 	canvasPointToVoxel,
 	computeLevelTraceMask,
@@ -21,6 +21,15 @@ interface UseLevelTracingArgs {
 	operation: LevelTraceOperation;
 	activeSegmentIndex: number | null;
 	maskFilter: MaskFilter;
+	/** Bump this (e.g. pass the toolbar's zoom slider value) whenever the
+	 *  pane's camera changes. The traced mask itself is voxel-space and
+	 *  camera-independent, but its cached preview OUTLINE is a canvas-pixel
+	 *  path computed the moment the mouse last moved — without this, zooming
+	 *  without also moving the mouse leaves that outline drawn at the old
+	 *  zoom level (visually detached from the anatomy) until the next
+	 *  mousemove happens to refresh it. Re-deriving the outline from the
+	 *  still-valid traced mask on every camera change keeps it pinned. */
+	cameraVersion?: number;
 	onLog?: (detail: string) => void;
 }
 
@@ -28,7 +37,7 @@ interface UseLevelTracingArgs {
  *  region under the cursor on the current slice and preview its outline; on
  *  click, commit it into (or out of) the active segment per `operation`. */
 export function useLevelTracing({
-	enabled, toleranceHu, operation, activeSegmentIndex, maskFilter, onLog,
+	enabled, toleranceHu, operation, activeSegmentIndex, maskFilter, cameraVersion, onLog,
 }: UseLevelTracingArgs) {
 	const [previewPane, setPreviewPane] = useState<CinePane | null>(null);
 	const [previewPath, setPreviewPath] = useState<Array<[number, number]> | null>(null);
@@ -81,6 +90,16 @@ export function useLevelTracing({
 				: "Level tracing: no voxels changed — try a different spot or higher sensitivity."
 		);
 	};
+
+	// Re-derive the outline from the still-valid (voxel-space) traced mask
+	// whenever the camera changes, instead of leaving it drawn at whatever
+	// canvas pixels it happened to occupy at the last mousemove.
+	useEffect(() => {
+		const traced = tracedRef.current;
+		if (!traced) return;
+		setPreviewPath(levelTraceMaskToCanvasPath(traced.pane, traced.mask));
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [cameraVersion]);
 
 	return {
 		handleClick,

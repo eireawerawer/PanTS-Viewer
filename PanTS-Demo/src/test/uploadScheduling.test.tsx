@@ -17,7 +17,7 @@ import UploadPage from "../routes/UploadPage";
 //      segmenting while scan 2 is still going up.
 
 const CHUNK_SIZE = 512 * 1024;
-const USER = { id: "u1", email: "test.user@example.com", name: null };
+const USER = { id: "u1", email: "test.user@example.com", name: null, plan: "pro" };
 
 // Comfortably more chunks than the uploader's in-flight concurrency (6), so a
 // concurrent schedule would visibly interleave the two files rather than
@@ -91,7 +91,7 @@ const runTwoFiles = async () => {
   );
   // Inference requires an account; wait for the session probe to land first.
   await waitFor(() =>
-    expect(screen.queryByText(/to run inference on the server/)).not.toBeInTheDocument(),
+    expect(screen.queryByText(/to run inference/)).not.toBeInTheDocument(),
   );
 
   const input = container.querySelector<HTMLInputElement>('input[accept=".nii,.gz"]')!;

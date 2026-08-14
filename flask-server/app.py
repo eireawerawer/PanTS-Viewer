@@ -13,6 +13,8 @@ from flask_cors import CORS
 from constants import Constants
 #print("DEBUG_CONSTANT:", Constants.SESSIONS_DIR_NAME)
 
+from api.admin_blueprint import admin_blueprint
+from api.analytics_blueprint import analytics_blueprint, rate_max
 from api.api_blueprint import api_blueprint
 from api.education import education_blueprint
 from api.live_rooms import live_rooms_blueprint
@@ -37,14 +39,29 @@ def create_app():
     # redirect_uri (built from request.url_root) comes out http:// and fails to
     # match what's registered with Google/GitHub. Opt-in because these headers
     # are client-spoofable when nothing trusted is in front of the app.
+    #
+    # x_for is here for the same reason: without it every request appears to come
+    # from the proxy, so anything that keys off remote_addr (the rate limit on
+    # /analytics/collect) would put all of production in one bucket.
     if os.environ.get("TRUST_PROXY", "false").lower() == "true":
-        app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+    elif rate_max():
+        # Behind a proxy without TRUST_PROXY, every request looks like it came
+        # from the proxy and the whole site shares one bucket. Silent from the
+        # browser's side (a refused batch is just a dropped batch), so say it here.
+        print("[boot] TRUST_PROXY is off — if this server is behind nginx, the "
+              "/analytics/collect rate limit applies to all traffic at once.")
 
     app.register_blueprint(api_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(education_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(live_rooms_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(auth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(oauth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
+    # /analytics/collect is always live; the dashboard's read endpoints inside
+    # this blueprint 404 unless ANALYTICS_DASHBOARD=true, and then need admin.
+    app.register_blueprint(analytics_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
+    # Admin-only throughout (role checks are per-route, not on the blueprint).
+    app.register_blueprint(admin_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
 
     app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB, for overcoming size limits in file uploads
 
@@ -76,8 +93,13 @@ def create_app():
     # it, and job.user_id is NOT NULL with an FK), then import any pre-DB
     # job.json, then fail jobs orphaned by the restart.
     try:
-        from services import auth_store, job_store
+        from services import analytics_store, auth_store, job_store, role_store
         auth_store.ensure_system_user()
+        # ADMIN_EMAILS -> the admin role, so a fresh or wiped database still has
+        # someone who can grant roles. Additive: it never takes admin away.
+        bootstrapped = role_store.ensure_bootstrap_admins()
+        if bootstrapped:
+            print(f"[boot] ensured admin for {len(bootstrapped)} account(s) from ADMIN_EMAILS")
         imported = job_store.import_legacy_job_json(Constants.SESSIONS_DIR_NAME)
         if imported:
             print(f"[boot] imported {imported} legacy job.json record(s)")
@@ -91,6 +113,13 @@ def create_app():
         purged = auth_store.purge_expired_deletions()
         if purged:
             print(f"[boot] purged {purged} account(s) past the deletion grace period")
+        # Same boot-only trigger, and the same caveat: a server that stays up for
+        # months holds its oldest events a little past the window. Acceptable for
+        # a retention bound, and it avoids a scheduler this app doesn't have.
+        expired = analytics_store.purge_old_events()
+        if expired:
+            print(f"[boot] purged {expired} analytics event(s) past "
+                  f"{analytics_store.retention_days()}-day retention")
     except Exception as e:
         print(f"[boot] account/job store init skipped: {e}")
 

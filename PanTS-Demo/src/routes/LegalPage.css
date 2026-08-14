@@ -1,0 +1,90 @@
+/* Terms / Privacy placeholder pages. Matches the sign-up page's vocabulary. */
+
+
+.legal-wrapper {
+	min-height: 100vh;
+	background: #fafafa;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
+	color: #111111;
+}
+
+.legal-header {
+	padding: 20px 28px;
+}
+
+.legal-brand {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+	text-decoration: none;
+	color: #111111;
+	font-weight: 600;
+	font-size: 16px;
+}
+.legal-logo {
+	width: 30px;
+	height: 30px;
+}
+
+.legal-main {
+	max-width: 680px;
+	margin: 0 auto;
+	padding: 16px 24px 80px;
+}
+
+.legal-title {
+	font-size: 30px;
+	font-weight: 600;
+	margin: 0 0 20px;
+}
+
+.legal-banner {
+	border: 1px solid rgba(217, 119, 6, 0.35);
+	background: rgba(217, 119, 6, 0.07);
+	border-radius: 12px;
+	padding: 16px 18px;
+	font-size: 13.5px;
+	line-height: 1.6;
+	color: #4a4a4a;
+	margin-bottom: 32px;
+}
+.legal-banner strong {
+	color: #9a5b04;
+}
+
+.legal-section {
+	margin-bottom: 26px;
+}
+
+.legal-heading {
+	font-size: 16px;
+	font-weight: 600;
+	margin: 0 0 7px;
+}
+
+.legal-body {
+	font-size: 14px;
+	line-height: 1.65;
+	color: #6a6a6a;
+	margin: 0;
+}
+
+.legal-footer {
+	margin-top: 40px;
+	padding-top: 20px;
+	border-top: 1px solid rgba(0, 0, 0, 0.08);
+	font-size: 13.5px;
+	color: #8f8f8f;
+}
+.legal-footer a,
+.legal-body a {
+	/* accent-deep-hover: the page ground is #fafafa, where accent-deep is 4.40:1 (below AA) */
+	color: var(--accent-deep-hover);
+	font-weight: 600;
+}
+
+@media (max-width: 560px) {
+	.legal-title {
+		font-size: 25px;
+	}
+}
