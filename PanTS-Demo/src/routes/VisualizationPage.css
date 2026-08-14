@@ -731,6 +731,18 @@
   color: #08090b;
 }
 
+.vp-tool--disabled,
+.vp-tool:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.vp-tool--disabled:hover,
+.vp-tool:disabled:hover {
+  background: var(--vp-panel);
+  border-color: var(--vp-border);
+}
+
 .vp-tool__tip {
   position: absolute;
   left: 50%;

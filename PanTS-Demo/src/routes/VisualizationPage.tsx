@@ -3178,18 +3178,32 @@ const aiAvailableOrgans = useMemo(() => {
 												</button>
 											</div>
 											
-											{!isLocal && (
-												<button
-													ref={annotatePencilRef}
-													className={`vp-tool ${showAnnotationToolbar ? "vp-tool--active" : ""}`}
-													onClick={handleToggleAnnotationToolbar}
-													aria-label="Annotate"
-													aria-pressed={showAnnotationToolbar}
-												>
-													<IconPencil size={20} color={showAnnotationToolbar ? "#08090b" : "white"} />
-													<span className="vp-tool__tip">Annotate</span>
-												</button>
-											)}
+											{!isLocal && (() => {
+												// Annotating on the low-res stream would edit a mask that
+												// doesn't line up with the eventual full-res volume, so the
+												// button stays disabled until the HD upgrade has actually
+												// finished (native HD load, or the progressive stream done).
+												const hdReady = isHd || enhance.state === "done";
+												return (
+													<button
+														ref={annotatePencilRef}
+														className={`vp-tool ${showAnnotationToolbar ? "vp-tool--active" : ""} ${!hdReady ? "vp-tool--disabled" : ""}`}
+														onClick={() => {
+															if (!hdReady) return;
+															handleToggleAnnotationToolbar();
+														}}
+														disabled={!hdReady}
+														aria-disabled={!hdReady}
+														aria-label="Annotate"
+														aria-pressed={showAnnotationToolbar}
+													>
+														<IconPencil size={20} color={showAnnotationToolbar ? "#08090b" : "white"} />
+														<span className="vp-tool__tip">
+															{hdReady ? "Annotate" : "Annotate — waiting for HD resolution to finish loading"}
+														</span>
+													</button>
+												);
+											})()}
 
 											{/* Capture ▾ — snapshot, voice-narrated reading session, share link. */}
 											<div className="vp-toolgroup" ref={captureFlyout.groupRef}>
