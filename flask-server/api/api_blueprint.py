@@ -45,6 +45,7 @@ import os
 import io
 import re
 import tempfile
+from urllib.parse import quote, urlsplit, urlunsplit
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -213,14 +214,29 @@ def proxy_image():
     if not raw_url:
         return Response("Missing url parameter", status=400)
 
-    # 可選安全限制：只允許 HuggingFace 來源
-    if not raw_url.startswith("https://huggingface.co/"):
+    try:
+        parsed = urlsplit(raw_url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "huggingface.co"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in (None, 443)
+        ):
+            return Response("Forbidden", status=403)
+    except ValueError:
         return Response("Forbidden", status=403)
 
+    # Rebuild against a literal trusted origin. Redirects stay disabled so an
+    # otherwise-valid Hugging Face URL cannot bounce the server to a private IP.
+    safe_path = quote(parsed.path or "/", safe="/-._~")
+    upstream_url = urlunsplit(("https", "huggingface.co", safe_path, parsed.query, ""))
+
     try:
-        r = requests.get(raw_url, timeout=10)
-    except Exception as e:
-        return Response(f"Upstream error: {e}", status=502)
+        r = requests.get(upstream_url, timeout=10, allow_redirects=False)
+    except requests.RequestException:
+        current_app.logger.warning("Hugging Face image proxy request failed", exc_info=True)
+        return Response("Upstream request failed", status=502)
 
     if not r.ok:
         return Response(f"Upstream status {r.status_code}", status=r.status_code)
@@ -382,7 +398,13 @@ def get_mesh_file(display_id, filename):
     # apply the same id-guard + secure_filename barrier as the other routes.
     if not _is_safe_id(display_id) or not re.fullmatch(r"PanTS_\d{8}", display_id):
         return jsonify({"error": "Invalid id"}), 400
-    if not re.fullmatch(r"[A-Za-z0-9_-]+\.glb", filename):
+    stem = filename[:-4] if filename.endswith(".glb") else ""
+    if (
+        not stem
+        or len(filename) > 128
+        or not stem.replace("_", "").replace("-", "").isalnum()
+        or not stem.isascii()
+    ):
         return jsonify({"error": "Invalid mesh filename"}), 400
     mesh_path = os.path.join(Constants.MESH_PATH, secure_filename(display_id), secure_filename(filename))
 
@@ -483,10 +505,11 @@ def upload():
         session_id = request.form.get('SESSION_ID')
         if not session_id:
             return jsonify({"error": "No session ID provided"}), 400
-        if not _is_safe_id(session_id):
+        safe_session_id = secure_filename(session_id)
+        if not _is_safe_id(session_id) or safe_session_id != session_id:
             return jsonify({"error": "Invalid session ID"}), 400
 
-        base_path = os.path.join(Constants.SESSIONS_DIR_NAME, session_id)
+        base_path = os.path.join(Constants.SESSIONS_DIR_NAME, safe_session_id)
         os.makedirs(base_path, exist_ok=True)
 
         nifti_multi_dict = request.files
@@ -579,8 +602,11 @@ def get_main_nifti(clabel_id):
 
 @api_blueprint.route('/get-report/<id>', methods=['GET'])
 def get_report(id):
-    if not _is_safe_id(str(id)):
+    if not str(id).isdigit():
         return jsonify({"error": "Invalid id"}), 400
+    numeric_id = int(id)
+    safe_case_id = str(numeric_id)
+    pants_id = get_panTS_id(numeric_id)
     # Per-request filenames: with gunicorn's 8 threads, two simultaneous report
     # requests sharing temp.pdf/final.pdf would corrupt each other's output.
     request_token = uuid.uuid4().hex
@@ -588,18 +614,18 @@ def get_report(id):
     output_pdf_path = f"{PDF_DIR}/final_{request_token}.pdf"
     try:
         try:
-            organ_metrics = get_mask_data_internal(id)
+            organ_metrics = get_mask_data_internal(numeric_id)
             organ_metrics = organ_metrics.get("organ_metrics", [])
         except Exception as e:
             return jsonify({"error": f"Error loading organ metrics: {str(e)}"}), 500
  
-        base_path = f"{SESSIONS_DIR}/{id}"
+        base_path = os.path.join(SESSIONS_DIR, safe_case_id)
         # New flat structure, matching get-main-nifti / get-label-colormap above —
         # this fixes a bug from the merge where `subfolder`/`label_subfolder` were
         # referenced here but never defined, which would have raised a NameError
         # on every call to this route.
-        ct_path = f"{Constants.PANTS_PATH}/image_only/{get_panTS_id(id)}/{Constants.MAIN_NIFTI_FILENAME}"
-        masks = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(id)}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
+        ct_path = os.path.join(Constants.PANTS_PATH, "image_only", pants_id, Constants.MAIN_NIFTI_FILENAME)
+        masks = os.path.join(Constants.PANTS_PATH, "mask_only", pants_id, Constants.COMBINED_LABELS_NIFTI_FILENAME)
  
         template_pdf = os.getenv("TEMPLATE_PATH", "report_template_3.pdf")
  
@@ -615,12 +641,12 @@ def get_report(id):
  
         generate_pdf_with_template(
             output_pdf=output_pdf_path,
-            folder_name=id,
+            folder_name=safe_case_id,
             ct_path=ct_path,
             mask_path=masks,
             template_pdf=template_pdf,
             temp_pdf_path=temp_pdf_path,
-            id=id,
+            id=safe_case_id,
             extracted_data=extracted_data,
             column_headers=column_headers
         )
@@ -1131,15 +1157,43 @@ def _uploaded_file_candidate(session_id, uploaded_filename):
     """Resolve uploaded_filename inside its session's inference dir, rejecting
     values that would escape it ("../", absolute paths). Legitimate values are
     session-relative, e.g. "BDMAP_00000042/ct.nii.gz" from /finalize-upload."""
-    base = os.path.abspath(os.path.join(Constants.SESSIONS_DIR_NAME, "inference", session_id))
-    candidate = os.path.abspath(os.path.join(base, uploaded_filename))
-    if not candidate.startswith(base + os.sep):
+    safe_session_id = secure_filename(session_id or "")
+    raw_name = str(uploaded_filename or "").replace("\\", "/")
+    normalized_name = raw_name.strip("/")
+    if (
+        not _is_safe_id(session_id)
+        or safe_session_id != session_id
+        or not normalized_name
+        or raw_name.startswith("/")
+        or any(part in {"", ".", ".."} for part in normalized_name.split("/"))
+    ):
         return None
-    return candidate if os.path.exists(candidate) else None
+
+    inference_root = os.path.abspath(os.path.join(Constants.SESSIONS_DIR_NAME, "inference"))
+    if not os.path.isdir(inference_root):
+        return None
+
+    # Build candidate paths only from directory entries returned by the
+    # filesystem. Request values participate in equality checks, never joins.
+    for entry in os.listdir(inference_root):
+        if entry != safe_session_id:
+            continue
+        session_root = os.path.join(inference_root, entry)
+        if not os.path.isdir(session_root):
+            return None
+        for current_root, _dirs, filenames in os.walk(session_root):
+            for filename in filenames:
+                candidate = os.path.join(current_root, filename)
+                relative = os.path.relpath(candidate, session_root).replace(os.sep, "/")
+                if relative == normalized_name:
+                    return candidate
+        return None
+    return None
 
 
 def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_path=None):
-    if not _is_safe_id(session_id):
+    safe_session_id = secure_filename(session_id or "")
+    if not _is_safe_id(session_id) or safe_session_id != session_id:
         return jsonify({"error": "Invalid session ID"}), 400
 
     # Plan enforcement sits here rather than on the routes because both
@@ -1154,7 +1208,7 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
         # authenticated — the plan is what's missing.
         return jsonify({"error": blocked["message"], "code": "plan_limit", **blocked}), 402
 
-    session_path = os.path.join(SESSIONS_DIR, session_id)
+    session_path = os.path.join(SESSIONS_DIR, safe_session_id)
     os.makedirs(session_path, exist_ok=True)
 
     if model_name == 'ShapeKit':
@@ -1251,7 +1305,8 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
 def auto_segment(session_id):
 
     model_name = request.form.get("MODEL_NAME", None)
-    server_input_path = request.form.get("INPUT_SERVER_PATH", None)
+    if request.form.get("INPUT_SERVER_PATH"):
+        return jsonify({"error": "Server paths are not accepted; upload a file instead"}), 400
 
     ct_file = request.files.get('MAIN_NIFTI')
 
@@ -1262,7 +1317,7 @@ def auto_segment(session_id):
         session_id=session_id,
         model_name=model_name,
         ct_file=ct_file,
-        server_input_path=server_input_path,
+        server_input_path=None,
     )
 
 
@@ -1270,9 +1325,8 @@ def auto_segment(session_id):
 @api_blueprint.route('/run-inference', methods=['POST'])
 def run_epai_inference():
     """
-    Runs ePAI inference with either:
-      1) multipart file: MAIN_NIFTI
-      2) server path: INPUT_SERVER_PATH
+    Runs ePAI inference with either a multipart `MAIN_NIFTI` file or a
+    server-issued `uploaded_filename` from the chunk finalization endpoint.
 
     Optional fields:
       - session_id
@@ -1294,11 +1348,15 @@ def run_epai_inference():
     session_id = _pick_text("session_id", "SESSION_ID", "sessionId") or str(uuid.uuid4())
     # session_id is joined into filesystem paths below (and again inside
     # _start_auto_segmentation) - reject traversal payloads up front.
-    if not _is_safe_id(session_id):
+    safe_session_id = secure_filename(session_id)
+    if not _is_safe_id(session_id) or safe_session_id != session_id:
         return jsonify({"error": "Invalid session ID"}), 400
     model_name = _pick_text("model_name", "model", "MODEL_NAME") or "ePAI"
     uploaded_filename = _pick_text("uploaded_filename", "output_filename", "filename")
-    input_server_path = _pick_text("INPUT_SERVER_PATH", "input_server_path", "server_path", "path")
+    requested_server_path = _pick_text("INPUT_SERVER_PATH", "input_server_path", "server_path", "path")
+    if requested_server_path:
+        return jsonify({"error": "Server paths are not accepted; use uploaded_filename or MAIN_NIFTI"}), 400
+    input_server_path = None
     source_reconstruction_session_id = _pick_text("source_reconstruction_session_id")
     ct_file = (
         request.files.get('MAIN_NIFTI')
@@ -1308,7 +1366,10 @@ def run_epai_inference():
     )
 
     if source_reconstruction_session_id and not input_server_path and ct_file is None:
-        source_job = _get_inference_job(source_reconstruction_session_id) or {}
+        safe_source_id = secure_filename(source_reconstruction_session_id)
+        if not _is_safe_id(source_reconstruction_session_id) or safe_source_id != source_reconstruction_session_id:
+            return jsonify({"error": "Invalid source reconstruction session ID"}), 400
+        source_job = _get_inference_job(safe_source_id) or {}
         source_output_dir = source_job.get("output_mask_dir")
         if source_output_dir:
             recon_path = os.path.join(source_output_dir, "reconstructed_ct.nii.gz")
@@ -1320,18 +1381,19 @@ def run_epai_inference():
             return jsonify({"error": f"Source reconstruction session {source_reconstruction_session_id} not found or not completed"}), 404
 
     if not input_server_path and uploaded_filename:
-        candidate = _uploaded_file_candidate(session_id, uploaded_filename)
+        candidate = _uploaded_file_candidate(safe_session_id, uploaded_filename)
         if candidate:
             input_server_path = candidate
 
     if not input_server_path and ct_file is None:
         inference_root = os.path.join(Constants.SESSIONS_DIR_NAME, "inference")
-        infer_dir = os.path.join(inference_root, session_id)
+        safe_session_id = secure_filename(session_id)
+        infer_dir = os.path.join(inference_root, safe_session_id)
 
         if not os.path.isdir(infer_dir) and os.path.isdir(inference_root):
             candidate_dirs = []
             for dirname in os.listdir(inference_root):
-                if dirname == session_id or dirname.startswith(session_id) or session_id.startswith(dirname):
+                if dirname == safe_session_id or dirname.startswith(safe_session_id) or safe_session_id.startswith(dirname):
                     full_dir = os.path.join(inference_root, dirname)
                     if os.path.isdir(full_dir):
                         candidate_dirs.append(full_dir)
@@ -1421,9 +1483,12 @@ def create_pull_inference_job():
         return None
 
     session_id = _pick_text("session_id", "SESSION_ID", "sessionId") or str(uuid.uuid4())
-    if not _is_safe_id(session_id):
+    safe_session_id = secure_filename(session_id)
+    if not _is_safe_id(session_id) or safe_session_id != session_id:
         return jsonify({"error": "Invalid session ID"}), 400
-    input_server_path = _pick_text("input_server_path", "INPUT_SERVER_PATH", "path")
+    requested_server_path = _pick_text("input_server_path", "INPUT_SERVER_PATH", "path")
+    if requested_server_path:
+        return jsonify({"error": "Server paths are not accepted; use uploaded_filename or MAIN_NIFTI"}), 400
     uploaded_filename = _pick_text("uploaded_filename", "output_filename", "filename")
     model = _pick_text("model", "MODEL_NAME") or "ePAI"
 
@@ -1434,29 +1499,29 @@ def create_pull_inference_job():
         or request.files.get('ct_file')
     )
 
-    if not input_server_path and uploaded_filename:
-        candidate = _uploaded_file_candidate(session_id, uploaded_filename)
-        if candidate:
-            input_server_path = candidate
+    candidate = _uploaded_file_candidate(safe_session_id, uploaded_filename) if uploaded_filename else None
+    if ct_file is None and candidate is None:
+        return jsonify({"error": "No input provided. Send uploaded_filename or MAIN_NIFTI."}), 400
 
-    if ct_file is not None and not input_server_path:
-        target_dir = os.path.join(Constants.SESSIONS_DIR_NAME, "inference", session_id, "input")
-        os.makedirs(target_dir, exist_ok=True)
-        target_name = secure_filename(os.path.basename(ct_file.filename or "")) or "ct.nii.gz"
-        input_server_path = os.path.join(target_dir, target_name)
-        ct_file.save(input_server_path)
-
-    if not input_server_path:
-        return jsonify({"error": "No input provided. Send input_server_path, uploaded_filename, or MAIN_NIFTI."}), 400
-    if not os.path.exists(input_server_path):
-        return jsonify({"error": f"Input path not found: {input_server_path}"}), 400
-
-    job = inference_job_queue.create_job(
-        input_file_path=input_server_path,
-        session_id=session_id,
-        model=model,
-        max_attempts=int(os.getenv("INFERENCE_MAX_ATTEMPTS", "3")),
-    )
+    job_args = {
+        "session_id": safe_session_id,
+        "model": model,
+        "max_attempts": int(os.getenv("INFERENCE_MAX_ATTEMPTS", "3")),
+    }
+    if ct_file is not None:
+        ct_file.stream.seek(0)
+        job = inference_job_queue.create_job(
+            input_stream=ct_file.stream,
+            input_filename=secure_filename(ct_file.filename or "") or "ct.nii.gz",
+            **job_args,
+        )
+    else:
+        with open(candidate, "rb") as input_stream:
+            job = inference_job_queue.create_job(
+                input_stream=input_stream,
+                input_filename=os.path.basename(candidate),
+                **job_args,
+            )
     return jsonify(_public_job_payload(job)), 201
 
 
@@ -1550,7 +1615,12 @@ def complete_pull_job(job_id):
     if prediction_file is None:
         return jsonify({"error": "Missing prediction file (use field: prediction)"}), 400
 
-    temp_dir = os.path.join("/tmp", "pull_job_results", job_id)
+    try:
+        safe_job_id = str(uuid.UUID(job_id))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid job ID"}), 400
+
+    temp_dir = os.path.join("/tmp", "pull_job_results", safe_job_id)
     os.makedirs(temp_dir, exist_ok=True)
 
     pred_path = os.path.join(temp_dir, "combined_labels.nii.gz")
@@ -1614,9 +1684,10 @@ def download_pull_job_result(job_id):
 
 @api_blueprint.route('/get_result/<session_id>', methods=['GET'])
 def get_result(session_id):
-    if not _is_safe_id(session_id):
+    safe_session_id = secure_filename(session_id)
+    if not _is_safe_id(session_id) or safe_session_id != session_id:
         return jsonify({"error": "Invalid session ID"}), 400
-    session_path = os.path.join(SESSIONS_DIR, session_id)
+    session_path = os.path.join(SESSIONS_DIR, safe_session_id)
     zip_path = os.path.join(session_path, "auto_masks.zip")
 
     # Poll briefly for the archive. If it isn't ready, return 202 so the client
@@ -1689,30 +1760,35 @@ def _session_seg_path(session_id):
 # segmentation..." because /cases/<id>/mesh-manifest 404s for a session id.
 @api_blueprint.route('/sessions/<session_id>/mesh-manifest', methods=['GET'])
 def get_session_mesh_manifest(session_id):
-    if not _is_safe_id(session_id):
+    safe_session_id = secure_filename(session_id)
+    if not _is_safe_id(session_id) or safe_session_id != session_id:
         return jsonify({"error": "Invalid id"}), 400
-    seg_path = _session_seg_path(session_id)
+    seg_path = _session_seg_path(safe_session_id)
     if not seg_path:
         return jsonify({"error": "Segmentation not ready for session"}), 404
-    manifest = generate_mesh_manifest(session_id, seg_path, route_base="sessions")
+    manifest = generate_mesh_manifest(safe_session_id, seg_path, route_base="sessions")
     return jsonify(manifest)
 
 
 @api_blueprint.route('/sessions/<session_id>/render_only/<filename>', methods=['GET'])
 def get_session_mesh_file(session_id, filename):
-    if not _is_safe_id(session_id):
+    safe_session_id = secure_filename(session_id)
+    if not _is_safe_id(session_id) or safe_session_id != session_id:
         return jsonify({"error": "Invalid id"}), 400
-    filename = secure_filename(filename)
-    seg_path = _session_seg_path(session_id)
+    safe_filename_value = secure_filename(filename)
+    stem = safe_filename_value[:-4] if safe_filename_value.endswith(".glb") else ""
+    if safe_filename_value != filename or not stem or len(filename) > 128:
+        return jsonify({"error": "Invalid mesh filename"}), 400
+    seg_path = _session_seg_path(safe_session_id)
     if not seg_path:
         return jsonify({"error": "Segmentation not ready for session"}), 404
     # Cache the generated GLB next to the mask so repeat views / organ toggles
     # don't re-run marching cubes.
     cache_dir = os.path.join(os.path.dirname(seg_path), "render_only")
     os.makedirs(cache_dir, exist_ok=True)
-    glb_path = os.path.join(cache_dir, filename)
+    glb_path = os.path.join(cache_dir, safe_filename_value)
     if not os.path.exists(glb_path):
-        organ_key = os.path.splitext(filename)[0]
+        organ_key = stem
         try:
             glb_bytes = generate_organ_glb_bytes(organ_key, seg_path)
         except ValueError as e:
@@ -1770,18 +1846,23 @@ def upload_inference_chunk():
 
         # session_id and chunk_index are both joined into a filesystem path below;
         # reject anything non-numeric / traversal-y before it touches os.path.
-        if not _is_safe_id(session_id):
+        safe_session_id = secure_filename(session_id)
+        if not _is_safe_id(session_id) or safe_session_id != session_id:
             return jsonify({"error": "Invalid session ID"}), 400
-        if not str(chunk_index).isdigit():
+        if not str(chunk_index).isdigit() or not str(total_chunks).isdigit():
             return jsonify({"error": "Invalid chunk index"}), 400
+        chunk_number = int(chunk_index)
+        chunk_count = int(total_chunks)
+        if chunk_count < 1 or chunk_count > 10_000 or chunk_number < 0 or chunk_number >= chunk_count:
+            return jsonify({"error": "Chunk index is outside upload bounds"}), 400
 
-        session_folder = os.path.join(CHUNK_DIR, session_id)
+        session_folder = os.path.join(CHUNK_DIR, safe_session_id)
         os.makedirs(session_folder, exist_ok=True)
 
-        chunk_path = os.path.join(session_folder, f"chunk-{chunk_index}")
+        chunk_path = os.path.join(session_folder, f"chunk-{chunk_number}")
         chunk_file.save(chunk_path)
 
-        return jsonify({"status": "ok", "chunk_index": chunk_index})
+        return jsonify({"status": "ok", "chunk_index": chunk_number})
     except Exception as e:
         print(f"❌ Chunk upload error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -1798,30 +1879,35 @@ def finalize_upload():
     """
     try:
         session_id = request.form.get("session_id")
-        if not _is_safe_id(session_id):
+        safe_session_id = secure_filename(session_id or "")
+        if not _is_safe_id(session_id) or safe_session_id != session_id:
             return jsonify({"error": "Invalid session ID"}), 400
         total_chunks = int(request.form.get("total_chunks"))
+        if total_chunks < 1 or total_chunks > 10_000:
+            return jsonify({"error": "Invalid total_chunks"}), 400
         output_filename = request.form.get("output_filename", "inference_input.gz")
         requested_bdmap_id = request.form.get("bdmap_id") or request.form.get("case_id")
 
         if requested_bdmap_id and requested_bdmap_id.strip():
             bdmap_id = requested_bdmap_id.strip()
+            safe_bdmap_id = secure_filename(bdmap_id)
             # bdmap_id becomes a directory name below - same guard as session ids.
-            if not _is_safe_id(bdmap_id):
+            if not _is_safe_id(bdmap_id) or safe_bdmap_id != bdmap_id:
                 return jsonify({"error": "Invalid bdmap_id"}), 400
-            if not bdmap_id.startswith("BDMAP_"):
-                bdmap_id = f"BDMAP_{bdmap_id}"
+            if not safe_bdmap_id.startswith("BDMAP_"):
+                safe_bdmap_id = f"BDMAP_{safe_bdmap_id}"
+            bdmap_id = safe_bdmap_id
         else:
-            digits = "".join(ch for ch in (session_id or "") if ch.isdigit())
+            digits = "".join(ch for ch in safe_session_id if ch.isdigit())
             if len(digits) < 8:
-                fallback_digits = f"{(uuid.uuid5(uuid.NAMESPACE_DNS, session_id or str(uuid.uuid4())).int % (10 ** 8)):08d}"
+                fallback_digits = f"{(uuid.uuid5(uuid.NAMESPACE_DNS, safe_session_id).int % (10 ** 8)):08d}"
                 digits = (digits + fallback_digits)[:8]
             else:
                 digits = digits[:8]
             bdmap_id = f"BDMAP_{digits}"
 
         # New base path: sessions/inference/<session_id>/
-        base_path = os.path.join(Constants.SESSIONS_DIR_NAME, "inference", session_id)
+        base_path = os.path.join(Constants.SESSIONS_DIR_NAME, "inference", safe_session_id)
         os.makedirs(base_path, exist_ok=True)
 
         normalized_output = output_filename.strip()
@@ -1842,7 +1928,7 @@ def finalize_upload():
         final_path = os.path.join(target_dir, target_filename)
 
         # Combine chunks
-        temp_folder = os.path.join(CHUNK_DIR, session_id)
+        temp_folder = os.path.join(CHUNK_DIR, safe_session_id)
         with open(final_path, "wb") as out_file:
             for i in range(total_chunks):
                 chunk_path = os.path.join(temp_folder, f"chunk-{i}")
@@ -1857,7 +1943,6 @@ def finalize_upload():
         uploaded_filename = os.path.relpath(final_path, base_path)
         return jsonify({
             "status": "combined",
-            "path": final_path,
             "bdmap_id": bdmap_id,
             "uploaded_filename": uploaded_filename,
         })
@@ -1873,13 +1958,14 @@ def upload_dicom_slice():
         if not session_id:
             return jsonify({"error": "session_id required"}), 400
         # session_id and the slice filename are both joined into paths below.
-        if not _is_safe_id(session_id):
+        safe_session_id = secure_filename(session_id)
+        if not _is_safe_id(session_id) or safe_session_id != session_id:
             return jsonify({"error": "Invalid session ID"}), 400
         slice_file = request.files.get("file")
         if not slice_file:
             return jsonify({"error": "file required"}), 400
 
-        dicom_dir = os.path.join(CHUNK_DIR, session_id, "dicom")
+        dicom_dir = os.path.join(CHUNK_DIR, safe_session_id, "dicom")
         os.makedirs(dicom_dir, exist_ok=True)
         safe_name = secure_filename(slice_file.filename or "") or f"{uuid.uuid4()}.dcm"
         save_path = os.path.join(dicom_dir, safe_name)
@@ -1901,10 +1987,11 @@ def finalize_dicom():
             return jsonify({"error": "session_id required"}), 400
         # session_id is joined into paths below AND into the shutil.rmtree
         # cleanup - a traversal payload here would delete outside /tmp/uploads.
-        if not _is_safe_id(session_id):
+        safe_session_id = secure_filename(session_id)
+        if not _is_safe_id(session_id) or safe_session_id != session_id:
             return jsonify({"error": "Invalid session ID"}), 400
 
-        dicom_dir = os.path.join(CHUNK_DIR, session_id, "dicom")
+        dicom_dir = os.path.join(CHUNK_DIR, safe_session_id, "dicom")
         if not os.path.isdir(dicom_dir):
             return jsonify({"error": "No DICOM slices found for this session"}), 400
 
@@ -1919,15 +2006,15 @@ def finalize_dicom():
         image = sitk.DICOMOrient(image, "LPS")
 
         # Save to sessions/inference/<session_id>/<bdmap_id>/ct.nii.gz
-        digits = "".join(ch for ch in (session_id or "") if ch.isdigit())
+        digits = "".join(ch for ch in safe_session_id if ch.isdigit())
         if len(digits) < 8:
-            fallback = f"{(uuid.uuid5(uuid.NAMESPACE_DNS, session_id).int % (10 ** 8)):08d}"
+            fallback = f"{(uuid.uuid5(uuid.NAMESPACE_DNS, safe_session_id).int % (10 ** 8)):08d}"
             digits = (digits + fallback)[:8]
         else:
             digits = digits[:8]
         bdmap_id = f"BDMAP_{digits}"
 
-        base_path = os.path.join(Constants.SESSIONS_DIR_NAME, "inference", session_id)
+        base_path = os.path.join(Constants.SESSIONS_DIR_NAME, "inference", safe_session_id)
         target_dir = os.path.join(base_path, bdmap_id)
         os.makedirs(target_dir, exist_ok=True)
         final_path = os.path.join(target_dir, "ct.nii.gz")
@@ -1943,7 +2030,7 @@ def finalize_dicom():
         import shutil
         try:
             for entry in os.listdir(CHUNK_DIR):
-                if entry == session_id:
+                if entry == safe_session_id:
                     shutil.rmtree(os.path.join(CHUNK_DIR, entry), ignore_errors=True)
                     break
         except OSError:
