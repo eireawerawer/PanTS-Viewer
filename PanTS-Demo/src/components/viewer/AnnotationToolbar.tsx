@@ -607,12 +607,20 @@ export default function AnnotationToolbar({
 
 	const toolFlyout = useFlyout(false, {
 		scope: "top",
-		// Outside click = full deselect. For a guided-overlay tool, route
-		// through its own Exit handler so scribbles/anchors/picks get
-		// cleared too; everything else just deselects directly.
+		// Outside click = full deselect for most tools. For a guided-overlay
+		// tool, route through its own Exit handler so scribbles/anchors/picks
+		// get cleared too. LIVE_COMMIT_TOOLS (brush, erase, scissors, level
+		// tracing/"smart fill") are the exception: an outside click there
+		// should only close the settings flyout — the icon stays selected
+		// (white background) because the tool itself is still "live" and
+		// ready to paint/cut on the next pointer interaction.
 		onOutsideClose: () => {
-			if (guidedControlsRef.current) guidedControlsRef.current.onExit();
-			else onToolChange(null);
+			if (guidedControlsRef.current) {
+				guidedControlsRef.current.onExit();
+				return;
+			}
+			if (activeTool && LIVE_COMMIT_TOOLS.includes(activeTool)) return;
+			onToolChange(null);
 		},
 	});
 
