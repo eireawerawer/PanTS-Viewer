@@ -149,11 +149,16 @@ def _worker_api_token():
     return (os.getenv("WORKER_API_TOKEN", "") or "").strip()
 
 
+def _json_payload():
+    body = request.get_json(silent=True)
+    return body if isinstance(body, dict) else {}
+
+
 def _get_worker_id():
     return (
         request.headers.get("X-Worker-Id")
         or request.args.get("worker_id")
-        or (request.get_json(silent=True) or {}).get("worker_id")
+        or _json_payload().get("worker_id")
         or "worker-unknown"
     )
 
@@ -1213,7 +1218,7 @@ def run_epai_inference():
       - session_id
       - uploaded_filename (used with chunked upload output in sessions/inference/<session_id>/)
     """
-    payload = request.get_json(silent=True) or {}
+    payload = _json_payload()
 
     def _pick_text(*keys):
         for key in keys:
@@ -1342,7 +1347,7 @@ def check_inference_status_legacy():
 
 @api_blueprint.route('/jobs', methods=['POST'])
 def create_pull_inference_job():
-    payload = request.get_json(silent=True) or {}
+    payload = _json_payload()
 
     def _pick_text(*keys):
         for key in keys:
@@ -1453,7 +1458,7 @@ def heartbeat_pull_job(job_id):
         return auth_error
 
     worker_id = _get_worker_id()
-    payload = request.get_json(silent=True) or {}
+    payload = _json_payload()
     lease_seconds = int(payload.get("lease_seconds") or request.form.get("lease_seconds") or os.getenv("INFERENCE_LEASE_SECONDS", "900"))
 
     try:
@@ -1519,7 +1524,7 @@ def fail_pull_job(job_id):
         return auth_error
 
     worker_id = _get_worker_id()
-    payload = request.get_json(silent=True) or {}
+    payload = _json_payload()
     error_message = payload.get("error") or request.form.get("error") or "Worker marked job failed"
 
     try:

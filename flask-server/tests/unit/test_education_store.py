@@ -7,13 +7,16 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import pytest
+from flask import Flask
 
+import api.education as education_api
 from services.education_store import (
     AttemptAlreadySubmitted,
     AttemptDeadlinePassed,
     AttemptExpired,
     AttemptUnauthorized,
     CHALLENGE_ID,
+    EducationError,
     EducationStore,
 )
 
@@ -98,13 +101,38 @@ def test_postcava_is_not_scored_as_the_lesion(education_store):
 
 
 def test_reveal_segmentation_contains_only_the_lesion(education_store):
+    attempt, key = education_store.start_attempt(CHALLENGE_ID)
+    with pytest.raises(EducationError, match="Submit the challenge"):
+        education_store.reveal_segmentation(attempt["attempt_id"], key)
+    with pytest.raises(AttemptUnauthorized):
+        education_store.reveal_segmentation(attempt["attempt_id"], "wrong")
+    education_store.submit(attempt["attempt_id"], key, valid_submission())
     path = education_store.root / "reveal.nii.gz"
-    path.write_bytes(education_store.reveal_segmentation())
+    path.write_bytes(education_store.reveal_segmentation(attempt["attempt_id"], key))
     revealed = np.asanyarray(nib.load(path).dataobj)
     source, _, _ = education_store._ground_truth()
 
     assert set(np.unique(revealed)) == {0, 1}
     assert int((revealed == 1).sum()) == int((source == 28).sum())
+
+
+def test_reveal_endpoint_requires_submitted_attempt(education_store, monkeypatch):
+    monkeypatch.setattr(education_api, "_store", education_store)
+    app = Flask(__name__)
+    app.register_blueprint(education_api.education_blueprint, url_prefix="/api")
+    client = app.test_client()
+    attempt, key = education_store.start_attempt(CHALLENGE_ID)
+
+    public = client.get(f"/api/education/challenges/{CHALLENGE_ID}/segmentation.nii.gz")
+    assert public.status_code == 404
+    reveal_url = f"/api/education/attempts/{attempt['attempt_id']}/reveal-segmentation.nii.gz"
+    assert client.get(reveal_url, headers={"X-Attempt-Key": key}).status_code == 400
+    assert client.get(reveal_url, headers={"X-Attempt-Key": "wrong"}).status_code == 401
+
+    education_store.submit(attempt["attempt_id"], key, valid_submission())
+    revealed = client.get(reveal_url, headers={"X-Attempt-Key": key})
+    assert revealed.status_code == 200
+    assert revealed.mimetype == "application/gzip"
 
 
 def test_grade_prompt_defines_each_rubric_criterion(education_store):

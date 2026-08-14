@@ -87,6 +87,7 @@ export type SoloChallengeController = {
 	measurement: SharedMeasurement | null;
 	setMeasurement: (value: SharedMeasurement | null) => void;
 	result: EducationResult | null;
+	maskUrl: string | null;
 	submitting: boolean;
 	retryingGrade: boolean;
 	error: string | null;

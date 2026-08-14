@@ -28,7 +28,8 @@ auth_blueprint = Blueprint("auth", __name__)
 
 
 def _json():
-    return request.get_json(silent=True) or {}
+    body = request.get_json(silent=True)
+    return body if isinstance(body, dict) else {}
 
 
 def _with_roles(user: dict) -> dict:

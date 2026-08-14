@@ -120,7 +120,8 @@ def collect():
     if _over_rate_limit(request.remote_addr or "unknown"):
         return jsonify({"stored": 0, "error": "Too many requests"}), 429
 
-    body = request.get_json(silent=True) or {}
+    raw_body = request.get_json(silent=True)
+    body = raw_body if isinstance(raw_body, dict) else {}
     user = current_user()
     stored = analytics_store.record_events(
         body.get("events"), user_id=user["id"] if user else None

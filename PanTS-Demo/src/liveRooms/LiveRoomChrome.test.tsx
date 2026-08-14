@@ -128,6 +128,23 @@ describe("Live Room collaboration chrome", () => {
 		expect(screen.getByText("Structured report finding")).toBeInTheDocument();
 		expect(screen.getByText("Complete the remaining linked questions.")).toBeInTheDocument();
 		expect(screen.getByLabelText("Answer distribution")).toHaveTextContent("Pancreas1");
+		expect(screen.queryByRole("button", { name: "Export quiz ZIP" })).not.toBeInTheDocument();
+		expect(downloadExport).not.toHaveBeenCalled();
+	});
+
+	it("offers exports only after quiz completion", () => {
+		const downloadExport = vi.fn(() => Promise.resolve());
+		const room = controller({
+			metadata: { ...controller().metadata, mode: "quiz", quiz_pack_id: "radworld-case-35-v1", quiz_timer_seconds: 30 },
+			downloadExport,
+			quiz: {
+				phase: "completed", question_index: 3, question_count: 4, current_question: null,
+				deadline_at: null, remaining_seconds: 0, timer_paused: false,
+				response_count: 1, eligible_count: 1, reveal: null, leaderboard: [],
+				consistency_summary: { consistent: 1, inconsistent: 0, incomplete: 0 }, round_completed: true, host_connected: true,
+			},
+		});
+		render(<LiveRoomDock room={room} crosshair={null} activePlane="axial" onClose={vi.fn()} />);
 		fireEvent.click(screen.getByRole("button", { name: "Export quiz ZIP" }));
 		expect(downloadExport).toHaveBeenCalledWith("zip");
 	});

@@ -175,10 +175,11 @@ class QuizPracticeStore:
         }
         directory = self._dir(attempt_id)
         directory.mkdir(parents=True, exist_ok=False)
-        _atomic_json(directory / "attempt.json", attempt)
         pack_path = directory / "quiz_pack.json"
         _atomic_json(pack_path, pack)
         pack_path.chmod(0o600)
+        # attempt.json is readiness marker for this multi-file attempt.
+        _atomic_json(directory / "attempt.json", attempt)
         self.telemetry.record(
             "pack_started",
             pack_id=pack["pack_id"],

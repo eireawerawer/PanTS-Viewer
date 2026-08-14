@@ -21,6 +21,7 @@ import shutil
 import tempfile
 import threading
 import uuid
+import weakref
 import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -64,6 +65,7 @@ MAX_NAME = 32
 MAX_CHAT_MESSAGES = 500
 MAX_MASK_RANGES_PER_EVENT = 50_000
 MAX_MASK_VOXELS_PER_EVENT = 8_000_000
+MAX_PARTICIPANT_IDENTITIES = 128
 SNAPSHOT_MASK_EVENT_INTERVAL = 50
 SNAPSHOT_TIME_INTERVAL = timedelta(minutes=5)
 
@@ -120,6 +122,16 @@ class RoomExpired(LiveRoomError):
 class RoomFull(LiveRoomError):
     status_code = 507
     code = "room_event_log_full"
+
+
+class ParticipantUnauthorized(LiveRoomError):
+    status_code = 401
+    code = "invalid_participant_resume"
+
+
+class ParticipantLimit(LiveRoomError):
+    status_code = 409
+    code = "participant_identity_limit"
 
 
 @dataclass(frozen=True)
@@ -191,7 +203,7 @@ class LiveRoomStore:
         self._now = now
         self.quiz_registry = quiz_registry or get_registry()
         self.quiz_telemetry = QuizTelemetry(sessions_dir)
-        self._locks: dict[str, threading.RLock] = {}
+        self._locks: weakref.WeakValueDictionary[str, threading.RLock] = weakref.WeakValueDictionary()
         self._locks_guard = threading.Lock()
 
     @staticmethod
@@ -221,8 +233,10 @@ class LiveRoomStore:
     @contextmanager
     def _locked(self, room_id: str, *, require_exists: bool = True) -> Iterator[Path]:
         room_id = self.validate_room_id(room_id)
+        room_dir = self._room_dir(room_id)
+        if require_exists and not (room_dir / "metadata.json").is_file():
+            raise RoomNotFound("Room not found")
         with self._thread_lock(room_id):
-            room_dir = self._room_dir(room_id)
             if require_exists and not (room_dir / "metadata.json").is_file():
                 raise RoomNotFound("Room not found")
             room_dir.mkdir(parents=True, exist_ok=True)
@@ -269,7 +283,6 @@ class LiveRoomStore:
         state.setdefault("chat", [])
         state.setdefault("undone_event_ids", [])
         nvoxels = int(np.prod(metadata["dimensions"], dtype=np.int64))
-        writers: np.memmap | None = None
         for event in events:
             if int(event["seq"]) <= latest_metadata:
                 continue
@@ -290,17 +303,23 @@ class LiveRoomStore:
                     state["chat"].append(payload["message"])
                     state["chat"] = state["chat"][-MAX_CHAT_MESSAGES:]
             elif event_type == "mask.patch":
-                if writers is None:
-                    writers = self._writer_map(room_dir, nvoxels)
-                for item in payload.get("ranges", []):
-                    writers[item["start"] : item["start"] + item["length"]] = int(event["seq"])
                 metadata["mask_events_since_snapshot"] = int(metadata.get("mask_events_since_snapshot", 0)) + 1
             if event.get("undo_of") and event["undo_of"] not in state["undone_event_ids"]:
                 state["undone_event_ids"].append(event["undo_of"])
-        if writers is not None:
-            writers.flush()
-            del writers
         metadata["latest_seq"] = latest_logged
+        writers = self._writer_map(room_dir, nvoxels)
+        writers[:] = 0
+        for event in events:
+            if event.get("type") != "mask.patch":
+                continue
+            for item in (event.get("payload") or {}).get("ranges", []):
+                start = int(item["start"])
+                writers[start : start + int(item["length"])] = int(event["seq"])
+        writers.flush()
+        del writers
+        metadata["mask_values_seq"] = -1
+        values = self._mask_value_map(room_dir, metadata)
+        del values
         metadata["recent_event_ids"] = [event["event_id"] for event in events[-10_000:]]
         _atomic_json(room_dir / "state.json", state)
         _atomic_json(room_dir / "metadata.json", metadata)
@@ -326,6 +345,45 @@ class LiveRoomStore:
         public = {key: metadata[key] for key in allowed if key in metadata}
         public.setdefault("mode", "review")
         return public
+
+    def resolve_participant_identity(
+        self,
+        room_id: str,
+        room_key: str,
+        participant_id: str = "",
+        resume_credential: str = "",
+    ) -> tuple[str, str | None]:
+        """Resume a server-issued identity or mint a new bounded room identity."""
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            identities = metadata.setdefault("participant_credentials", {})
+            if not isinstance(identities, dict):
+                raise LiveRoomError("Participant credential store is invalid")
+            if participant_id or resume_credential:
+                if not participant_id or not resume_credential:
+                    raise ParticipantUnauthorized("Participant ID and resume credential are both required")
+                try:
+                    canonical = str(uuid.UUID(participant_id))
+                except (ValueError, AttributeError) as exc:
+                    raise ParticipantUnauthorized("Participant resume credential is invalid") from exc
+                record = identities.get(canonical)
+                expected_hash = record.get("resume_hash", "") if isinstance(record, dict) else ""
+                if not expected_hash or not hmac.compare_digest(
+                    hash_room_key(resume_credential), expected_hash
+                ):
+                    raise ParticipantUnauthorized("Participant resume credential is invalid")
+                return canonical, None
+            if len(identities) >= MAX_PARTICIPANT_IDENTITIES:
+                raise ParticipantLimit("Room has reached its participant identity limit")
+            canonical = str(uuid.uuid4())
+            credential = secrets.token_urlsafe(32)
+            identities[canonical] = {
+                "resume_hash": hash_room_key(credential),
+                "created_at": isoformat(self._now()),
+            }
+            _atomic_json(room_dir / "metadata.json", metadata)
+            return canonical, credential
 
     def _resolve_case(self, case_id: str, resolution: str) -> CaseFiles:
         if not re.fullmatch(r"\d+", str(case_id)):
@@ -450,6 +508,7 @@ class LiveRoomStore:
             "latest_seq": 0,
             "mask_snapshot_seq": 0,
             "mask_events_since_snapshot": 0,
+            "mask_values_seq": 0,
             "last_snapshot_at": isoformat(created),
             "recent_event_ids": [],
         }
@@ -469,7 +528,6 @@ class LiveRoomStore:
             "undone_event_ids": [],
         }
         with self._locked(room_id, require_exists=False) as room_dir:
-            _atomic_json(room_dir / "metadata.json", metadata)
             _atomic_json(room_dir / "state.json", state)
             (room_dir / "events.jsonl").touch(mode=0o600)
             if mode == "quiz":
@@ -502,6 +560,9 @@ class LiveRoomStore:
                 answers_path = room_dir / "quiz_answers.json"
                 _atomic_json(answers_path, {"submissions": {}})
                 answers_path.chmod(0o600)
+            # Metadata is readiness marker. Requests cannot observe partially
+            # initialized room if process stops during multi-file creation.
+            _atomic_json(room_dir / "metadata.json", metadata)
         return self.public_metadata(metadata), room_key, host_secret
 
     def create_room(self, case_id: str, resolution: str = "low") -> tuple[dict[str, Any], str]:
@@ -1184,7 +1245,51 @@ class LiveRoomStore:
             "revision": int(current.get("revision", 0) + 1) if current else 1,
         }
 
-    def _validate_mask_patch(self, payload: Any, metadata: dict[str, Any]) -> dict[str, Any]:
+    def _mask_values_at_seq_locked(
+        self,
+        room_dir: Path,
+        metadata: dict[str, Any],
+        through_seq: int,
+    ) -> np.ndarray:
+        image = nib.load(str(metadata["base_mask_path"]))
+        data = np.array(np.asanyarray(image.dataobj), dtype=np.uint8, order="F")
+        flat = data.reshape(-1, order="F")
+        for event in self._iter_events(room_dir):
+            if int(event.get("seq", 0)) > through_seq:
+                break
+            if event.get("type") != "mask.patch":
+                continue
+            for item in (event.get("payload") or {}).get("ranges", []):
+                start = int(item["start"])
+                flat[start : start + int(item["length"])] = int(item["after"])
+        return flat
+
+    def _mask_value_map(
+        self,
+        room_dir: Path,
+        metadata: dict[str, Any],
+    ) -> np.memmap:
+        nvoxels = int(np.prod(metadata["dimensions"], dtype=np.int64))
+        path = room_dir / "mask_values.bin"
+        latest_seq = int(metadata.get("latest_seq", 0))
+        cache_seq = int(metadata.get("mask_values_seq", -1))
+        if not path.exists() or path.stat().st_size != nvoxels or cache_seq != latest_seq:
+            values = self._mask_values_at_seq_locked(room_dir, metadata, latest_seq)
+            temporary = room_dir / ".mask_values.tmp.bin"
+            output = np.memmap(temporary, dtype=np.uint8, mode="w+", shape=(nvoxels,))
+            output[:] = values
+            output.flush()
+            del output
+            os.replace(temporary, path)
+            metadata["mask_values_seq"] = latest_seq
+        return np.memmap(path, dtype=np.uint8, mode="r+", shape=(nvoxels,))
+
+    def _validate_mask_patch(
+        self,
+        room_dir: Path,
+        payload: Any,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise LiveRoomError("mask patch must be an object")
         if payload.get("geometry_hash") != metadata["geometry_hash"]:
@@ -1203,24 +1308,43 @@ class LiveRoomStore:
         changed = 0
         ranges: list[dict[str, int]] = []
         previous_end = -1
+        values = self._mask_value_map(room_dir, metadata)
         for raw in ranges_raw:
             if not isinstance(raw, dict):
                 raise LiveRoomError("Invalid mask range")
             start = int(raw.get("start", -1))
             length = int(raw.get("length", 0))
-            before = int(raw.get("before", -1))
             after = int(raw.get("after", -1))
             if start < 0 or length <= 0 or start + length > nvoxels:
                 raise LiveRoomError("Mask range is out of bounds")
             if start < previous_end:
                 raise LiveRoomError("Mask ranges must be sorted and non-overlapping")
-            if not (0 <= before <= 255 and 0 <= after <= 255):
+            if not 0 <= after <= 255:
                 raise LiveRoomError("Mask labels must be uint8 values")
             changed += length
             if changed > MAX_MASK_VOXELS_PER_EVENT:
                 raise LiveRoomError("Mask patch is too large")
             previous_end = start + length
-            ranges.append({"start": start, "length": length, "before": before, "after": after})
+            current = np.asarray(values[start : start + length], dtype=np.uint8)
+            boundaries = np.concatenate((
+                np.array([0], dtype=np.int64),
+                np.flatnonzero(np.diff(current)) + 1,
+                np.array([length], dtype=np.int64),
+            ))
+            for run_start, run_end in zip(boundaries[:-1], boundaries[1:]):
+                authoritative_before = int(current[int(run_start)])
+                if authoritative_before == after:
+                    continue
+                ranges.append({
+                    "start": start + int(run_start),
+                    "length": int(run_end - run_start),
+                    "before": authoritative_before,
+                    "after": after,
+                })
+                if len(ranges) > MAX_MASK_RANGES_PER_EVENT:
+                    del values
+                    raise LiveRoomError("Mask patch is too fragmented after conflict resolution")
+        del values
         return {
             "operation_id": str(payload.get("operation_id", ""))[:128],
             "geometry_hash": metadata["geometry_hash"],
@@ -1314,14 +1438,7 @@ class LiveRoomStore:
             state["chat"] = state["chat"][-MAX_CHAT_MESSAGES:]
             payload = {"message": message}
         elif event_type == "mask.patch":
-            payload = self._validate_mask_patch(payload, metadata)
-            nvoxels = int(np.prod(metadata["dimensions"], dtype=np.int64))
-            writers = self._writer_map(room_dir, nvoxels)
-            for item in payload["ranges"]:
-                writers[item["start"] : item["start"] + item["length"]] = seq
-            writers.flush()
-            del writers
-            metadata["mask_events_since_snapshot"] += 1
+            payload = self._validate_mask_patch(room_dir, payload, metadata)
         else:
             raise LiveRoomError("Unsupported durable event type")
         return payload, before
@@ -1387,6 +1504,9 @@ class LiveRoomStore:
                 stream.write(serialized + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
+            if event_type == "mask.patch" and normalized_payload["ranges"]:
+                self._apply_mask_caches(room_dir, metadata, normalized_payload, seq)
+                metadata["mask_events_since_snapshot"] += 1
             metadata["latest_seq"] = seq
             recent = list(metadata.get("recent_event_ids", []))
             recent.append(event_id)
@@ -1397,6 +1517,27 @@ class LiveRoomStore:
             if event_type == "mask.patch" and self._snapshot_due(metadata):
                 self._materialize_mask_locked(room_dir, metadata)
             return event, False
+
+    def _apply_mask_caches(
+        self,
+        room_dir: Path,
+        metadata: dict[str, Any],
+        payload: dict[str, Any],
+        seq: int,
+    ) -> None:
+        nvoxels = int(np.prod(metadata["dimensions"], dtype=np.int64))
+        values = self._mask_value_map(room_dir, metadata)
+        writers = self._writer_map(room_dir, nvoxels)
+        for item in payload.get("ranges", []):
+            start = int(item["start"])
+            end = start + int(item["length"])
+            values[start:end] = int(item["after"])
+            writers[start:end] = seq
+        values.flush()
+        writers.flush()
+        del values
+        del writers
+        metadata["mask_values_seq"] = seq
 
     def _snapshot_due(self, metadata: dict[str, Any]) -> bool:
         return (
@@ -1564,32 +1705,48 @@ class LiveRoomStore:
             if inverse_type == "mask.patch":
                 nvoxels = int(np.prod(metadata["dimensions"], dtype=np.int64))
                 writers = self._writer_map(room_dir, nvoxels)
+                current_values = self._mask_value_map(room_dir, metadata)
+                historical_values = self._mask_values_at_seq_locked(
+                    room_dir, metadata, int(target["seq"]) - 1
+                )
                 inverse_ranges: list[dict[str, int]] = []
                 for item in target["payload"]["ranges"]:
                     start, length = int(item["start"]), int(item["length"])
                     total += length
                     matches = np.asarray(writers[start : start + length] == int(target["seq"]), dtype=np.bool_)
-                    boundaries = np.flatnonzero(
-                        np.diff(np.concatenate((np.array([False]), matches, np.array([False]))))
-                    ).reshape(-1, 2)
-                    for run_start, run_end in boundaries:
+                    prior = historical_values[start : start + length]
+                    current = np.asarray(current_values[start : start + length], dtype=np.uint8)
+                    changes = np.flatnonzero(
+                        (matches[1:] != matches[:-1]) | (prior[1:] != prior[:-1]) | (current[1:] != current[:-1])
+                    ) + 1
+                    boundaries = np.concatenate((
+                        np.array([0], dtype=np.int64),
+                        changes,
+                        np.array([length], dtype=np.int64),
+                    ))
+                    for run_start, run_end in zip(boundaries[:-1], boundaries[1:]):
+                        if not matches[int(run_start)]:
+                            continue
+                        authoritative_before = int(current[int(run_start)])
+                        authoritative_after = int(prior[int(run_start)])
+                        if authoritative_before == authoritative_after:
+                            continue
                         run_length = int(run_end - run_start)
                         inverse_ranges.append(
                             {
                                 "start": start + int(run_start),
                                 "length": run_length,
-                                "before": int(item["after"]),
-                                "after": int(item["before"]),
+                                "before": authoritative_before,
+                                "after": authoritative_after,
                             }
                         )
                         reverted += run_length
                         if len(inverse_ranges) > MAX_MASK_RANGES_PER_EVENT:
                             del writers
+                            del current_values
                             return {"ok": False, "reason": "Undo is too fragmented to apply safely", "partial": True}
-                for item in inverse_ranges:
-                    writers[item["start"] : item["start"] + item["length"]] = seq
-                writers.flush()
                 del writers
+                del current_values
                 if not inverse_ranges:
                     state["undone_event_ids"].append(target["event_id"])
                     _atomic_json(room_dir / "state.json", state)
@@ -1602,7 +1759,6 @@ class LiveRoomStore:
                     "segment_label": target["payload"]["segment_label"],
                     "ranges": inverse_ranges,
                 }
-                metadata["mask_events_since_snapshot"] += 1
             elif inverse_type == "measurement.upsert":
                 measurement_id = target["payload"]["measurement"]["id"]
                 if not self._event_is_current(state, target):
@@ -1668,6 +1824,9 @@ class LiveRoomStore:
                 stream.write(json.dumps(inverse, ensure_ascii=False, separators=(",", ":")) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
+            if inverse_type == "mask.patch":
+                self._apply_mask_caches(room_dir, metadata, inverse_payload, seq)
+                metadata["mask_events_since_snapshot"] += 1
             state["undone_event_ids"].append(target["event_id"])
             metadata["latest_seq"] = seq
             recent = list(metadata.get("recent_event_ids", [])) + [inverse["event_id"]]
@@ -1797,6 +1956,21 @@ class LiveRoomStore:
             "disclaimer": "For research and education use only. Not for diagnostic use.",
         }
 
+    def _require_quiz_export_ready_locked(self, room_dir: Path, metadata: dict[str, Any]) -> None:
+        if metadata.get("mode", "review") != "quiz":
+            return
+        quiz = self._read_json(room_dir / "quiz.json")
+        pack = self._pack_locked(room_dir, metadata)
+        final_revealed = (
+            int(quiz.get("question_index", -1)) == len(pack["questions"]) - 1
+            and quiz.get("phase") in {"question_revealed", "completed"}
+        )
+        if not final_revealed:
+            error = LiveRoomError("Quiz exports are available only after the final reveal")
+            error.status_code = 403
+            error.code = "quiz_export_locked"
+            raise error
+
     @staticmethod
     def _chat_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [
@@ -1810,6 +1984,7 @@ class LiveRoomStore:
             metadata = self._load_metadata(room_dir)
             if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
                 raise RoomUnauthorized("Invalid room key")
+            self._require_quiz_export_ready_locked(room_dir, metadata)
             export_path = room_dir / "export.zip"
             if export_path.exists():
                 return export_path
@@ -1880,6 +2055,7 @@ class LiveRoomStore:
             metadata = self._load_metadata(room_dir)
             if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
                 raise RoomUnauthorized("Invalid room key")
+            self._require_quiz_export_ready_locked(room_dir, metadata)
             state = self._read_json(room_dir / "state.json")
             events = list(self._iter_events(room_dir))
             report_state = {**state, "chat": self._chat_from_events(events)}

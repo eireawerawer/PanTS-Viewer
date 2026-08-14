@@ -4869,7 +4869,7 @@ export function applySmoothing(
       for (let v = 0; v < filtered.length; v++) if (filtered[v]) survivingCount++;
     }
     if (survivingCount === 0 && !hasThin) continue; // segment was already empty — nothing to do
-    let cur = filtered;
+    const cur = filtered;
     // Thin components are never smoothed — restore them verbatim.
     for (let li = 0; li < cur.length; li++) if (thin[li]) cur[li] = 1;
 

@@ -3,22 +3,22 @@
 from __future__ import annotations
 
 import threading
-import time
-from collections import defaultdict, deque
+from pathlib import Path
 from io import BytesIO
 
 from flask import Blueprint, jsonify, request, send_file
 
 from constants import Constants
 from services.live_room_store import LiveRoomError, LiveRoomStore
+from services.request_limits import PersistentRateLimiter, trusted_client_ip
 from services.live_quiz import QUIZ_PACK_ID
 
 
 live_rooms_blueprint = Blueprint("live_rooms", __name__)
 _store: LiveRoomStore | None = None
 _store_lock = threading.Lock()
-_creation_attempts: dict[str, deque[float]] = defaultdict(deque)
-_creation_lock = threading.Lock()
+_creation_limiter: PersistentRateLimiter | None = None
+_creation_limiter_lock = threading.Lock()
 CREATION_LIMIT = 10
 CREATION_WINDOW_SECONDS = 60 * 60
 
@@ -33,23 +33,35 @@ def get_live_room_store() -> LiveRoomStore:
 
 
 def _client_ip() -> str:
-    forwarded = request.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
-    return forwarded or request.remote_addr or "unknown"
+    return trusted_client_ip(request.remote_addr, request.headers)
+
+
+def _get_creation_limiter() -> PersistentRateLimiter:
+    global _creation_limiter
+    if _creation_limiter is None:
+        with _creation_limiter_lock:
+            if _creation_limiter is None:
+                path = Path(Constants.SESSIONS_DIR_NAME) / "request-rate-limits.sqlite3"
+                _creation_limiter = PersistentRateLimiter(path)
+    return _creation_limiter
 
 
 def _check_creation_rate() -> None:
-    now = time.monotonic()
     ip = _client_ip()
-    with _creation_lock:
-        attempts = _creation_attempts[ip]
-        while attempts and now - attempts[0] >= CREATION_WINDOW_SECONDS:
-            attempts.popleft()
-        if len(attempts) >= CREATION_LIMIT:
-            error = LiveRoomError("Too many rooms created; try again later")
-            error.status_code = 429
-            error.code = "room_creation_rate_limited"
-            raise error
-        attempts.append(now)
+    if not _get_creation_limiter().allow("live_room_create", ip, CREATION_LIMIT, CREATION_WINDOW_SECONDS):
+        error = LiveRoomError("Too many rooms created; try again later")
+        error.status_code = 429
+        error.code = "room_creation_rate_limited"
+        raise error
+
+
+def _json_object() -> dict:
+    body = request.get_json(silent=True)
+    if body is None:
+        return {}
+    if not isinstance(body, dict):
+        raise LiveRoomError("JSON body must be an object")
+    return body
 
 
 def _room_key() -> str:
@@ -71,7 +83,7 @@ def live_room_headers(response):
 @live_rooms_blueprint.post("/live-rooms")
 def create_live_room():
     _check_creation_rate()
-    body = request.get_json(silent=True) or {}
+    body = _json_object()
     case_id = str(body.get("case_id", ""))
     resolution = str(body.get("resolution", "low")).lower()
     mode = str(body.get("mode", "review")).lower()

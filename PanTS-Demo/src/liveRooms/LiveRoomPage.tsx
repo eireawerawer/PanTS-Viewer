@@ -74,6 +74,8 @@ function BootstrappingRoom({ roomId, roomKey, name }: { roomId: string; roomKey:
 	useEffect(() => {
 		let active = true;
 		let ownedMaskUrl: string | null = null;
+		setBootstrap(null);
+		setError(null);
 		bootstrapLiveRoom(roomId, roomKey).then((result) => {
 			if (!active) {
 				URL.revokeObjectURL(result.maskUrl);
@@ -98,7 +100,7 @@ function BootstrappingRoom({ roomId, roomKey, name }: { roomId: string; roomKey:
 			<p>Loading shared scan…</p>
 		</div>
 	);
-	return <ConnectedRoom bootstrap={bootstrap} roomKey={roomKey} name={name} />;
+	return <ConnectedRoom key={`${roomId}:${roomKey}`} bootstrap={bootstrap} roomKey={roomKey} name={name} />;
 }
 
 export default function LiveRoomPage() {
@@ -116,5 +118,5 @@ export default function LiveRoomPage() {
 		sessionStorage.setItem("bodymaps.live-room.name", value);
 		setName(value);
 	}} />;
-	return <BootstrappingRoom roomId={roomId} roomKey={roomKey} name={name} />;
+	return <BootstrappingRoom key={`${roomId}:${roomKey}`} roomId={roomId} roomKey={roomKey} name={name} />;
 }

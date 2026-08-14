@@ -56,7 +56,13 @@ const options = (name = "Tester") => ({
 function connect(socket: MockWebSocket) {
 	act(() => {
 		socket.emit("open");
-		socket.emit("message", { data: JSON.stringify({ type: "room.ready", participants: [], events: [] }) });
+		socket.emit("message", { data: JSON.stringify({
+			type: "room.ready",
+			self: { participant_id: "00000000-0000-4000-8000-000000000035", name: "Tester", color: "#fff", role: "reviewer" },
+			resume_credential: "resume-secret",
+			participants: [],
+			events: [],
+		}) });
 	});
 }
 
@@ -76,6 +82,7 @@ afterEach(() => {
 	vi.useRealTimers();
 	vi.unstubAllGlobals();
 	MockWebSocket.instances = [];
+	sessionStorage.clear();
 });
 
 describe("useLiveRoom socket lifecycle", () => {
@@ -144,17 +151,53 @@ describe("useLiveRoom socket lifecycle", () => {
 		unmount();
 	});
 
-	it("rejects empty mask patches without reporting a successful send", () => {
+	it("rejects empty mask patches without reporting a successful send", async () => {
 		vi.stubGlobal("WebSocket", MockWebSocket);
 		const { result, unmount } = renderHook(() => useLiveRoom(options()));
 		connect(MockWebSocket.instances[0]);
-		expect(result.current.sendDurable("mask.patch", {
+		await expect(result.current.sendDurable("mask.patch", {
 			operation_id: "empty",
 			geometry_hash: "hash",
 			resolution: "low",
 			segment_label: 1,
 			ranges: [],
-		})).toBe(false);
+		})).resolves.toBe(false);
+		unmount();
+	});
+
+	it("keeps durable events queued until commit and retries after reconnect", async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		const { result, unmount } = renderHook(() => useLiveRoom(options()));
+		const first = MockWebSocket.instances[0];
+		connect(first);
+		let durablePromise!: Promise<boolean>;
+		act(() => { durablePromise = result.current.sendChat("persist me"); });
+		const durableFrame = first.sent.map((frame) => JSON.parse(frame)).find((frame) => frame.type === "chat.add");
+		expect(durableFrame).toBeTruthy();
+
+		act(() => {
+			first.emit("close", { code: 1006 });
+			vi.advanceTimersByTime(500);
+		});
+		const resumed = MockWebSocket.instances[1];
+		act(() => resumed.emit("open"));
+		const hello = JSON.parse(resumed.sent[0]);
+		expect(hello.participant_id).toBe("00000000-0000-4000-8000-000000000035");
+		expect(hello.resume_credential).toBe("resume-secret");
+		act(() => resumed.emit("message", { data: JSON.stringify({
+			type: "room.ready",
+			self: { participant_id: hello.participant_id, name: "Tester", color: "#fff", role: "reviewer" },
+			participants: [],
+			events: [],
+		}) }));
+		const replay = resumed.sent.map((frame) => JSON.parse(frame)).find((frame) => frame.event_id === durableFrame.event_id);
+		expect(replay).toBeTruthy();
+		act(() => resumed.emit("message", { data: JSON.stringify({
+			type: "event.committed",
+			event: { ...chatEvent(1), event_id: durableFrame.event_id },
+		}) }));
+		await expect(durablePromise).resolves.toBe(true);
 		unmount();
 	});
 

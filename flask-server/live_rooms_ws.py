@@ -12,8 +12,7 @@ import logging
 import os
 import re
 import time
-import uuid
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +33,7 @@ from services.live_room_store import (
     parse_time,
     utcnow,
 )
+from services.request_limits import PersistentRateLimiter, trusted_client_ip
 
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
@@ -46,6 +46,8 @@ MAX_PARTICIPANTS = 8
 MAX_FRAME_BYTES = 512 * 1024
 MAX_MASK_CHUNKS = 256
 MAX_MASK_CHUNK_RANGES = 50_000
+MAX_PENDING_MASK_OPERATIONS = 4
+MAX_PENDING_MASK_RANGES_PER_PEER = 100_000
 MASK_CHUNK_TTL_SECONDS = 60
 HOST_PROMOTION_GRACE_SECONDS = 15
 ROOM_PATH = re.compile(r"^/ws/live-rooms/([0-9a-f-]{36})$")
@@ -107,12 +109,25 @@ class LiveRoomWebSocketService:
         self.lock = asyncio.Lock()
         self.deadline_tasks: dict[str, asyncio.Task] = {}
         self.promotion_tasks: dict[str, asyncio.Task] = {}
+        self.identity_limits: OrderedDict[
+            tuple[str, str], dict[str, deque[float]]
+        ] = OrderedDict()
+        self.connection_limiter = PersistentRateLimiter(
+            self.store.root.parent / "request-rate-limits.sqlite3"
+        )
 
     @staticmethod
     async def send_json(websocket: ServerConnection, message: dict[str, Any]) -> None:
         await websocket.send(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
 
-    async def error(self, websocket: ServerConnection, error: Exception | str, *, fatal: bool = False) -> None:
+    async def error(
+        self,
+        websocket: ServerConnection,
+        error: Exception | str,
+        *,
+        fatal: bool = False,
+        event_id: str | None = None,
+    ) -> None:
         if isinstance(error, LiveRoomError):
             code = error.code
             message = str(error)
@@ -120,7 +135,10 @@ class LiveRoomWebSocketService:
             code = "invalid_message"
             message = str(error)
         try:
-            await self.send_json(websocket, {"type": "error", "code": code, "message": message, "fatal": fatal})
+            payload = {"type": "error", "code": code, "message": message, "fatal": fatal}
+            if event_id:
+                payload["event_id"] = event_id
+            await self.send_json(websocket, payload)
         except ConnectionClosed:
             return
         if fatal:
@@ -242,15 +260,19 @@ class LiveRoomWebSocketService:
         if hello.get("type") != "hello" or hello.get("protocol") != 1:
             raise LiveRoomError("First frame must be a protocol 1 hello")
         room_key = str(hello.get("room_key", ""))
-        participant_id = str(hello.get("participant_id", ""))
-        try:
-            uuid.UUID(participant_id)
-        except (ValueError, AttributeError) as exc:
-            raise LiveRoomError("participant_id must be a UUID") from exc
+        requested_participant_id = str(hello.get("participant_id", ""))
+        resume_credential = str(hello.get("resume_credential", ""))
         name = "".join(ch for ch in str(hello.get("name", "Guest")) if ord(ch) >= 32).strip()[:32]
         if not name:
             raise LiveRoomError("Display name is required")
         metadata = await asyncio.to_thread(self.store.verify_key, room_id, room_key)
+        participant_id, issued_resume_credential = await asyncio.to_thread(
+            self.store.resolve_participant_identity,
+            room_id,
+            room_key,
+            requested_participant_id,
+            resume_credential,
+        )
         role = "reviewer" if metadata.get("mode", "review") == "review" else "student"
         host_secret = str(hello.get("quiz_host_secret", ""))
         host_event: dict[str, Any] | None = None
@@ -281,6 +303,15 @@ class LiveRoomWebSocketService:
                 raise error
             used_colors = {peer.color for peer in self.rooms[room_id].values() if peer.participant_id != participant_id}
             color = next((value for value in self.COLORS if value not in used_colors), self.COLORS[active_count % len(self.COLORS)])
+            limit_key = (room_id, participant_id)
+            shared_limits = self.identity_limits.get(limit_key)
+            if shared_limits is None:
+                shared_limits = defaultdict(deque)
+                self.identity_limits[limit_key] = shared_limits
+                while len(self.identity_limits) > 4_096:
+                    self.identity_limits.popitem(last=False)
+            else:
+                self.identity_limits.move_to_end(limit_key)
             peer = Peer(
                 websocket,
                 room_id,
@@ -291,6 +322,7 @@ class LiveRoomWebSocketService:
                 role=role,
                 host_secret=host_secret if role == "host" else "",
                 connected_at=existing.connected_at if existing else time.monotonic(),
+                limits=shared_limits,
             )
             self.rooms[room_id][participant_id] = peer
             participants = [item.public() for item in self.rooms[room_id].values()]
@@ -311,6 +343,8 @@ class LiveRoomWebSocketService:
             "participants": participants,
             "self": peer.public(),
         }
+        if issued_resume_credential:
+            ready["resume_credential"] = issued_resume_credential
         if last_seq == 0:
             ready["snapshot"] = await asyncio.to_thread(self.store.get_snapshot, room_id, room_key)
         if metadata.get("mode") == "quiz":
@@ -400,8 +434,7 @@ class LiveRoomWebSocketService:
 
         if event_type == "mask.patch" and int(payload.get("chunk_count", 1)) > 1:
             if not peer.allow("mask_chunk", 300, 60):
-                await self.error(peer.websocket, "Mask chunk rate limit exceeded")
-                return
+                raise LiveRoomError("Mask chunk rate limit exceeded")
             peer.prune_mask_chunks()
             operation_id = str(payload.get("operation_id", ""))
             chunk_count = int(payload.get("chunk_count", 0))
@@ -426,13 +459,22 @@ class LiveRoomWebSocketService:
                 peer.mask_chunks.pop(operation_id, None)
                 raise LiveRoomError("Mask patch chunks do not share the same metadata")
             chunks = peer.mask_chunks.setdefault(operation_id, {})
+            if operation_id not in peer.mask_chunk_meta and len(peer.mask_chunk_meta) >= MAX_PENDING_MASK_OPERATIONS:
+                peer.mask_chunks.pop(operation_id, None)
+                raise LiveRoomError("Too many partial mask operations are pending")
             if chunk_index in chunks and chunks[chunk_index] != ranges:
                 peer.mask_chunk_meta.pop(operation_id, None)
                 peer.mask_chunks.pop(operation_id, None)
                 raise LiveRoomError("Mask patch chunk was replaced with different data")
             chunks[chunk_index] = ranges
             peer.mask_chunk_meta.setdefault(operation_id, {**expected_meta, "received_at": time.monotonic()})
-            if sum(len(chunk) for chunk in chunks.values()) > MAX_MASK_CHUNK_RANGES:
+            operation_ranges = sum(len(chunk) for chunk in chunks.values())
+            peer_ranges = sum(
+                len(chunk)
+                for operation_chunks in peer.mask_chunks.values()
+                for chunk in operation_chunks.values()
+            )
+            if operation_ranges > MAX_MASK_CHUNK_RANGES or peer_ranges > MAX_PENDING_MASK_RANGES_PER_PEER:
                 peer.mask_chunk_meta.pop(operation_id, None)
                 peer.mask_chunks.pop(operation_id, None)
                 raise LiveRoomError("Mask patch contains too many ranges")
@@ -447,8 +489,7 @@ class LiveRoomWebSocketService:
 
         family = "chat" if event_type == "chat.add" else "durable"
         if not peer.allow(family, 12 if family == "chat" else 180, 60):
-            await self.error(peer.websocket, "Event rate limit exceeded")
-            return
+            raise LiveRoomError("Event rate limit exceeded")
 
         event, duplicate = await asyncio.to_thread(
             self.store.commit_event,
@@ -582,6 +623,19 @@ class LiveRoomWebSocketService:
         room_id = match.group(1)
         peer: Peer | None = None
         try:
+            remote_addr = websocket.remote_address[0] if websocket.remote_address else None
+            headers = websocket.request.headers if websocket.request else {}
+            client_ip = trusted_client_ip(remote_addr, headers)
+            allowed = await asyncio.to_thread(
+                self.connection_limiter.allow,
+                "live_room_ws_connect",
+                client_ip,
+                120,
+                60,
+            )
+            if not allowed:
+                await websocket.close(code=4008, reason="Connection rate limit exceeded")
+                return
             raw_hello = await asyncio.wait_for(websocket.recv(), timeout=10)
             if not isinstance(raw_hello, str):
                 raise LiveRoomError("Binary frames are not supported")
@@ -590,6 +644,7 @@ class LiveRoomWebSocketService:
                 raise LiveRoomError("hello must be an object")
             peer = await self.join(websocket, room_id, hello)
             async for raw in websocket:
+                message: dict[str, Any] | None = None
                 if not isinstance(raw, str):
                     await self.error(websocket, "Binary frames are not supported")
                     continue
@@ -599,7 +654,8 @@ class LiveRoomWebSocketService:
                         raise LiveRoomError("Message must be an object")
                     await self.handle_message(peer, message)
                 except (json.JSONDecodeError, LiveRoomError, ValueError, TypeError) as exc:
-                    await self.error(websocket, exc)
+                    event_id = str(message.get("event_id", "")) if message else ""
+                    await self.error(websocket, exc, event_id=event_id or None)
         except asyncio.TimeoutError:
             await self.error(websocket, "Hello frame timed out", fatal=True)
         except (json.JSONDecodeError, LiveRoomError, ValueError, TypeError) as exc:

@@ -409,12 +409,16 @@ class EducationStore:
         ]
         return mask, affine, ground_truth
 
-    def reveal_segmentation(self) -> bytes:
-        """Return a lesion-only uint8 NIfTI for the post-submit teaching overlay."""
-        try:
-            return case35_reveal_segmentation(self.pants_path)
-        except (FileNotFoundError, ValueError) as exc:
-            raise EducationError(str(exc)) from exc
+    def reveal_segmentation(self, attempt_id: str, key: str) -> bytes:
+        """Return the lesion overlay only for an authorized submitted attempt."""
+        with self._locked(attempt_id) as directory:
+            attempt = self._authorized(directory, key)
+            if not isinstance(attempt.get("result"), dict):
+                raise EducationError("Submit the challenge before revealing the segmentation")
+            try:
+                return case35_reveal_segmentation(self.pants_path)
+            except (FileNotFoundError, ValueError) as exc:
+                raise EducationError(str(exc)) from exc
 
     def _grade_impression(self, impression: str, ground_truth: dict[str, Any], _objective: dict[str, Any]) -> dict[str, Any]:
         system_prompt = """

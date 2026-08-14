@@ -33,12 +33,16 @@ export default function LiveRoomCreateDialog({ caseId, open, onClose }: Props) {
 		if (!open) return;
 		setMode("choose");
 		setQuizSource(String(caseId) === "35" ? "pack:radworld-case-35-v1" : "playlist:mixed-challenge-v1");
+	}, [caseId, open]);
+
+	useEffect(() => {
+		if (!open) return;
 		const onKey = (event: KeyboardEvent) => {
 			if (event.key === "Escape" && !submitting) onClose();
 		};
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
-	}, [caseId, onClose, open, submitting]);
+	}, [onClose, open, submitting]);
 
 	useEffect(() => {
 		if (!open) return;
@@ -72,10 +76,10 @@ export default function LiveRoomCreateDialog({ caseId, open, onClose }: Props) {
 							<span><IconClockPlay size={21} /></span><strong>Solo Challenge</strong><small>{educationAvailable ? "Five-minute case: locate, measure, and interpret." : "The first curated challenge uses case 35."}</small>
 						</button>
 							<button type="button" className="lr-mode-card lr-mode-card--quiz" onClick={() => setMode("quiz")}>
-								<span><IconBolt size={21} /></span><strong>Individual Race</strong><small>Live four-question race with private answers.</small>
+								<span><IconBolt size={21} /></span><strong>Individual Race</strong><small>Live linked-question race with private answers.</small>
 							</button>
 							<button type="button" className="lr-mode-card" onClick={() => navigate("/learn/quiz/radworld-case-35-v1")}>
-								<span><IconClipboardCheck size={21} /></span><strong>Solo VQA Practice</strong><small>Untimed four-question pack with answer review.</small>
+								<span><IconClipboardCheck size={21} /></span><strong>Solo VQA Practice</strong><small>Untimed linked-question pack with answer review.</small>
 						</button>
 					</div>
 				</section>

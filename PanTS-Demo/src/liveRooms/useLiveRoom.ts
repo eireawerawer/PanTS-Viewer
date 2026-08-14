@@ -56,26 +56,40 @@ type IncomingMessage = {
 	submission?: LiveQuizSubmission;
 	question_id?: string;
 	quiz_host_secret?: string;
+	resume_credential?: string;
+	event_id?: string;
 };
 
 type TransientMessageType = "presence.update" | "view.update";
 
+type ParticipantCredential = { participantId: string; resumeCredential: string };
+
+type OutboxItem = {
+	frames: Record<string, unknown>[];
+	promise: Promise<boolean>;
+	resolve: (committed: boolean) => void;
+};
+
 function participantStorageKey(roomId: string): string {
-	return `bodymaps.live-room.${roomId}.participant-id`;
+	return `bodymaps.live-room.${roomId}.participant-credential`;
 }
 
-function getParticipantId(roomId: string): string {
-	const key = participantStorageKey(roomId);
-	const existing = sessionStorage.getItem(key);
-	if (existing) return existing;
-	const created = crypto.randomUUID();
-	sessionStorage.setItem(key, created);
-	return created;
+function getParticipantCredential(roomId: string): ParticipantCredential | null {
+	try {
+		const value = JSON.parse(sessionStorage.getItem(participantStorageKey(roomId)) || "null") as Partial<ParticipantCredential> | null;
+		if (value && typeof value.participantId === "string" && typeof value.resumeCredential === "string") {
+			return { participantId: value.participantId, resumeCredential: value.resumeCredential };
+		}
+	} catch {
+		// Ignore malformed tab-local state and request a fresh server identity.
+	}
+	return null;
 }
 
 export function useLiveRoom(options: Options): LiveRoomController {
 	const { metadata, roomKey, name, maskUrl: initialMaskUrl, maskSequence, initialState, initialQuiz } = options;
-	const participantId = useMemo(() => getParticipantId(metadata.room_id), [metadata.room_id]);
+	const initialCredential = useMemo(() => getParticipantCredential(metadata.room_id), [metadata.room_id]);
+	const [participantId, setParticipantId] = useState(initialCredential?.participantId ?? "");
 	const [connectionState, setConnectionState] = useState<LiveRoomConnectionState>("connecting");
 	const [participants, setParticipants] = useState<LiveRoomParticipant[]>([]);
 	const [state, setState] = useState<LiveRoomDurableState>(initialState);
@@ -89,6 +103,8 @@ export function useLiveRoom(options: Options): LiveRoomController {
 	const [quizEligible, setQuizEligible] = useState(false);
 	const [selfRole, setSelfRole] = useState<LiveRoomParticipant["role"]>(metadata.mode === "quiz" ? "student" : "reviewer");
 	const websocketRef = useRef<WebSocket | null>(null);
+	const participantCredentialRef = useRef<ParticipantCredential | null>(initialCredential);
+	const participantIdRef = useRef(initialCredential?.participantId ?? "");
 	const lastSeqRef = useRef(maskSequence);
 	const reconnectAttemptRef = useRef(0);
 	const reconnectTimerRef = useRef<number | null>(null);
@@ -99,6 +115,7 @@ export function useLiveRoom(options: Options): LiveRoomController {
 	const undoTimerRef = useRef<number | null>(null);
 	const bufferedEventsRef = useRef(new Map<number, LiveRoomEventDelivery>());
 	const quizRevealMaskRef = useRef<string | null>(null);
+	const outboxRef = useRef(new Map<string, OutboxItem>());
 	const hostSecretRef = useRef(sessionStorage.getItem(liveQuizHostSecretKey(metadata.room_id)) || "");
 	const isHost = selfRole === "host";
 	const collaborationLocked = metadata.mode === "quiz" && Boolean(
@@ -110,6 +127,17 @@ export function useLiveRoom(options: Options): LiveRoomController {
 		if (!socket || socket.readyState !== WebSocket.OPEN) return false;
 		socket.send(JSON.stringify(message));
 		return true;
+	}, []);
+
+	const flushOutbox = useCallback(() => {
+		for (const item of outboxRef.current.values()) {
+			for (const frame of item.frames) sendFrame(frame);
+		}
+	}, [sendFrame]);
+
+	const failOutbox = useCallback(() => {
+		for (const item of outboxRef.current.values()) item.resolve(false);
+		outboxRef.current.clear();
 	}, []);
 
 	const flushTransient = useCallback((type: TransientMessageType) => {
@@ -141,6 +169,11 @@ export function useLiveRoom(options: Options): LiveRoomController {
 
 	const acceptCommittedEvents = useCallback((events: LiveRoomEvent[], replayed: boolean) => {
 		for (const event of events) {
+			const queued = outboxRef.current.get(event.event_id);
+			if (queued) {
+				outboxRef.current.delete(event.event_id);
+				queued.resolve(true);
+			}
 			const eventQuiz = (event.payload as { quiz?: LiveQuizState }).quiz;
 			if (eventQuiz) setQuiz(eventQuiz);
 			if (event.seq <= lastSeqRef.current) continue;
@@ -185,7 +218,12 @@ export function useLiveRoom(options: Options): LiveRoomController {
 				type: "hello",
 				protocol: LIVE_ROOM_PROTOCOL,
 				room_key: roomKey,
-				participant_id: participantId,
+				...(participantCredentialRef.current
+					? {
+						participant_id: participantCredentialRef.current.participantId,
+						resume_credential: participantCredentialRef.current.resumeCredential,
+					}
+					: {}),
 				name,
 				last_seq: lastSeqRef.current,
 				...(metadata.mode === "quiz" && hostSecretRef.current
@@ -207,6 +245,18 @@ export function useLiveRoom(options: Options): LiveRoomController {
 				setConnectionState("connected");
 				setError(null);
 				if (Array.isArray(message.participants)) setParticipants(message.participants);
+				if (message.self?.participant_id) {
+					participantIdRef.current = message.self.participant_id;
+					setParticipantId(message.self.participant_id);
+					if (message.resume_credential) {
+						const credential = {
+							participantId: message.self.participant_id,
+							resumeCredential: message.resume_credential,
+						};
+						participantCredentialRef.current = credential;
+						sessionStorage.setItem(participantStorageKey(metadata.room_id), JSON.stringify(credential));
+					}
+				}
 				if (message.self?.role) setSelfRole(message.self.role);
 				if (message.snapshot?.state) setState(message.snapshot.state);
 				if (message.quiz && "state" in message.quiz) {
@@ -216,6 +266,7 @@ export function useLiveRoom(options: Options): LiveRoomController {
 				}
 				const events = Array.isArray(message.events) ? message.events as LiveRoomEvent[] : [];
 				acceptCommittedEvents([...events].sort((a, b) => a.seq - b.seq), true);
+				flushOutbox();
 				flushTransient("presence.update");
 				flushTransient("view.update");
 				return;
@@ -250,7 +301,7 @@ export function useLiveRoom(options: Options): LiveRoomController {
 			if (message.type === "presence.changed") {
 				if (Array.isArray(message.participants)) {
 					setParticipants(message.participants);
-					const self = message.participants.find((item) => item.participant_id === participantId);
+					const self = message.participants.find((item) => item.participant_id === participantIdRef.current);
 					if (self?.role) setSelfRole(self.role);
 				} else if (message.participant?.participant_id) {
 					const participant = message.participant;
@@ -286,9 +337,17 @@ export function useLiveRoom(options: Options): LiveRoomController {
 					if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
 					return;
 				}
-				if (message.type === "error") {
-					setError(String(message.message || "Live Room error"));
-					if (message.fatal) {
+			if (message.type === "error") {
+				setError(String(message.message || "Live Room error"));
+				if (message.event_id) {
+					const queued = outboxRef.current.get(message.event_id);
+					if (queued) {
+						outboxRef.current.delete(message.event_id);
+						queued.resolve(false);
+					}
+				}
+				if (message.fatal) {
+					failOutbox();
 						stoppedRef.current = true;
 						setConnectionState("error");
 					}
@@ -319,7 +378,7 @@ export function useLiveRoom(options: Options): LiveRoomController {
 			if (websocketRef.current !== socket) return;
 			setError("Connection lost. Reconnecting…");
 		});
-	}, [acceptCommittedEvents, flushTransient, metadata.mode, metadata.room_id, name, participantId, roomKey]);
+	}, [acceptCommittedEvents, failOutbox, flushOutbox, flushTransient, metadata.mode, metadata.room_id, name, roomKey]);
 
 	useEffect(() => {
 		stoppedRef.current = false;
@@ -336,10 +395,11 @@ export function useLiveRoom(options: Options): LiveRoomController {
 			}
 			transientTimerRef.current = {};
 			bufferedEvents.clear();
+			failOutbox();
 			websocketRef.current?.close(1000, "Page closed");
 			websocketRef.current = null;
 		};
-	}, [connect, sendFrame]);
+	}, [connect, failOutbox, sendFrame]);
 
 	useEffect(() => {
 		const shouldReveal = Boolean(quiz?.reveal?.viewer_cue?.show_lesion_overlay);
@@ -361,25 +421,39 @@ export function useLiveRoom(options: Options): LiveRoomController {
 	}, []);
 
 	const sendDurable = useCallback<LiveRoomController["sendDurable"]>((type, payload, eventId) => {
-		if (connectionState !== "connected" || collaborationLocked) return false;
+		if (["disconnected", "expired", "error"].includes(connectionState) || collaborationLocked) {
+			return Promise.resolve(false);
+		}
+		let frames: Record<string, unknown>[];
+		let durableEventId = eventId || crypto.randomUUID();
 		if (type === "mask.patch") {
 			const patch = payload as unknown as LiveRoomMaskPatch;
-			if (!patch.ranges.length) return false;
+			if (!patch.ranges.length) return Promise.resolve(false);
 			const chunks = chunkMaskRanges(patch.ranges);
-			const operationId = eventId || patch.operation_id || crypto.randomUUID();
-			return chunks.every((ranges, chunkIndex) => sendFrame({
+			durableEventId = eventId || patch.operation_id || durableEventId;
+			frames = chunks.map((ranges, chunkIndex) => ({
 				type,
-				event_id: operationId,
+				event_id: durableEventId,
 				payload: {
 					...patch,
-					operation_id: operationId,
+					operation_id: durableEventId,
 					ranges,
 					chunk_index: chunkIndex,
 					chunk_count: chunks.length,
 				},
 			}));
+		} else {
+			frames = [{ type, event_id: durableEventId, payload }];
 		}
-		return sendFrame({ type, event_id: eventId || crypto.randomUUID(), payload });
+		const existing = outboxRef.current.get(durableEventId);
+		if (existing) return existing.promise;
+		let resolve!: (committed: boolean) => void;
+		const promise = new Promise<boolean>((done) => { resolve = done; });
+		outboxRef.current.set(durableEventId, { frames, promise, resolve });
+		if (connectionState === "connected") {
+			for (const frame of frames) sendFrame(frame);
+		}
+		return promise;
 	}, [collaborationLocked, connectionState, sendFrame]);
 
 	const sendChat = useCallback((text: string) => sendDurable("chat.add", {
@@ -394,8 +468,8 @@ export function useLiveRoom(options: Options): LiveRoomController {
 	const deleteNote = useCallback((id: string) => sendDurable("note.delete", { id }), [sendDurable]);
 
 	const requestUndo = useCallback(() => {
-		if (connectionState === "connected") sendFrame({ type: "undo.request" });
-	}, [connectionState, sendFrame]);
+		if (connectionState === "connected" && !collaborationLocked) sendFrame({ type: "undo.request" });
+	}, [collaborationLocked, connectionState, sendFrame]);
 
 	const follow = useCallback((id: string) => {
 		setFollowingId(id);

@@ -1,6 +1,7 @@
 import { IconArrowRight, IconClock, IconCrosshair, IconRulerMeasure, IconSparkles } from "@tabler/icons-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
+import { ungzip } from "pako";
 import { API_BASE } from "../helpers/constants";
 import VisualizationPage from "../routes/VisualizationPage";
 import {
@@ -33,6 +34,7 @@ export default function SoloChallengePage() {
 	const [marker, setMarker] = useState<[number, number, number] | null>(restoredSession?.marker ?? null);
 	const [measurement, setMeasurement] = useState(restoredSession?.measurement ?? null);
 	const [result, setResult] = useState<EducationResult | null>(restoredSession?.result ?? null);
+	const [maskUrl, setMaskUrl] = useState<string | null>(null);
 	const [submitting, setSubmitting] = useState(false);
 	const [retryingGrade, setRetryingGrade] = useState(false);
 	const [taskDockOpen, setTaskDockOpen] = useState(true);
@@ -86,6 +88,32 @@ export default function SoloChallengePage() {
 		return () => { cancelled = true; };
 	}, [attempt, challengeId, result]);
 
+	useEffect(() => {
+		if (!attempt || !result) {
+			setMaskUrl(null);
+			return;
+		}
+		let active = true;
+		let ownedUrl: string | null = null;
+		void fetch(`${API_BASE}/api/education/attempts/${attempt.attempt_id}/reveal-segmentation.nii.gz`, {
+			headers: { "X-Attempt-Key": attempt.attempt_key },
+		}).then(async (response) => {
+			if (!response.ok) throw new Error("Challenge reveal could not be loaded");
+			const compressed = new Uint8Array(await response.arrayBuffer());
+			ownedUrl = URL.createObjectURL(new Blob([new Uint8Array(ungzip(compressed))], {
+				type: "application/octet-stream",
+			}));
+			if (active) setMaskUrl(ownedUrl);
+			else URL.revokeObjectURL(ownedUrl);
+		}).catch((caught) => {
+			if (active) setError(caught instanceof Error ? caught.message : "Challenge reveal failed");
+		});
+		return () => {
+			active = false;
+			if (ownedUrl) URL.revokeObjectURL(ownedUrl);
+		};
+	}, [attempt, result]);
+
 	const remainingSeconds = useMemo(() => {
 		if (!attempt) return challenge?.time_limit_seconds ?? 300;
 		return Math.max(0, Math.ceil((new Date(attempt.deadline_at).getTime() - now) / 1000));
@@ -101,6 +129,7 @@ export default function SoloChallengePage() {
 			setMarker(null);
 			setMeasurement(null);
 			setResult(null);
+			setMaskUrl(null);
 			setAttempt(await responseJson<EducationAttempt>(response));
 			setNow(Date.now());
 		} catch (caught) {
@@ -197,6 +226,7 @@ export default function SoloChallengePage() {
 		measurement,
 		setMeasurement,
 		result,
+		maskUrl,
 		submitting,
 		retryingGrade,
 		error,

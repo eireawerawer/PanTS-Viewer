@@ -170,12 +170,12 @@ export type LiveRoomController = {
 	quizEligible: boolean;
 	isHost: boolean;
 	collaborationLocked: boolean;
-	sendDurable: (type: LiveRoomEvent["type"], payload: Record<string, unknown>, eventId?: string) => boolean;
+	sendDurable: (type: LiveRoomEvent["type"], payload: Record<string, unknown>, eventId?: string) => Promise<boolean>;
 	sendPresence: (payload: Record<string, unknown>) => void;
 	sendView: (payload: Record<string, unknown>) => void;
-	sendChat: (text: string) => boolean;
-	addNote: (text: string, world: [number, number, number], plane: string, organLabel?: string) => boolean;
-	deleteNote: (id: string) => boolean;
+	sendChat: (text: string) => Promise<boolean>;
+	addNote: (text: string, world: [number, number, number], plane: string, organLabel?: string) => Promise<boolean>;
+	deleteNote: (id: string) => Promise<boolean>;
 	requestUndo: () => void;
 	follow: (participantId: string) => void;
 	stopFollowing: () => void;

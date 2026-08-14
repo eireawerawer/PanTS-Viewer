@@ -22,6 +22,11 @@ from services.live_room_store import LiveRoomError, LiveRoomStore, RoomUnauthori
 from live_rooms_ws import LiveRoomWebSocketService
 
 
+class AlwaysAllow:
+    def allow(self, *_args, **_kwargs):
+        return True
+
+
 class Clock:
     def __init__(self) -> None:
         self.value = datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc)
@@ -97,8 +102,9 @@ def test_host_authorization_answer_privacy_and_immutable_submission(quiz_store):
     with pytest.raises(LiveRoomError) as locked_reveal:
         store.get_quiz_reveal_segmentation(room_id, key)
     assert locked_reveal.value.code == "quiz_reveal_locked"
-    with zipfile.ZipFile(store.build_export(room_id, key)) as archive:
-        assert archive.read("edited_labelmap.nii.gz") == blank_mask.read_bytes()
+    with pytest.raises(LiveRoomError) as locked_export:
+        store.build_export(room_id, key)
+    assert locked_export.value.code == "quiz_export_locked"
 
     with pytest.raises(RoomUnauthorized):
         store.start_quiz(room_id, key, "forged", "host", roster("p1"))
@@ -124,15 +130,9 @@ def test_host_authorization_answer_privacy_and_immutable_submission(quiz_store):
     assert "answered_at" not in event_text
     assert store.quiz_context(room_id, key, "p1")["own_submissions"]["organ"]["choice_id"] == "pancreas"
     assert store.quiz_context(room_id, key, "p2")["own_submissions"] == {}
-    with zipfile.ZipFile(store.build_export(room_id, key)) as archive:
-        assert "quiz_pack.json" not in archive.namelist()
-        pre_reveal_text = "\n".join(
-            archive.read(name).decode("utf-8", errors="ignore")
-            for name in archive.namelist()
-            if name.endswith((".json", ".csv", ".html", ".txt"))
-        )
-        for field in forbidden:
-            assert field not in pre_reveal_text
+    with pytest.raises(LiveRoomError) as locked_export:
+        store.build_export(room_id, key)
+    assert locked_export.value.code == "quiz_export_locked"
 
 
 def test_full_round_scores_time_and_consistency_with_late_joiner(quiz_store):
@@ -243,7 +243,7 @@ def test_consistency_flags_contradictions_but_not_coherent_wrong_chain():
 def test_rest_quiz_creation_never_puts_host_secret_in_share_url(quiz_store, monkeypatch):
     store, _ = quiz_store
     monkeypatch.setattr(live_rooms_api, "_store", store)
-    live_rooms_api._creation_attempts.clear()
+    monkeypatch.setattr(live_rooms_api, "_creation_limiter", AlwaysAllow())
     app = Flask(__name__)
     app.register_blueprint(live_rooms_api.live_rooms_blueprint, url_prefix="/api")
     response = app.test_client().post("/api/live-rooms", json={
@@ -282,7 +282,6 @@ def test_websocket_roles_private_answers_and_host_promotion(quiz_store):
             async with connect(uri) as host, connect(uri) as student:
                 await student.send(json.dumps({
                     "type": "hello", "protocol": 1, "room_key": key,
-                    "participant_id": "00000000-0000-4000-8000-000000000002",
                     "name": "Student", "last_seq": 0,
                 }))
                 student_ready = json.loads(await student.recv())
@@ -292,7 +291,6 @@ def test_websocket_roles_private_answers_and_host_promotion(quiz_store):
                 await host.send(json.dumps({
                     "type": "hello", "protocol": 1, "room_key": key,
                     "quiz_host_secret": host_secret,
-                    "participant_id": "00000000-0000-4000-8000-000000000001",
                     "name": "Host", "last_seq": 0,
                 }))
                 host_ready = json.loads(await host.recv())
@@ -320,10 +318,9 @@ def test_websocket_roles_private_answers_and_host_promotion(quiz_store):
             async with connect(uri) as replacement:
                 await replacement.send(json.dumps({
                     "type": "hello", "protocol": 1, "room_key": key,
-                    "participant_id": "00000000-0000-4000-8000-000000000003",
                     "name": "Replacement", "last_seq": 0,
                 }))
-                await replacement.recv()
+                replacement_ready = json.loads(await replacement.recv())
                 promotion = service.promotion_tasks.pop(metadata["room_id"], None)
                 if promotion:
                     promotion.cancel()
@@ -333,7 +330,7 @@ def test_websocket_roles_private_answers_and_host_promotion(quiz_store):
                 with pytest.raises(RoomUnauthorized):
                     store.connect_quiz_host(
                         metadata["room_id"], key, host_secret,
-                        "00000000-0000-4000-8000-000000000003",
+                        replacement_ready["self"]["participant_id"],
                     )
 
     asyncio.run(scenario())

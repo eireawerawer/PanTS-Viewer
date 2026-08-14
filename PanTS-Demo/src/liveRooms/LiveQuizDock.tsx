@@ -21,9 +21,9 @@ function QuizChat({ room }: { room: LiveRoomController }) {
 					</article>
 				))}
 			</div>
-			<form className="lr-chat-compose" onSubmit={(event) => {
+			<form className="lr-chat-compose" onSubmit={async (event) => {
 				event.preventDefault();
-				if (message.trim() && room.sendChat(message.trim())) setMessage("");
+				if (message.trim() && await room.sendChat(message.trim())) setMessage("");
 			}}>
 				<label htmlFor="lr-quiz-chat">Room message</label>
 				<textarea id="lr-quiz-chat" maxLength={2000} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Message everyone…" />
@@ -60,6 +60,9 @@ export default function LiveQuizDock({ room, onClose }: { room: LiveRoomControll
 			: quiz.phase.replaceAll("_", " ");
 	const personalCorrect = Boolean(ownSubmission && quiz.reveal && ownSubmission.choice_id === quiz.reveal.correct_choice_id);
 	const selfRow = quiz.leaderboard.find((item) => item.participant_id === room.participantId);
+	const exportsAvailable = quiz.phase === "completed" || (
+		quiz.phase === "question_revealed" && quiz.question_index + 1 === quiz.question_count
+	);
 
 	return (
 		<aside className="lr-dock lr-quiz-dock" aria-label="Live Quiz">
@@ -176,12 +179,12 @@ export default function LiveQuizDock({ room, onClose }: { room: LiveRoomControll
 
 				{chatAllowed && <QuizChat room={room} />}
 				{!chatAllowed && <div className="lr-banner"><IconMessage size={15} /> Chat and editing return after reveal.</div>}
-				<section className="lr-export" aria-label="Quiz exports">
+				{exportsAvailable && <section className="lr-export" aria-label="Quiz exports">
 					<button onClick={() => void room.downloadExport("zip").catch((caught) => setExportError(caught.message))}><IconCloudDownload size={16} /> Export quiz ZIP</button>
 					<button onClick={() => void room.downloadExport("pdf").catch((caught) => setExportError(caught.message))}><IconFileTypePdf size={16} /> PDF</button>
 					{exportError && <div className="lr-error" role="alert">{exportError}</div>}
 					<small>For research and education use only. Room deletes after 24 hours.</small>
-				</section>
+				</section>}
 				{room.error && <div className="lr-error" role="alert">{room.error}</div>}
 			</div>
 		</aside>

@@ -30,6 +30,11 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 
 
+class AlwaysAllow:
+    def allow(self, *_args, **_kwargs):
+        return True
+
+
 class Clock:
     def __init__(self) -> None:
         self.value = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
@@ -227,7 +232,7 @@ def test_overlapping_mask_patch_has_conflict_aware_partial_undo(room_store):
         payload={
             "operation_id": "stroke-one", "geometry_hash": metadata["geometry_hash"],
             "resolution": "low", "segment_label": 1,
-            "ranges": [{"start": 0, "length": 4, "before": 0, "after": 1}],
+            "ranges": [{"start": 0, "length": 4, "before": 77, "after": 1}],
         },
     )
     second, _ = store.commit_event(
@@ -236,10 +241,12 @@ def test_overlapping_mask_patch_has_conflict_aware_partial_undo(room_store):
         payload={
             "operation_id": "stroke-two", "geometry_hash": metadata["geometry_hash"],
             "resolution": "low", "segment_label": 2,
-            "ranges": [{"start": 2, "length": 2, "before": 1, "after": 2}],
+            "ranges": [{"start": 2, "length": 2, "before": 88, "after": 2}],
         },
     )
     assert (first["seq"], second["seq"]) == (1, 2)
+    assert first["payload"]["ranges"] == [{"start": 0, "length": 4, "before": 0, "after": 1}]
+    assert second["payload"]["ranges"] == [{"start": 2, "length": 2, "before": 1, "after": 2}]
     result = store.undo_latest(metadata["room_id"], key, "p1", "One")
     assert result["ok"] is True
     assert result["partial"] is True
@@ -248,6 +255,16 @@ def test_overlapping_mask_patch_has_conflict_aware_partial_undo(room_store):
     flat = np.asarray(nib.load(mask_path).dataobj).reshape(-1, order="F")
     assert sequence == 3
     assert flat[:4].tolist() == [0, 0, 2, 2]
+
+
+def test_unknown_room_ids_do_not_grow_lock_map(room_store):
+    store, _ = room_store
+    initial = len(store._locks)
+    for index in range(100):
+        room_id = f"00000000-0000-4000-8000-{index:012d}"
+        with pytest.raises(RoomNotFound):
+            store.get_metadata(room_id, "unused")
+    assert len(store._locks) == initial
 
 
 def test_export_contains_required_artifacts(room_store):
@@ -305,7 +322,6 @@ def test_two_websocket_clients_converge_and_reconnect(room_store):
             uri = f"ws://127.0.0.1:{port}/ws/live-rooms/{metadata['room_id']}"
             hello = {
                 "type": "hello", "protocol": 1, "room_key": key,
-                "participant_id": "00000000-0000-4000-8000-000000000001",
                 "name": "One", "last_seq": 0,
             }
             async with connect(uri) as first:
@@ -315,7 +331,6 @@ def test_two_websocket_clients_converge_and_reconnect(room_store):
                 async with connect(uri) as second:
                     await second.send(json.dumps({
                         **hello,
-                        "participant_id": "00000000-0000-4000-8000-000000000002",
                         "name": "Two",
                     }))
                     ready_two = json.loads(await second.recv())
@@ -332,7 +347,12 @@ def test_two_websocket_clients_converge_and_reconnect(room_store):
                     assert committed_one["event"]["seq"] == committed_two["event"]["seq"] == 1
             # Same participant resumes at acknowledged sequence without replay duplicates.
             async with connect(uri) as resumed:
-                await resumed.send(json.dumps({**hello, "last_seq": 1}))
+                await resumed.send(json.dumps({
+                    **hello,
+                    "participant_id": ready_one["self"]["participant_id"],
+                    "resume_credential": ready_one["resume_credential"],
+                    "last_seq": 1,
+                }))
                 ready = json.loads(await resumed.recv())
                 assert ready["type"] == "room.ready"
                 assert ready["events"] == []
@@ -351,14 +371,31 @@ def test_reconnecting_same_participant_replaces_stale_socket(room_store):
             uri = f"ws://127.0.0.1:{port}/ws/live-rooms/{metadata['room_id']}"
             hello = {
                 "type": "hello", "protocol": 1, "room_key": key,
-                "participant_id": "00000000-0000-4000-8000-000000000001",
                 "name": "One", "last_seq": 0,
             }
             async with connect(uri) as first:
                 await first.send(json.dumps(hello))
-                assert json.loads(await first.recv())["type"] == "room.ready"
+                first_ready = json.loads(await first.recv())
+                assert first_ready["type"] == "room.ready"
+                resume = {
+                    **hello,
+                    "participant_id": first_ready["self"]["participant_id"],
+                    "resume_credential": first_ready["resume_credential"],
+                }
+                async with connect(uri) as attacker:
+                    await attacker.send(json.dumps({
+                        **hello,
+                        "participant_id": first_ready["self"]["participant_id"],
+                        "resume_credential": "wrong-credential",
+                    }))
+                    rejected = json.loads(await attacker.recv())
+                    assert rejected["type"] == "error"
+                    assert rejected["code"] == "invalid_participant_resume"
+                    assert rejected["fatal"] is True
+                await first.send(json.dumps({"type": "ping"}))
+                assert json.loads(await first.recv())["type"] == "pong"
                 async with connect(uri) as replacement:
-                    await replacement.send(json.dumps(hello))
+                    await replacement.send(json.dumps(resume))
                     ready = json.loads(await asyncio.wait_for(replacement.recv(), timeout=2))
                     assert ready["type"] == "room.ready"
                     await asyncio.wait_for(first.wait_closed(), timeout=2)
@@ -380,7 +417,6 @@ def test_websocket_expiry_check_survives_external_cleanup(room_store):
             async with connect(uri) as websocket:
                 await websocket.send(json.dumps({
                     "type": "hello", "protocol": 1, "room_key": key,
-                    "participant_id": "00000000-0000-4000-8000-000000000001",
                     "name": "One", "last_seq": 0,
                 }))
                 assert json.loads(await websocket.recv())["type"] == "room.ready"
@@ -394,7 +430,7 @@ def test_websocket_expiry_check_survives_external_cleanup(room_store):
 def test_rest_creation_and_capability_header(room_store, monkeypatch):
     store, _ = room_store
     monkeypatch.setattr(live_rooms_api, "_store", store)
-    live_rooms_api._creation_attempts.clear()
+    monkeypatch.setattr(live_rooms_api, "_creation_limiter", AlwaysAllow())
     app = Flask(__name__)
     app.register_blueprint(live_rooms_api.live_rooms_blueprint, url_prefix="/api")
     client = app.test_client()

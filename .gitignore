@@ -25,3 +25,6 @@ flask-server/pants-dev.db-shm
 
 # Local Claude Code scratch config (launch profiles etc.)
 .claude/
+
+# Local Playwright MCP artifacts.
+.playwright-mcp/

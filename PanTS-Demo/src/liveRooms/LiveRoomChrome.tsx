@@ -128,9 +128,9 @@ function ReviewLiveRoomDock({ room, crosshair, activePlane, onClose }: {
 				)}
 				{tab === "notes" && (
 					<div className="lr-thread">
-						<form className="lr-compose" onSubmit={(event) => {
+						<form className="lr-compose" onSubmit={async (event) => {
 							event.preventDefault();
-							if (crosshair && note.trim() && room.addNote(note.trim(), crosshair, activePlane)) setNote("");
+							if (crosshair && note.trim() && await room.addNote(note.trim(), crosshair, activePlane)) setNote("");
 						}}>
 							<label htmlFor="lr-note">Pin note at current crosshair</label>
 							<textarea id="lr-note" maxLength={4000} value={note} onChange={(event) => setNote(event.target.value)} placeholder={crosshair ? "Finding or review note…" : "Place crosshair to anchor a note"} disabled={!crosshair || editingDisabled} />
@@ -141,7 +141,7 @@ function ReviewLiveRoomDock({ room, crosshair, activePlane, onClose }: {
 								<div><strong>{item.author}</strong><time>{item.plane}</time></div>
 								<p>{item.text}</p>
 								<small>{item.world.map((value) => Math.round(value)).join(", ")} mm</small>
-								{item.author === room.name && <button onClick={() => room.deleteNote(item.id)} disabled={editingDisabled}>Delete</button>}
+								{item.author === room.name && <button onClick={() => void room.deleteNote(item.id)} disabled={editingDisabled}>Delete</button>}
 							</article>
 						))}
 					</div>
@@ -156,9 +156,9 @@ function ReviewLiveRoomDock({ room, crosshair, activePlane, onClose }: {
 								</article>
 							))}
 						</div>
-						<form className="lr-chat-compose" onSubmit={(event) => {
+						<form className="lr-chat-compose" onSubmit={async (event) => {
 							event.preventDefault();
-							if (chat.trim() && room.sendChat(chat.trim())) setChat("");
+							if (chat.trim() && await room.sendChat(chat.trim())) setChat("");
 						}}>
 							<label htmlFor="lr-chat">Room message</label>
 							<textarea id="lr-chat" maxLength={2000} value={chat} onChange={(event) => setChat(event.target.value)} disabled={editingDisabled} placeholder="Message everyone…" />

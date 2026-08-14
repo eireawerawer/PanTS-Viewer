@@ -12,6 +12,7 @@ vi.mock("../routes/VisualizationPage", () => ({
 			<span>{soloChallenge.impression}</span>
 			<span>{soloChallenge.marker?.join(",")}</span>
 			<span>{soloChallenge.measurement?.id}</span>
+			<span>{soloChallenge.maskUrl ?? "reveal hidden"}</span>
 			<button onClick={() => soloChallenge.setImpression("Updated after restore")}>Update impression</button>
 		</main>
 	),
@@ -91,6 +92,7 @@ describe("SoloChallengePage session recovery", () => {
 		expect(screen.getByText("Saved impression")).toBeInTheDocument();
 		expect(screen.getByText("1,2,3")).toBeInTheDocument();
 		expect(screen.getByText("saved-length")).toBeInTheDocument();
+		expect(screen.getByText("reveal hidden")).toBeInTheDocument();
 
 		fireEvent.click(screen.getByRole("button", { name: "Update impression" }));
 		await waitFor(() => {

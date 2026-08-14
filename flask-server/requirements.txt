@@ -32,14 +32,12 @@ requests==2.32.3
 reportlab==4.4.1
 scikit-image>=0.24.0
 scipy>=1.13.0
-scikit-image
 setuptools==75.6.0
 SimpleITK>=2.4.0
 SQLAlchemy==2.0.37
 trimesh>=4.0.0
 typing_extensions==4.13.0
 tzlocal==5.2
-trimesh
 urllib3==2.2.3
 Werkzeug==3.0.3
 websockets==15.0.1

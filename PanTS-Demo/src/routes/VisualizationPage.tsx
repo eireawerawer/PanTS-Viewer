@@ -522,8 +522,12 @@ type VisualizationPageProps = {
 function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: VisualizationPageProps = {}) {
 	// References and state
 	const params = useParams();
+	const isLiveRoom = Boolean(liveRoom);
 	const isSoloChallenge = Boolean(soloChallenge);
 	const isQuizPractice = Boolean(quizPractice);
+	const liveRoomMaskUrl = liveRoom?.maskUrl;
+	const soloChallengeMaskUrl = soloChallenge?.maskUrl;
+	const quizPracticeMaskUrl = quizPractice?.maskUrl;
 	const pantsCase = liveRoom?.metadata.case_id ?? soloChallenge?.challenge.case_id ?? quizPractice?.pack.case_id ?? params.caseId;
 	const isCvCase = String(pantsCase ?? "").toUpperCase().startsWith("CV");
 	const sessionId = liveRoom || soloChallenge || quizPractice ? undefined : params.sessionId;
@@ -599,9 +603,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			const p = isCvCase ? "" : getPanTSId(id);
 			const localCt = `${API_BASE}/api/get-main-nifti/${id}.nii.gz`;
 			const localSeg = `${API_BASE}/api/get-segmentations/${id}.nii.gz`;
-			const challengeSeg = soloChallenge
-				? `${API_BASE}/api/education/challenges/${soloChallenge.challenge.challenge_id}/segmentation.nii.gz`
-				: null;
+			const challengeSeg = soloChallengeMaskUrl ?? null;
 			const hfCt = `https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/image_only/${p}/ct.nii.gz?download=true`;
 			const hfSeg = `https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/mask_only/${p}/combined_labels.nii.gz?download=true`;
 			// HEAD probe: fast, doesn't download the volume; 404/500 → use HF fallback.
@@ -616,12 +618,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			// CancerVerse cases have no masks yet — /api/get-segmentations returns
 			// {"masks_available": false} (JSON, HTTP 200) which hangs the nifti loader.
 			// Skip the seg URL entirely so the viewer opens CT-only without hanging.
-				if (liveRoom) {
-					setSegUrl(liveRoom.maskUrl);
-				} else if (challengeSeg) {
-					setSegUrl(challengeSeg);
-				} else if (quizPractice) {
-					setSegUrl(quizPractice.maskUrl);
+			if (isLiveRoom) {
+				setSegUrl(liveRoomMaskUrl ?? null);
+			} else if (isSoloChallenge) {
+				setSegUrl(challengeSeg);
+			} else if (isQuizPractice) {
+				setSegUrl(quizPracticeMaskUrl ?? null);
 			} else if (isCvCase) {
 				setSegUrl(null);
 			} else {
@@ -630,7 +632,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		};
 		resolveSources();
 		return () => { cancelled = true; };
-		}, [pantsCase, sessionId, isHd, isLocal, liveRoom?.maskUrl, quizPractice?.maskUrl, soloChallenge?.challenge.challenge_id]);
+	}, [pantsCase, sessionId, isHd, isLocal, isLiveRoom, isQuizPractice, isSoloChallenge, liveRoomMaskUrl, quizPracticeMaskUrl, soloChallengeMaskUrl]);
 
 	// Flip between low-res and full-res by reloading the route — a fresh mount cleanly
 	// re-inits the Cornerstone/NiiVue contexts (re-running them in place is fragile).
@@ -1901,7 +1903,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			if (!ranges.length || liveRoom.connectionState !== "connected") return;
 			const segmentLabel = detail?.segmentIndex ?? ranges.find((range) => range.after > 0)?.after ?? 0;
 			const operationId = crypto.randomUUID();
-			liveRoom.sendDurable("mask.patch", {
+			void liveRoom.sendDurable("mask.patch", {
 				operation_id: operationId,
 				geometry_hash: liveRoom.metadata.geometry_hash,
 				resolution: liveRoom.metadata.resolution,
@@ -2027,6 +2029,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		editMode,
 		setZoomLevel,
 		collaborationConnected: liveRoom?.connectionState === "connected",
+		collaborationLocked: liveRoom?.collaborationLocked,
 		onCollaborationUndo: liveRoom?.requestUndo,
 	});
 	// Live-adjust the frame rate: if a clip is already running, restart it immediately at
@@ -2282,9 +2285,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 			if (
 				!ctUrl ||
-				// Solo quiz practice is CT-only until submission unlocks its reveal mask.
+				// Solo quiz modes are CT-only until submission unlocks their reveal masks.
 				// Requiring that hidden mask here leaves the viewer loading forever.
-				(!segUrl && !isCvCase && !isQuizPractice) ||
+				(!segUrl && !isCvCase && !isQuizPractice && !isSoloChallenge) ||
 				!axial_ref.current ||
 				!sagittal_ref.current ||
 				!coronal_ref.current ||
@@ -3915,7 +3918,7 @@ const aiAvailableOrgans = useMemo(() => {
 
 											{/* Report and Download stay standalone and separate (not grouped with
 											    each other) — distinct export actions users reach for independently. */}
-											{!isLocal && !soloChallenge && (
+											{!isLocal && !soloChallenge && !quizPractice && !liveRoom && (
 												<button
 													className="vp-tool"
 													onClick={handleDownloadClick}
@@ -3925,7 +3928,7 @@ const aiAvailableOrgans = useMemo(() => {
 													<span className="vp-tool__tip">Download</span>
 												</button>
 											)}
-											{!isLocal && !soloChallenge && (
+											{!isLocal && !soloChallenge && !quizPractice && !liveRoom && (
 												<button
 													className="vp-tool"
 													onClick={() => { track("report_open"); setShowReportScreen(true); }}

@@ -21,10 +21,11 @@ export function OrganMesh({ organ, visible, opacity = 1, color }: OrganMeshProps
   }, [gltf.scene]);
 
   useEffect(() => {
+    const createdMaterials: THREE.Material[] = [];
     object.traverse((child) => {
       if (!(child instanceof THREE.Mesh)) return;
       
-      child.material = new THREE.MeshStandardMaterial({
+      const material = new THREE.MeshStandardMaterial({
         color: new THREE.Color(rgbToHex(...(color ?? segmentation_category_colors[organ.id]))),
         roughness: 0.75,
         metalness: 0.0,
@@ -32,9 +33,14 @@ export function OrganMesh({ organ, visible, opacity = 1, color }: OrganMeshProps
         opacity,
         side: THREE.DoubleSide,
       });
+      child.material = material;
+      createdMaterials.push(material);
 
       child.frustumCulled = true;
     });
+    return () => {
+      for (const material of createdMaterials) material.dispose();
+    };
   }, [object, organ.id, opacity, color]);
 
   return <primitive object={object} visible={visible} />;

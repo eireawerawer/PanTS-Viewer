@@ -63,6 +63,7 @@ interface UseKeyboardShortcutsArgs {
 	setZoomLevel: Dispatch<SetStateAction<number>>;
 	/** Live Rooms use server-ordered undo and lock edit shortcuts while disconnected. */
 	collaborationConnected?: boolean;
+	collaborationLocked?: boolean;
 	onCollaborationUndo?: () => void;
 }
 
@@ -101,6 +102,7 @@ export function useKeyboardShortcuts({
 	editMode,
 	setZoomLevel,
 	collaborationConnected,
+	collaborationLocked,
 	onCollaborationUndo,
 }: UseKeyboardShortcutsArgs) {
 	// Last-seen mouse position (viewport-relative clientX/Y), updated on every
@@ -196,7 +198,7 @@ export function useKeyboardShortcuts({
 			// ---- Undo / redo ---------------------------------------------------
 			if ((e.metaKey || e.ctrlKey) && !e.altKey && key === "z") {
 				if (onCollaborationUndo) {
-					if (!e.shiftKey && collaborationConnected) onCollaborationUndo();
+					if (!e.shiftKey && collaborationConnected && !collaborationLocked) onCollaborationUndo();
 					e.preventDefault();
 					return;
 				}
@@ -269,7 +271,7 @@ export function useKeyboardShortcuts({
 
 			// ---- Plain letter shortcuts -------------------------------------------
 			if (TOOL_BY_KEY[key]) {
-				if (onCollaborationUndo && !collaborationConnected) return;
+				if (onCollaborationUndo && (!collaborationConnected || collaborationLocked)) return;
 				setEditMode(null); // measurement keys take the mouse back from the brush
 				setActiveMeasureTool((prev) => (prev === TOOL_BY_KEY[key] ? null : TOOL_BY_KEY[key]));
 			} else if (key === "c") {
@@ -309,6 +311,7 @@ export function useKeyboardShortcuts({
 		editMode,
 		setZoomLevel,
 		collaborationConnected,
+		collaborationLocked,
 		onCollaborationUndo,
 	]);
 }
