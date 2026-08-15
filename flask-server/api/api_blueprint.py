@@ -5120,6 +5120,39 @@ def _case_mask_path(case_id, low=False):
     return path
 
 
+# Single-slot CT cache for interactive_segment(). Without this, every single
+# click/box prompt re-reads the full CT off disk and re-converts it to
+# float32 from scratch — for a full-res volume that's the dominant cost of
+# the whole request, and it repeats identically even for the very next click
+# on the SAME case a moment later. `segment_from_prompt`/nnInteractive's own
+# remote session already avoids re-uploading the volume when `case_key`
+# matches (see nninteractive_predictor.py's _ensure_volume_loaded) — this
+# cache closes the matching gap on the Flask side, so consecutive prompts on
+# one case skip the disk read + dtype conversion entirely, not just the
+# upload-to-model step. Single-slot (not an LRU/dict) deliberately, matching
+# the same pattern already used in nninteractive_predictor.py, since gunicorn
+# here is a single worker process and one user is typically working one case
+# at a time; a dict cache would need eviction logic for little practical gain.
+_ct_cache_key = None
+_ct_cache_obj = None
+_ct_cache_array = None
+
+
+def _load_ct_cached(ct_path, cache_key):
+    global _ct_cache_key, _ct_cache_obj, _ct_cache_array
+    if _ct_cache_key == cache_key and _ct_cache_array is not None:
+        return _ct_cache_obj, _ct_cache_array
+    import numpy as np
+    ct_obj = nib.load(ct_path)
+    # float32: half the RAM of nibabel's float64 default — these are public
+    # endpoints and a full-res CT at float64 is multiple GB per request.
+    ct = ct_obj.get_fdata(dtype=np.float32)
+    _ct_cache_key = cache_key
+    _ct_cache_obj = ct_obj
+    _ct_cache_array = ct
+    return ct_obj, ct
+
+
 @api_blueprint.route('/interactive-segment/<case_id>', methods=['POST'])
 def interactive_segment(case_id):
     """Click-to-segment: seed prompt -> proposed mask (.nii.gz in CT geometry).
@@ -5139,11 +5172,8 @@ def interactive_segment(case_id):
         if not os.path.exists(ct_path):
             return jsonify({"error": "CT not found for this case on the server."}), 404
 
-        ct_obj = nib.load(ct_path)
-        # float32: half the RAM of nibabel's float64 default — these are public
-        # endpoints and a full-res CT at float64 is multiple GB per request.
-        ct = ct_obj.get_fdata(dtype=np.float32)
         case_key = f"{case_id}:{'low' if low else 'full'}"
+        ct_obj, ct = _load_ct_cached(ct_path, case_key)
         mask = segment_from_prompt(ct, ct_obj.affine, body, case_key=case_key)
         if int(mask.sum()) == 0:
             return jsonify({"error": "Nothing grew from that point — try a different spot or a higher tolerance."}), 422
