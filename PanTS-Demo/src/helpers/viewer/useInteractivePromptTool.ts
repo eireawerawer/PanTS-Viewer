@@ -55,8 +55,7 @@ export function useInteractivePromptTool({
 		paneRef.current = null;
 	}, []);
 
-	const submit = useCallback(async (pane: CinePane, pointWorld: Point3, boxWorld?: [Point3, Point3]) => {
-		if (busyRef.current) return; // one in-flight request at a time
+	const submit = useCallback(async (_pane: CinePane, pointWorld: Point3, boxWorld?: [Point3, Point3]) => {		if (busyRef.current) return; // one in-flight request at a time
 		if (activeSegmentIndex == null) {
 			onLog?.("Interactive segment: no target segment selected.");
 			return;
