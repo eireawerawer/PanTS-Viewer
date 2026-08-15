@@ -78,8 +78,7 @@
 }
 .legal-footer a,
 .legal-body a {
-	/* accent-deep-hover: the page ground is #fafafa, where accent-deep is 4.40:1 (below AA) */
-	color: var(--accent-deep-hover);
+	color: #002d72;
 	font-weight: 600;
 }
 

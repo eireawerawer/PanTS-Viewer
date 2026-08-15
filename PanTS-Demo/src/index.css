@@ -40,7 +40,7 @@
   --vp-text-dim: rgba(255, 255, 255, 0.5);
   --vp-text-faint: rgba(255, 255, 255, 0.36);
   --vp-hover: rgba(255, 255, 255, 0.1);
-  --vp-accent: var(--accent);
+  --vp-accent: #6ea8fe;
   --vp-font: var(--font-sans);
   --vp-mono: var(--font-mono);
 }
@@ -48,11 +48,11 @@
 
 a {
   font-weight: 500;
-  color: var(--accent-deep);
+  color: #111111;
   text-decoration: inherit;
 }
 a:hover {
-  color: var(--accent-deep-hover);
+  color: #000000;
 }
 
 body {

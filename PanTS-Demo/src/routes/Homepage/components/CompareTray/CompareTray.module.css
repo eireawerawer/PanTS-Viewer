@@ -68,7 +68,7 @@
 }
 
 .compareTrayCompareBtn {
-  background: var(--ink);
+  background: #2563eb;
   border: none;
   color: #ffffff;
   border-radius: 8px;
@@ -78,6 +78,6 @@
   font-weight: 600;
 }
 .compareTrayCompareBtn:disabled {
-  background: rgba(15, 23, 42, 0.4);
+  background: rgba(37, 99, 235, 0.4);
   cursor: not-allowed;
 }

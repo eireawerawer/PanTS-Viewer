@@ -1,6 +1,6 @@
 /* Settings: left rail + panel of rows.
 
-   The vocabulary is the site's (IBM Plex Sans, BodyMaps accent-deep, soft radii);
+   The vocabulary is the site's (IBM Plex Sans, JHU blue #002d72, soft radii);
    the structure is Claude's settings — a row is a label and its control with a
    hairline between, and prose is the exception rather than the default. */
 
@@ -62,8 +62,8 @@
 	color: #111111;
 }
 .set-nav-item--on {
-	background: rgba(15, 23, 42, 0.06);
-	color: var(--ink);
+	background: rgba(0, 45, 114, 0.07);
+	color: #002d72;
 	font-weight: 600;
 }
 
@@ -79,10 +79,10 @@
 	margin-bottom: 20px;
 	padding: 10px 14px;
 	border-radius: 10px;
-	background: rgba(15, 23, 42, 0.05);
-	border: 1px solid rgba(15, 23, 42, 0.14);
+	background: rgba(0, 45, 114, 0.06);
+	border: 1px solid rgba(0, 45, 114, 0.14);
 	font-size: 13px;
-	color: var(--ink);
+	color: #002d72;
 }
 .set-banner--error {
 	background: rgba(239, 68, 68, 0.06);
@@ -169,14 +169,14 @@
 	cursor: not-allowed;
 }
 .set-btn--primary {
-	background: var(--ink);
-	border-color: var(--ink);
+	background: #002d72;
+	border-color: #002d72;
 	color: #ffffff;
 	font-weight: 600;
 }
 .set-btn--primary:hover:not(:disabled) {
-	background: var(--ink-2);
-	border-color: var(--ink-2);
+	background: #00399a;
+	border-color: #00399a;
 }
 .set-btn--danger {
 	color: #b91c1c;
@@ -199,7 +199,7 @@
 }
 .set-input:focus {
 	outline: none;
-	border-color: var(--ink);
+	border-color: #002d72;
 	background: #ffffff;
 }
 
@@ -227,7 +227,7 @@
 	transition: background 0.18s;
 }
 .set-switch--on {
-	background: var(--ink);
+	background: #002d72;
 	justify-content: flex-end;
 }
 .set-switch-knob {
@@ -241,7 +241,7 @@
 	width: 40px;
 	height: 40px;
 	border-radius: 50%;
-	background: var(--ink);
+	background: #002d72;
 	color: #ffffff;
 	display: flex;
 	align-items: center;
@@ -332,7 +332,7 @@
 .set-usage-fill {
 	height: 100%;
 	border-radius: 999px;
-	background: var(--ink);
+	background: #002d72;
 	transition: width 0.3s;
 }
 .set-usage-fill--full {
@@ -403,8 +403,8 @@
 	background: #ffffff;
 }
 .set-plan-card--current {
-	border-color: var(--ink);
-	background: rgba(15, 23, 42, 0.02);
+	border-color: #002d72;
+	background: rgba(0, 45, 114, 0.025);
 }
 .set-plan-badge {
 	position: absolute;
@@ -454,13 +454,13 @@
 	font-size: 13.5px;
 	font-weight: 600;
 	cursor: pointer;
-	background: var(--ink);
-	border: 1px solid var(--ink);
+	background: #002d72;
+	border: 1px solid #002d72;
 	color: #ffffff;
 	transition: background 0.15s;
 }
 .set-plan-cta:hover:not(:disabled) {
-	background: var(--ink-2);
+	background: #00399a;
 }
 .set-plan-cta--current {
 	background: transparent;
@@ -497,7 +497,7 @@
 .set-plan-points svg {
 	flex-shrink: 0;
 	margin-top: 2px;
-	color: var(--accent-deep);
+	color: #002d72;
 }
 
 /* ── History ── */
