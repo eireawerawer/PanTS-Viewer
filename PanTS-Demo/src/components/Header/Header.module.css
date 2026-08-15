@@ -33,8 +33,8 @@
 }
 .logoTitle {
   font-size: 18px;
-  font-weight: 600;
-  color: var(--ink);
+  font-weight: 700;
+  color: #111111;
   letter-spacing: -0.02em;
   line-height: 1.1;
 }
@@ -67,9 +67,9 @@
   color: #111111;
 }
 .tabPillActive {
-  background: var(--ink);
+  background: #002D72;
   color: #ffffff;
-  border-color: var(--ink);
+  border-color: #002D72;
   cursor: default;
 }
 .tabPillActive:hover {
@@ -225,11 +225,11 @@
   background: rgba(0, 0, 0, 0.04);
 }
 .mobileTabActive {
-  color: var(--ink);
-  background: rgba(15, 23, 42, 0.06);
+  color: #002D72;
+  background: rgba(0, 45, 114, 0.07);
 }
 .mobileTabActive:hover {
-  color: var(--ink);
+  color: #002D72;
 }
 
 .drawerFooter {

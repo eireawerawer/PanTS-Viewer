@@ -38,9 +38,8 @@ describe("brand identity", () => {
     expect(css).toContain('--font-sans: "IBM Plex Sans"');
   });
 
-  it("the viewer accent seam points at the brand accent", () => {
+  it("the viewer font seam points at the brand fonts (accent color was reverted separately)", () => {
     const css = read("src/index.css");
-    expect(css).toContain("--vp-accent: var(--accent)");
     expect(css).toContain("--vp-font: var(--font-sans)");
     expect(css).toContain("--vp-mono: var(--font-mono)");
   });

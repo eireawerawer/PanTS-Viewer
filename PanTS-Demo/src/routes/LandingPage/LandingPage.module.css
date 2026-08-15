@@ -40,14 +40,14 @@
 }
 .heroTitle {
   font-size: clamp(64px, 12vw, 132px);
-  font-weight: 600;
-  color: var(--ink);
+  font-weight: 700;
+  color: #002D72;
   letter-spacing: -0.04em;
   line-height: 1;
   margin: 0;
 }
 .heroTitleAlt {
-  color: var(--ink);
+  color: #111111;
 }
 .heroSubtitle {
   font-size: clamp(20px, 2.4vw, 30px);
@@ -73,8 +73,8 @@
 }
 .heroStatValue {
   font-size: 34px;
-  font-weight: 600;
-  color: var(--accent-deep);
+  font-weight: 700;
+  color: #002D72;
   letter-spacing: -0.02em;
   line-height: 1.1;
 }
@@ -107,14 +107,14 @@
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
-  background: var(--ink);
+  background: #002D72;
   color: #ffffff;
-  border: 1px solid var(--ink);
+  border: 1px solid #002D72;
   transition: all 0.2s ease;
 }
 .btnPrimary:hover {
-  background: var(--ink-2);
-  border-color: var(--ink-2);
+  background: #00399a;
+  border-color: #00399a;
   transform: translateY(-1px);
 }
 .btnSecondary {
@@ -125,13 +125,13 @@
   font-weight: 600;
   cursor: pointer;
   background: transparent;
-  color: var(--accent-deep);
-  border: 1px solid rgba(15, 23, 42, .35);
+  color: #002D72;
+  border: 1px solid rgba(0,45,114,.35);
   transition: all 0.2s ease;
 }
 .btnSecondary:hover {
-  background: rgba(15, 23, 42, .05);
-  border-color: rgba(15, 23, 42, .55);
+  background: rgba(0,45,114,.06);
+  border-color: rgba(0,45,114,.55);
   transform: translateY(-1px);
 }
 
