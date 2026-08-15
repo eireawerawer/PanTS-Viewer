@@ -1754,6 +1754,13 @@ function VisualizationPage() {
 
 	useEffect(() => {
 		if (loading || threeDMode !== "volume" || !renderingEngine) return;
+		// Don't contend with the HD CT stream swap-in (runEnhance, below) for
+		// GPU/main-thread time — building the shaded 3D volume texture while
+		// upgradeCtVolume is mid-stream is two heavy GPU uploads at once, which
+		// was freezing the page for several seconds. Wait for the stream to
+		// settle; for local files it never starts (state stays "idle"), so this
+		// never blocks them.
+		if (enhance.state === "streaming") return;
 		const element = volume3DRef.current;
 		if (!element) return;
 		let disposed = false;
@@ -1769,7 +1776,7 @@ function VisualizationPage() {
 		// volumePreset intentionally omitted — preset changes are applied in place below,
 		// without tearing the viewport down.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [threeDMode, loading, renderingEngine]);
+	}, [threeDMode, loading, renderingEngine, enhance.state]);
 
 	useEffect(() => {
 		if (threeDMode === "volume") applyVolume3DPreset(volumePreset);
