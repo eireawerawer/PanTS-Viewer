@@ -186,9 +186,22 @@ export function usePolygonDraw({ enabled, onClose, computeLivePath }: UsePolygon
 			else if (e.key === "Enter" && cornersWorld.length >= 3) { e.preventDefault(); close(); }
 			// Ctrl/Cmd+Z removes the last placed point, one at a time — replaces
 			// the old "Undo point" button in the flyout with the shortcut users
-			// actually reach for.
+			// actually reach for. stopImmediatePropagation() (not just
+			// preventDefault) is the important part: this listener is on
+			// `window`, same target as whatever global shortcut undoes the
+			// last committed brush/voxel edit — plain stopPropagation() does
+			// NOT stop a sibling listener registered on that same target, only
+			// propagation to OTHER elements, so without stopImmediatePropagation
+			// a single Ctrl+Z while mid-polygon fired BOTH: this popped the
+			// last placed point AND the global handler undid the last brush
+			// stroke, as if two Ctrl+Z presses had happened. Placing a
+			// scissors point isn't a committed edit yet (nothing touches the
+			// labelmap until the shape closes), so it needs to be its own,
+			// separate undo step — not bundled into the same history entry as
+			// an actual brush stroke.
 			else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z" && cornersWorld.length) {
 				e.preventDefault();
+				e.stopImmediatePropagation();
 				undo();
 			}
 		};

@@ -840,7 +840,10 @@ export function setMaskBrushSize(diameterMm: number) {
 // always on top of ONE of the two, so this behaves as a single button.
 // ---------------------------------------------------------------------------
 export function undoMaskEdit() {
-  if (canUndoSmartFill()) {
+  // Prefer whichever stack was touched more recently, not always the fill
+  // stack — a brush stroke after a box-segment (or vice versa) must undo in
+  // the order it actually happened.
+  if (canUndoSmartFill() && _lastFillEditTime >= _lastBrushEditTime) {
     undoSmartFill();
     return;
   }
@@ -849,7 +852,7 @@ export function undoMaskEdit() {
 }
 
 export function redoMaskEdit() {
-  if (canRedoSmartFill()) {
+  if (canRedoSmartFill() && _lastFillEditTime >= _lastBrushEditTime) {
     redoSmartFill();
     return;
   }
@@ -1567,15 +1570,53 @@ export async function submitInteractiveSegmentPrompt(
   }
 
   let changed = 0;
+  // Sparse before/after capture for undo — only voxels this proposal
+  // actually touches AND actually changes (skips a no-op write where the
+  // voxel already held activeSegmentIndex), so undo/redo stay cheap even
+  // though `proposal.data` spans the whole volume.
+  const touchedIdx: number[] = [];
+  const priorValues: number[] = [];
   for (let idx = 0; idx < proposal.data.length; idx++) {
     if (proposal.data[idx]) {
+      if (segScalars[idx] !== activeSegmentIndex) {
+        touchedIdx.push(idx);
+        priorValues.push(segScalars[idx]);
+      }
       segScalars[idx] = activeSegmentIndex;
       changed++;
     }
   }
   if (changed > 0) {
     (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
-    await _rebuildSegmentationRepresentations();
+    // NOT _rebuildSegmentationRepresentations() — this only mutated voxels
+    // in the SAME already-cached segVolume object, it never swapped which
+    // volume is loaded (unlike upgradeSegmentationVolume, which genuinely
+    // does need the full remove+re-add). A full rebuild tears down and
+    // re-adds every segment's representation on every viewport, which is
+    // both the visible "every class mask flashes/reloads" symptom and
+    // real, avoidable cost on every single click/box prompt. This is the
+    // same lightweight refresh the brush/smart-fill/etc. direct-write paths
+    // already use — it doesn't touch representations or actors, so it also
+    // doesn't disturb camera position/zoom the way rebuilding did.
+    _notifySegmentationChanged();
+
+    // Own undo/redo entry, same shared stack as smart fill / scissors /
+    // lasso (pushEditHistory below) — a SEPARATE stack from brush strokes
+    // (Cornerstone's own HistoryMemo), so undoing a point/box segment never
+    // also reverts (or gets shadowed by) an unrelated brush stroke; see
+    // undoMaskEdit's recency check for how the two stacks interleave.
+    if (touchedIdx.length > 0) {
+      const applyAndRefresh = (values: number[]) => {
+        touchedIdx.forEach((idx, i) => { segScalars[idx] = values[i]; });
+        (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
+        _notifySegmentationChanged();
+      };
+      const redoValues = touchedIdx.map(() => activeSegmentIndex);
+      pushEditHistory({
+        undo: () => applyAndRefresh(priorValues),
+        redo: () => applyAndRefresh(redoValues),
+      });
+    }
   }
 
   return changed;
@@ -2541,7 +2582,19 @@ export function runDualScribbleFill(
   _notifySegmentationChanged();
   return { filledVoxels: touched.length, threshold };
 }
+// Guards the dispatch below so the module-level listener a few lines down
+// (which stamps _lastBrushEditTime) can tell "this SEGMENTATION_DATA_MODIFIED
+// came from OUR OWN edit path (fill/box/point/scissors/lasso/etc, all of
+// which route through this function)" apart from "this came natively from
+// Cornerstone's own BrushTool after a paint/erase stroke" — both dispatch
+// the identical event, so without this flag the two are indistinguishable
+// from the listener's side, which is exactly what made the old
+// "smart-fill-stack always wins" undo ordering wrong (see _lastFillEditTime
+// / _lastBrushEditTime below).
+let _dispatchingOwnEdit = false;
+
 function _notifySegmentationChanged() {
+  _dispatchingOwnEdit = true;
   try {
     // This is what BrushTool's own strategies call after painting — it invalidates the
     // labelmap's cached GPU texture so the 2D volume viewports actually repaint the new
@@ -2556,9 +2609,21 @@ function _notifySegmentationChanged() {
   eventTarget.dispatchEvent(
     new CustomEvent(csToolsEnums.Events.SEGMENTATION_DATA_MODIFIED, { detail: { segmentationId } })
   );
+  _dispatchingOwnEdit = false;
   currentRenderingEngine?.renderViewports([...MPR_VIEWPORT_IDS]);
   currentRenderingEngine?.render();
 }
+
+// Fires once, unconditionally, for the lifetime of the module — separate
+// from subscribeToSegmentationEdits below (which callers attach/detach per
+// component). Its only job is recency-tracking for undoMaskEdit/redoMaskEdit:
+// stamp _lastBrushEditTime whenever a genuine NATIVE brush/eraser stroke
+// changes the labelmap (i.e. the event fired WITHOUT _dispatchingOwnEdit set,
+// meaning it didn't come from _notifySegmentationChanged / our own edit
+// paths). See _pushFillHistory below for the matching _lastFillEditTime.
+eventTarget.addEventListener(csToolsEnums.Events.SEGMENTATION_DATA_MODIFIED, () => {
+  if (!_dispatchingOwnEdit) _lastBrushEditTime = Date.now();
+});
 
 // ============================================================================
 // SECTION: Undo / Redo History 
@@ -2569,10 +2634,21 @@ type FillHistoryEntry = { undo: () => void; redo: () => void };
 let _fillHistory: FillHistoryEntry[] = [];
 let _fillHistoryIndex = -1;
 
+// Recency trackers so undoMaskEdit/redoMaskEdit can pick whichever of the
+// two history mechanisms (this _fillHistory stack, used by smart fill,
+// scissors, lasso, and point/box segmentation; or Cornerstone's own
+// HistoryMemo, used natively by brush/eraser strokes) the user actually
+// touched most recently — instead of always preferring one stack
+// regardless of order, which let an older fill-type undo silently jump
+// ahead of a newer brush stroke when the two were interleaved.
+let _lastFillEditTime = 0;
+let _lastBrushEditTime = 0;
+
 function _pushFillHistory(entry: FillHistoryEntry) {
   _fillHistory = _fillHistory.slice(0, _fillHistoryIndex + 1);
   _fillHistory.push(entry);
   _fillHistoryIndex = _fillHistory.length - 1;
+  _lastFillEditTime = Date.now();
 }
 
 // Exposed so hooks/components outside this module (e.g. useSmartFill's
@@ -2688,6 +2764,26 @@ const LIVEWIRE_WINDOW_MARGIN = 8;
 const LIVEWIRE_W_GRADIENT = 0.55;
 const LIVEWIRE_W_LAPLACIAN = 0.25;
 const LIVEWIRE_W_DIRECTION = 0.20;
+
+// The refined snap point (see refinePoint below) sits at the objective
+// gradient-magnitude peak of the CT intensity ramp — the mathematically
+// "sharpest" point of the transition. That can read as a few mm inside the
+// true anatomical boundary compared to where a human eye places the edge
+// under typical windowing, since the visually-perceived edge and the raw
+// gradient peak aren't always the same point. This nudges the final refined
+// point a small extra distance further along the SAME outward normal
+// refinePoint already found, landing it a bit past the gradient peak instead
+// of exactly on it.
+//
+// Sign convention: positive values move along +[ux,uy], i.e. from lower-HU
+// toward higher-HU across the edge — for a denser structure (bone, most solid
+// organs) against a less-dense surround (fat/air), that's outward, away from
+// the structure's interior. If a specific case needs the opposite (e.g.
+// tracing something LESS dense than its surround), flip the sign here — this
+// is a single scalar, not per-edge logic, so it can't be made
+// direction-aware automatically without knowing which side is "inside" for
+// an arbitrary class.
+const LIVEWIRE_OUTWARD_BIAS_VOXELS = 0.9;
 
 // Minimal binary min-heap keyed by a numeric priority — enough for Dijkstra
 // over a few thousand nodes without pulling in a dependency.
@@ -2962,7 +3058,7 @@ export function computeLiveWirePath(
     const delta = Math.abs(denom) > 1e-6 ? (0.5 * (mMinus - mPlus)) / denom : 0;
     const tRefined = bestT + Math.max(-REFINE_STEP, Math.min(REFINE_STEP, delta * REFINE_STEP));
 
-    return [a + ux * tRefined, b + uy * tRefined];
+    return [a + ux * (tRefined + LIVEWIRE_OUTWARD_BIAS_VOXELS), b + uy * (tRefined + LIVEWIRE_OUTWARD_BIAS_VOXELS)];
   };
 
   const points: Array<[number, number]> = [];

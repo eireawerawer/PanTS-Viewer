@@ -1441,7 +1441,8 @@
 }
 
 .vp-stats__summary strong {
-  color: #ffb454;
+  color: #465bfc
+;
 }
 
 .vp-stats__msg {
@@ -1508,7 +1509,8 @@
 
 /* Muted by default, highlighted when in the extreme tails (<p5 / >p95). */
 .vp-stats__pct--flag {
-  color: #ffb454 !important;
+  color: #465bfc
+ !important;
   font-weight: 600;
 }
 
@@ -1543,7 +1545,7 @@
 }
 
 .vp-spark__marker--flag {
-  background: #ffb454;
+  background: #465bfc;
 }
 
 /* Explicit index-based stripe (not :nth-child) since expanded detail rows are interleaved
@@ -1594,7 +1596,8 @@
 .vp-stats__truncated-flag {
   margin-left: 5px;
   font-size: 10px;
-  color: #ffb454;
+  color: #465bfc
+;
   cursor: help;
 }
 
@@ -1796,3 +1799,7 @@
   z-index: 35;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
 }
+
+/* Point/box-segment SUCCESS/ERROR now reuses the shared GuidedStepModal
+   (SliceAnchorPickerUI.tsx) instead of its own bottom pill — no CSS of
+   its own needed here anymore. */

@@ -278,7 +278,7 @@
 }
 
 .segpop__color-popover-swatch.is-active {
-    outline: 2px solid #E76F51;
+    outline: 2px solid #7cb7da;
     outline-offset: 1px;
 }
 
@@ -301,6 +301,53 @@
     cursor: pointer;
     -webkit-appearance: none;
     appearance: none;
+}
+
+/* Explicit commit footer for the color popover — live preview + hex value
+   + a clear "Done" close button, so picking a color visibly registers
+   before the popover disappears instead of a swatch click silently
+   closing it with no confirmation of what was chosen. Doesn't itself save
+   the class (that's still the row's own Save/ApplyButton); this is purely
+   about the popover's own selection state being unambiguous. */
+.segpop__color-popover-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 2px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.segpop__color-popover-preview {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    flex-shrink: 0;
+}
+
+.segpop__color-popover-hex {
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.02em;
+    color: rgba(255, 255, 255, 0.7);
+    flex: 1;
+}
+
+.segpop__color-popover-done {
+    appearance: none;
+    border: none;
+    border-radius: 6px;
+    padding: 5px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    background: #7cb7da;
+    color: #16181d;
+    cursor: pointer;
+}
+
+.segpop__color-popover-done:hover {
+    background: #7cb7da;
 }
 
 /* Static color chip shown in the normal (non-editing) row — color is only
@@ -327,7 +374,7 @@
     width: 18px;
     height: 18px;
     border-radius: 50%;
-    color: #E76F51;
+    color: #7cb7da;
     background: rgba(104, 172, 229, 0.16);
 }
 
@@ -339,8 +386,8 @@
 }
 
 .segpop__target-badge--btn:hover {
-    background: rgba(232, 93, 93, 0.22);
-    color: #E85D5D;
+    background: rgb(17, 0, 75);
+    color: #7cb7da;
     transform: scale(1.08);
 }
 
@@ -380,7 +427,7 @@
 
 .segpop__edit-btn:hover,
 .segpop__edit-btn.is-active {
-    color: #E76F51;
+    color: #7cb7da;
 }
 
 /* Floating add/edit form (see FormFlyout in SegmentsPopup.tsx). Portaled to
@@ -515,7 +562,7 @@
 }
 
 .segpop__delete:hover:not(:disabled) {
-    color: #E76F51;
+    color: #7cb7da;
 }
 
 .segpop__err {
@@ -653,7 +700,7 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: #E76F51;
+    background: #7cb7da;
 }
 
 .segpop__tab.is-active .segpop__tab-dot {

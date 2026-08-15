@@ -13,7 +13,6 @@ import {
 	ROI_TOOL,
 	setMaskBrushSize,
 	setPaneSliceIndex,
-	undoMaskEdit,
 	zoomToCursor,
 	zoomToFit,
 	type CinePane,
@@ -61,6 +60,13 @@ interface UseKeyboardShortcutsArgs {
 	sliceInfoRef: MutableRefObject<Record<CinePane, SliceInfo | null>>;
 	editMode: MaskEditMode;
 	setZoomLevel: Dispatch<SetStateAction<number>>;
+	/** Called for the plain undo shortcut (⌘Z/Ctrl+Z, no Shift). Owned by
+	 *  VisualizationPage so it can peel off a scissors/lasso in-progress
+	 *  point before falling through to the global mask-edit undo — see
+	 *  handleUndo there for why that ordering matters. Redo has no
+	 *  equivalent per-tool concept, so Shift+⌘Z still calls redoMaskEdit()
+	 *  directly below. */
+	onUndo: () => void;
 }
 
 /**
@@ -97,6 +103,7 @@ export function useKeyboardShortcuts({
 	sliceInfoRef,
 	editMode,
 	setZoomLevel,
+	onUndo,
 }: UseKeyboardShortcutsArgs) {
 	// Last-seen mouse position (viewport-relative clientX/Y), updated on every
 	// mousemove so +/- can zoom toward "wherever the cursor last was" even
@@ -189,9 +196,13 @@ export function useKeyboardShortcuts({
 			const key = e.key.toLowerCase();
 
 			// ---- Undo / redo ---------------------------------------------------
+			// Plain undo goes through onUndo (not undoMaskEdit directly) so a
+			// pending scissors/lasso point gets peeled off first — see
+			// handleUndo in VisualizationPage for why. Redo has no per-tool
+			// equivalent, so it still calls redoMaskEdit() straight through.
 			if ((e.metaKey || e.ctrlKey) && !e.altKey && key === "z") {
 				if (e.shiftKey) redoMaskEdit();
-				else undoMaskEdit();
+				else onUndo();
 				e.preventDefault();
 				return;
 			}
@@ -297,5 +308,6 @@ export function useKeyboardShortcuts({
 		sliceInfoRef,
 		editMode,
 		setZoomLevel,
+		onUndo,
 	]);
 }
