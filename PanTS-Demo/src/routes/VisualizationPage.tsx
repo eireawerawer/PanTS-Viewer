@@ -39,6 +39,7 @@ import {
 import React, { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
+import { loadRecentUploads } from "../helpers/recentUploads";
 import { useLocation, useParams } from "react-router-dom";
 import AISidebar from "../components/AIAssistant/AISidebar";
 import { track } from "../helpers/analytics";
@@ -515,6 +516,16 @@ function VisualizationPage() {
 	// the local file and only fall back to the public HuggingFace mirror when it isn't
 	// present (e.g. a dev checkout without the image data), so the viewer never breaks.
 	const caseId = isLocalNifti ? "Local NIfTI" : isDicom ? "Local DICOM" : pantsCase ?? sessionId ?? "1";
+	// Header display only — caseId itself stays the raw id everywhere it's used
+	// functionally (API calls, logging, etc). A session's raw id is a UUID, which
+	// means nothing to a person; look up the friendly name the Upload page already
+	// gives it ("LesionSegmenter · Aug 14") when this browser has it in
+	// localStorage, falling back to a short id fragment rather than the full UUID.
+	const sessionDisplayLabel = useMemo(() => {
+		if (!sessionId) return null;
+		const match = loadRecentUploads().find((u) => u.sessionId === sessionId);
+		return match?.label ?? `Session ${sessionId.slice(0, 8)}`;
+	}, [sessionId]);
 	const [ctUrl, setCtUrl] = useState<string | null>(null);
 	const [segUrl, setSegUrl] = useState<string | null>(null);
 	// Whether the local volumes exist (enables the HD toggle). Dataset cases default to
@@ -1311,8 +1322,9 @@ function VisualizationPage() {
 		}
 	}, [showOnlyTargetMask, isolationTargetKey]);
 	// 3D pane rendering mode: organ meshes (dataset cases) or shaded GPU volume
-	// rendering of the CT itself (the only 3D option for local DICOM).
-	const [threeDMode, setThreeDMode] = useState<"mesh" | "volume">(isLocal ? "volume" : "mesh");
+	// rendering of the CT itself (the only 3D option for local DICOM). Volume by
+	// default everywhere — meshes remain a click away via the toggle below.
+	const [threeDMode, setThreeDMode] = useState<"mesh" | "volume">("volume");
 	const [volumePreset, setVolumePreset] = useState<string>(VOLUME_3D_PRESETS[0].name);
 	// CT presets by default; swapped for the MR set when a local DICOM turns out to be MR.
 	const [volume3DPresets, setVolume3DPresets] = useState<readonly { name: string; label: string }[]>(VOLUME_3D_PRESETS);
@@ -2745,7 +2757,9 @@ const aiAvailableOrgans = useMemo(() => {
 					{/* Case / session identity */}
 					<div className="vp-tb-id">
 						<span className="vp-tb-id__eyebrow">{sessionId ? "Session" : "Case"}</span>
-						<span className="vp-tb-id__val">{caseId}</span>
+						<span className="vp-tb-id__val" title={sessionId ? `Session ID: ${sessionId}` : undefined}>
+							{sessionId ? sessionDisplayLabel : caseId}
+						</span>
 					</div>
 
 					<span className="vp-tb-divider" />

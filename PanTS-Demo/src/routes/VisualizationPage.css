@@ -272,7 +272,11 @@
 }
 
 .vp-seg__btn {
-  flex: 1 1 auto;
+  /* Equal width within a row regardless of label length ("MPR" vs "Axial
+     Large") — flex-basis 0 ignores each button's own content size and
+     divides the row evenly, instead of every button sizing to its own text. */
+  flex: 1 1 0;
+  min-width: 0;
   padding: 7px 10px;
   border-radius: 8px;
   font-family: var(--vp-font);
