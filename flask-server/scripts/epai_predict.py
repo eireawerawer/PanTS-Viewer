@@ -27,7 +27,6 @@ from functools import partial
 import numpy as np
 import torch
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-from nnunetv2.imageio.simpleitk_reader_writer import SimpleITKIO
 from nnunetv2.preprocessing.preprocessors.default_preprocessor import DefaultPreprocessor
 from nnunetv2.inference.export_prediction import export_prediction_from_logits
 from nnunetv2.preprocessing.resampling.resample_torch import resample_torch_fornnunet
@@ -80,9 +79,15 @@ def main():
         checkpoint_name=os.getenv("EPAI_CHECKPOINT_NAME", "checkpoint_final.pth"),
     )
 
-    rw = SimpleITKIO()
     pp = DefaultPreprocessor(verbose=False)
     pm, cm = predictor.plans_manager, predictor.configuration_manager
+    # Must match the writer export_prediction_from_logits uses internally
+    # (also pm.image_reader_writer_class() - this model's plans specify
+    # NibabelIOWithReorient, not SimpleITKIO). Reading with the wrong class
+    # produces a properties dict missing 'nibabel_stuff', which the nibabel
+    # writer needs for the reoriented affine -> KeyError deep inside write_seg.
+    # Confirmed by direct smoke test before this was wired into EPAI_SCRIPT_PATH.
+    rw = pm.image_reader_writer_class()
 
     ct = os.path.join(input_dir, f"{case_id}_0000.nii.gz")
     if not os.path.exists(ct):
@@ -96,10 +101,21 @@ def main():
     # The fork's own export: converts logits -> native-res segmentation (GPU resample,
     # thanks to the patch) AND writes the tumor-findings row into output_csv. Writes the
     # segmentation to <save_dir>/<case_id>.nii.gz.
+    #
+    # save_probabilities MUST be True here despite the name: in this fork it does not
+    # mean "write a probabilities.npz" (that branch is commented out -- "we don't save
+    # probabilities as pickles anymore"). It gates the ENTIRE write path -- segmentation
+    # write, tumor-stats extraction, and the output-CSV update all live inside
+    # `if save_probabilities:`; the unconditional segmentation write that used to run
+    # regardless is commented out at the bottom of the function (a leftover from
+    # whoever refactored this in). Passing False (the "obviously correct" choice,
+    # since we don't want a probabilities file) silently produces ZERO output --
+    # no exception, exit 0, nothing written. Confirmed by direct smoke test before
+    # this was wired into EPAI_SCRIPT_PATH.
     out_trunc = os.path.join(save_dir, case_id)
     export_prediction_from_logits(
         logits, pprops, cm, pm, predictor.dataset_json, out_trunc,
-        save_probabilities=False, output_csv_path=output_csv,
+        save_probabilities=True, output_csv_path=output_csv,
     )
     print(f"done {case_id}", flush=True)
 
