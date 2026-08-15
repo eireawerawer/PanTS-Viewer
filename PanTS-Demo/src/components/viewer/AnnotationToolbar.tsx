@@ -14,6 +14,8 @@ import {
 	IconWaveSine,
 	IconCircleDashed,
 	IconCheck,
+	IconPointer,
+	IconFrame,
 } from "@tabler/icons-react";
 import "./AnnotationToolbar.css";
 import MaskingSelect, { type MaskingArea } from "../segmentation/MaskingSelect";
@@ -71,6 +73,7 @@ export type PrimaryEditTool =
 	| "paint" | "erase" | "scissors" | "levelTracing"
 	| "margin" | "smoothing" | "islands" | "logicalOperators"
 	| "growFromSeeds" | "fillBetweenSlices" | "copyAcrossSlices" | "hollow"
+	| "pointSegment" | "boxSegment"
 	| null;
 export type ScissorsOperation = "eraseInside" | "eraseOutside" | "fillInside" | "fillOutside";
 export type ScissorsSliceCut = "unlimited" | "positive" | "negative" | "symmetric";
@@ -155,6 +158,8 @@ const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon
 	{ id: "fillBetweenSlices", label: "Fill between slices", Icon: IconStack2, description: "Interpolate a class's shape between two annotated slices." },
 	{ id: "copyAcrossSlices", label: "Copy across slices", Icon: IconCopy, description: "Copy a class's shape from one slice across a range." },
 	{ id: "hollow", label: "Hollow", Icon: IconCircleDashed, description: "Make the class hollow by replacing it with a uniform-thickness shell." },
+	{ id: "pointSegment", label: "Click to segment", Icon: IconPointer, description: "Click a point to propose a segment there (grows a region from the click; box-restrict or refine after)." },
+	{ id: "boxSegment", label: "Box to segment", Icon: IconFrame, description: "Draw a box to propose a segment restricted to that region." },
 ];
 
 const SCISSORS_OPERATIONS: { value: ScissorsOperation; label: string }[] = [
@@ -166,7 +171,7 @@ const SCISSORS_OPERATIONS: { value: ScissorsOperation; label: string }[] = [
 
 // Tools that don't have an ApplyButton — they commit directly on pointer
 // interaction, so the rendering dot is the only feedback available.
-const LIVE_COMMIT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["paint", "erase", "scissors", "levelTracing"];
+const LIVE_COMMIT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["paint", "erase", "scissors", "levelTracing", "pointSegment", "boxSegment"];
 
 const MIN_DIAMETER_MM = 2;
 const MAX_DIAMETER_MM = 40;
@@ -1007,7 +1012,7 @@ export default function AnnotationToolbar({
 			aria-orientation="horizontal"
 		>
 			<div ref={dockContentRef} style={{ display: "flex", alignItems: "center", width: "100%" }}>
-			<div style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0, gap: 20 }}>
+			<div style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0, gap: 8 }}>
 				{TOOL_DEFS.map(({ id, label, Icon, description }) => {
 					// Only equip-and-use tools (paint/erase/scissors/level tracing)
 					// get a settings arrow; other tools open settings on icon click.
@@ -1321,7 +1326,7 @@ export default function AnnotationToolbar({
 											onCloseSettings={() => toolFlyout.setOpen(false)}
 										/>
 									)}
-									{activeTool && !["paint", "erase", "scissors"].includes(activeTool) && renderFlyout(activeTool, handleToolApplied, () => toolFlyout.setOpen(false), setGuidedControls)}
+									{activeTool && !["paint", "erase", "scissors", "pointSegment", "boxSegment"].includes(activeTool) && renderFlyout(activeTool, handleToolApplied, () => toolFlyout.setOpen(false), setGuidedControls)}
 								</div>
 							</div>
 						</div>
