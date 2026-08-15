@@ -158,34 +158,57 @@
   letter-spacing: 0.04em;
 }
 
-/* ── File chips ── */
+/* ── Selected-file cards (was a row of small pills; now matches the
+   icon+name+subtext row treatment used by Completed Uploads below) ── */
 .file-chips {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 8px;
   margin-bottom: 20px;
 }
 .file-chip {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 14px;
-  background: rgba(0,0,0,.06);
-  border: 1px solid rgba(0,0,0,.12);
-  border-radius: 20px;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #f5f5f5;
+  border: 1px solid rgba(0,0,0,.08);
+  border-radius: 10px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.file-chip-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  flex-shrink: 0;
+  background: rgba(0,0,0,.05);
+  border: 1px solid rgba(0,0,0,.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: #111111;
+}
+.file-chip-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.file-chip-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: #8f8f8f;
+  margin-top: 1px;
   letter-spacing: 0.02em;
 }
 .file-chip-remove {
-  width: 16px;
-  height: 16px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
-  background: rgba(0,0,0,.08);
+  background: rgba(0,0,0,.06);
   border: none;
   color: #8f8f8f;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1;
   cursor: pointer;
   display: flex;
@@ -194,9 +217,10 @@
   transition: all 0.15s;
   padding: 0;
   font-family: inherit;
+  flex-shrink: 0;
 }
 .file-chip-remove:hover {
-  background: rgba(239,68,68,.2);
+  background: rgba(239,68,68,.15);
   color: #ef4444;
 }
 
@@ -725,6 +749,19 @@
   background: linear-gradient(90deg, #6a6a6a, #E76F51);
 }
 
+/* Indeterminate variant: inference has no real percent-complete signal (nnU-Net
+   doesn't report progress mid-run), so a sweeping segment communicates "still
+   working" honestly instead of faking a percentage. */
+.progress-fill--indeterminate {
+  width: 40% !important;
+  background: linear-gradient(90deg, #6a6a6a, #0F172A);
+  animation: progress-indeterminate-sweep 1.4s ease-in-out infinite;
+}
+@keyframes progress-indeterminate-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
 /* ── Result actions ── */
 .result-section {
   margin-top: 20px;
@@ -856,20 +893,22 @@
 
 /* ── File chip internals ── */
 .file-chip-name {
-  flex: 1;
-  min-width: 0;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: #111111;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .file-chip-preview {
-  padding: 2px 8px;
+  padding: 5px 12px;
   background: rgba(15, 23, 42, .1);
   border: 1px solid rgba(15, 23, 42, .2);
-  border-radius: 10px;
+  border-radius: 8px;
   color: #C2532F;
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   letter-spacing: 0.04em;
