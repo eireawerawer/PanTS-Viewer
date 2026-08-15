@@ -37,16 +37,31 @@ interface UseInteractivePromptToolArgs {
 	 *  disable further clicks — a click mid-request would race the previous
 	 *  one's voxel writes. */
 	onBusyChange?: (busy: boolean) => void;
+	/** Fired once a submit SUCCEEDS (voxels actually changed) — point/box
+	 *  segment is single-shot, not equip-and-use like paint/erase, so the
+	 *  caller should deselect the tool here (activeToolbarTool -> null) so
+	 *  its icon loses the active/white-background state after one use.
+	 *  NOT fired on "nothing changed" or on error — the user should be able
+	 *  to immediately retry in place without re-arming the tool. */
+	onComplete?: () => void;
 }
 
 export function useInteractivePromptTool({
-	enabled, mode, apiBase, caseId, activeSegmentIndex, res, tolerance, onLog, onBusyChange,
+	enabled, mode, apiBase, caseId, activeSegmentIndex, res, tolerance, onLog, onBusyChange, onComplete,
 }: UseInteractivePromptToolArgs) {
 	const [dragStartCanvas, setDragStartCanvas] = useState<[number, number] | null>(null);
 	const [dragStartWorld, setDragStartWorld] = useState<Point3 | null>(null);
 	const [liveBoxCanvas, setLiveBoxCanvas] = useState<[[number, number], [number, number]] | null>(null);
 	const paneRef = useRef<CinePane | null>(null);
 	const busyRef = useRef(false);
+	// Drives the applying/success overlay (mirrors CopyAcrossSlicesFlyout's
+	// GuidedStepModal pattern) instead of the tool silently completing with
+	// only a session-log line — a click/box submit is a real server round
+	// trip (hundreds of ms to a few seconds), so it needs its own feedback,
+	// not just whatever "Interactive segment (N vox)" text happens to scroll
+	// past in the log panel.
+	const [status, setStatus] = useState<"idle" | "applying" | "success" | "error">("idle");
+	const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
 	const reset = useCallback(() => {
 		setDragStartCanvas(null);
@@ -66,6 +81,8 @@ export function useInteractivePromptTool({
 		}
 		busyRef.current = true;
 		onBusyChange?.(true);
+		setStatus("applying");
+		setStatusMessage(null);
 		try {
 			const changed = await submitInteractiveSegmentPrompt(
 				apiBase,
@@ -74,18 +91,33 @@ export function useInteractivePromptTool({
 				{ pointLps: pointWorld, boxLps: boxWorld, tolerance },
 				res,
 			);
-			onLog?.(
-				changed
-					? `Interactive segment (${changed.toLocaleString()} vox)`
-					: "Interactive segment: nothing grew from that point — try a different spot."
-			);
+			if (changed) {
+				const msg = `Interactive segment (${changed.toLocaleString()} vox)`;
+				onLog?.(msg);
+				setStatus("success");
+				setStatusMessage("Operation completed successfully");
+				onComplete?.();
+			} else {
+				const msg = "Interactive segment: nothing grew from that point — try a different spot.";
+				onLog?.(msg);
+				setStatus("error");
+				setStatusMessage(msg);
+			}
 		} catch (e) {
-			onLog?.(e instanceof Error ? e.message : "Interactive segmentation failed.");
+			const msg = e instanceof Error ? e.message : "Interactive segmentation failed.";
+			onLog?.(msg);
+			setStatus("error");
+			setStatusMessage(msg);
 		} finally {
 			busyRef.current = false;
 			onBusyChange?.(false);
 		}
-	}, [apiBase, caseId, activeSegmentIndex, res, tolerance, onLog, onBusyChange]);
+	}, [apiBase, caseId, activeSegmentIndex, res, tolerance, onLog, onBusyChange, onComplete]);
+
+	const dismissStatus = useCallback(() => {
+		setStatus("idle");
+		setStatusMessage(null);
+	}, []);
 
 	const handleClick = (pane: CinePane) => (e: MouseEvent) => {
 		if (!enabled || mode !== "point") return;
@@ -147,6 +179,9 @@ export function useInteractivePromptTool({
 	return {
 		pane,
 		liveBox: liveBoxDisplay,
+		status,
+		statusMessage,
+		dismissStatus,
 		handleClick,
 		handleMouseDown,
 		handleMouseMove,
