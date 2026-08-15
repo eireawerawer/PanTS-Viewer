@@ -27,7 +27,13 @@ export default function FillBetweenSlicesFlyout({ segmentIndex, maskFilter, onLo
 
 	const picker = useSliceAnchorPicker({
 		segmentIndex,
-		lastRequiresSegment: false,
+		// Unlike Copy-across-slices (whose destination legitimately doesn't
+		// need existing content), Fill needs a real segment on BOTH ends to
+		// interpolate between — a blank second slice has nothing to fill
+		// toward. Was `false` (copied from CopyAcrossSlicesFlyout without
+		// updating for this), which let step 2 accept any slice with no
+		// segment check at all.
+		lastRequiresSegment: true,
 		onError: (d) => { setPickError(d); onLog?.(d); },
 	});
 	const { phase, step, first, last } = picker;
