@@ -1007,7 +1007,7 @@ export default function AnnotationToolbar({
 			aria-orientation="horizontal"
 		>
 			<div ref={dockContentRef} style={{ display: "flex", alignItems: "center", width: "100%" }}>
-			<div style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0, gap: 30 }}>
+			<div style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0, gap: 20 }}>
 				{TOOL_DEFS.map(({ id, label, Icon, description }) => {
 					// Only equip-and-use tools (paint/erase/scissors/level tracing)
 					// get a settings arrow; other tools open settings on icon click.
