@@ -39,7 +39,6 @@ import {
 import React, { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
-import { loadRecentUploads } from "../helpers/recentUploads";
 import { useLocation, useParams } from "react-router-dom";
 import AISidebar from "../components/AIAssistant/AISidebar";
 import { track } from "../helpers/analytics";
@@ -57,7 +56,7 @@ import MarginPanel from "../components/segmentation/MarginPanel";
 import IslandsPanel from "../components/segmentation/IslandsPanel";
 import LogicalOperatorsPanel from "../components/segmentation/LogicalOperatorsPanel";
 import { setBrushMaskingScope } from "../helpers/CornerstoneNifti2";
-
+import { loadRecentUploads } from "../helpers/recentUploads";
 import SmoothingFlyout from "../components/segmentation/SmoothingFlyout";
 import GrowFromSeedsFlyout from "../components/segmentation/GrowFromSeedFlyout";
 import FillBetweenSlicesFlyout from "../components/segmentation/FillBetweenSlicesFlyout";
@@ -65,6 +64,7 @@ import CopyAcrossSlicesFlyout from "../components/segmentation/CopyAcrossSlicesF
 import HollowFlyout from "../components/segmentation/HollowFlyout";
 import LevelTracingFlyout from "../components/segmentation/LevelTracingFlyout";
 import { useScissorsTool } from "../helpers/viewer/useScissorsTool";
+import { useInteractivePromptTool } from "../helpers/viewer/useInteractivePromptTool";
 import {
   applyMargin, getActualMarginMm,
   applyIslandsOperation, applyLogicalOperator, applySmoothing,
@@ -510,13 +510,6 @@ function VisualizationPage() {
 	const isLocal = isDicom || isLocalNifti;
 	const [dicomError, setDicomError] = useState<string | null>(null);
 
-
-	// Where to load the volumes from. Per the maintainer's rule, dataset cases load
-	// from the lab's LOCAL endpoints (served off disk on the JHU server — much faster
-	// for big full-body scans than streaming the .nii.gz from HuggingFace). We probe
-	// the local file and only fall back to the public HuggingFace mirror when it isn't
-	// present (e.g. a dev checkout without the image data), so the viewer never breaks.
-	const caseId = isLocalNifti ? "Local NIfTI" : isDicom ? "Local DICOM" : pantsCase ?? sessionId ?? "1";
 	// Header display only — caseId itself stays the raw id everywhere it's used
 	// functionally (API calls, logging, etc). A session's raw id is a UUID, which
 	// means nothing to a person; look up the friendly name the Upload page already
@@ -527,6 +520,14 @@ function VisualizationPage() {
 		const match = loadRecentUploads().find((u) => u.sessionId === sessionId);
 		return match?.label ?? `Session ${sessionId.slice(0, 8)}`;
 	}, [sessionId]);
+
+
+	// Where to load the volumes from. Per the maintainer's rule, dataset cases load
+	// from the lab's LOCAL endpoints (served off disk on the JHU server — much faster
+	// for big full-body scans than streaming the .nii.gz from HuggingFace). We probe
+	// the local file and only fall back to the public HuggingFace mirror when it isn't
+	// present (e.g. a dev checkout without the image data), so the viewer never breaks.
+	const caseId = isLocalNifti ? "Local NIfTI" : isDicom ? "Local DICOM" : pantsCase ?? sessionId ?? "1";
 	const [ctUrl, setCtUrl] = useState<string | null>(null);
 	const [segUrl, setSegUrl] = useState<string | null>(null);
 	// Whether the local volumes exist (enables the HD toggle). Dataset cases default to
@@ -1275,13 +1276,39 @@ function VisualizationPage() {
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 1500),
 	});
 
-
 	// The active drawing tool for the pane handlers below — whichever one is
 	// actually armed right now (they're mutually exclusive via `enabled`).
 	const activeDrawTool = activeToolbarTool === "scissors" ? scissors : lasso;
 	// Progressive resolution: after the fast low-res load, the full-res CT streams in
 	// the background and hot-swaps in place (no reload). idle → streaming → done/failed.
 	const [enhance, setEnhance] = useState<{ state: "idle" | "streaming" | "done" | "failed"; pct: number | null }>({ state: "idle", pct: null });
+
+	// Click/box-to-segment (interactive prompt tools). `res` MUST match the
+	// grid the live segmentation volume is actually on right now — same
+	// hdReady logic gating the Annotate button, not a separate guess. Placed
+	// after `enhance` is declared above since both read enhance.state.
+	const [promptToolBusy, setPromptToolBusy] = useState(false);
+	const pointSegment = useInteractivePromptTool({
+		enabled: activeToolbarTool === "pointSegment" && !promptToolBusy,
+		mode: "point",
+		apiBase: API_BASE,
+		caseId: pantsCase ?? null,
+		activeSegmentIndex: activeSegment,
+		res: isHd || enhance.state === "done" ? "full" : "low",
+		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
+		onBusyChange: setPromptToolBusy,
+	});
+	const boxSegment = useInteractivePromptTool({
+		enabled: activeToolbarTool === "boxSegment" && !promptToolBusy,
+		mode: "box",
+		apiBase: API_BASE,
+		caseId: pantsCase ?? null,
+		activeSegmentIndex: activeSegment,
+		res: isHd || enhance.state === "done" ? "full" : "low",
+		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
+		onBusyChange: setPromptToolBusy,
+	});
+
 	const enhanceStartedRef = useRef(false);
 	// Live mirrors so the async swap re-applies the *current* window/visibility, not
 	// the values captured when the stream started.
@@ -1323,8 +1350,7 @@ function VisualizationPage() {
 		}
 	}, [showOnlyTargetMask, isolationTargetKey]);
 	// 3D pane rendering mode: organ meshes (dataset cases) or shaded GPU volume
-	// rendering of the CT itself (the only 3D option for local DICOM). Volume by
-	// default everywhere — meshes remain a click away via the toggle below.
+	// rendering of the CT itself (the only 3D option for local DICOM).
 	const [threeDMode, setThreeDMode] = useState<"mesh" | "volume">("volume");
 	const [volumePreset, setVolumePreset] = useState<string>(VOLUME_3D_PRESETS[0].name);
 	// CT presets by default; swapped for the MR set when a local DICOM turns out to be MR.
@@ -2354,6 +2380,25 @@ function VisualizationPage() {
 				<div className={`vp-window-readout${windowReadoutVisible ? " vp-window-readout--visible" : ""}`}>
 					W {Math.round(windowWidth)} · L {Math.round(windowCenter)}
 				</div>
+				{activeToolbarTool === "boxSegment" && boxSegment.pane === pane && boxSegment.liveBox && (() => {
+					const [start, end] = boxSegment.liveBox;
+					const left = Math.min(start[0], end[0]);
+					const top = Math.min(start[1], end[1]);
+					const width = Math.abs(end[0] - start[0]);
+					const height = Math.abs(end[1] - start[1]);
+					return (
+						<div
+							style={{
+								position: "absolute",
+								left, top, width, height,
+								border: "1.5px dashed #6fd3ff",
+								background: "rgba(111, 211, 255, 0.12)",
+								pointerEvents: "none",
+								zIndex: 40,
+							}}
+						/>
+					);
+				})()}
 			</>
 		);
 	};
@@ -2783,8 +2828,8 @@ const aiAvailableOrgans = useMemo(() => {
 					<div className="vp-tb-id">
 						<span className="vp-tb-id__eyebrow">{sessionId ? "Session" : "Case"}</span>
 						<span className="vp-tb-id__val" title={sessionId ? `Session ID: ${sessionId}` : undefined}>
-							{sessionId ? sessionDisplayLabel : caseId}
-						</span>
+    						{sessionId ? sessionDisplayLabel : caseId}
+						</span>					
 					</div>
 
 					<span className="vp-tb-divider" />
@@ -3568,12 +3613,11 @@ const aiAvailableOrgans = useMemo(() => {
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("axial"), ...paneGridStyle("axial") }}
-						onMouseUp={smartFill.handleMouseUp}>
-						<div
+						onMouseUp={(e) => { smartFill.handleMouseUp(); boxSegment.handleMouseUp("axial")(e); }}>						<div
 							className={`axial ${loading ? "" : "vp-pane vp-pane--axial"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 							data-label="Axial"
 							ref={axial_ref}
-							onClick={(e) => { handleMouseClick(e); }}
+							onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("axial")(e); }}
 							onDoubleClick={activeDrawTool.handleDoubleClick("axial")}
 							onMouseDown={(e) => {
 								focusedPane.handleMouseDown("axial")();
@@ -3581,12 +3625,14 @@ const aiAvailableOrgans = useMemo(() => {
 								morphPicker.handlePaneClick("axial")(e);
 								activeDrawTool.handleClick("axial")(e);
 								levelTracing.handleClick("axial")(e);
+								boxSegment.handleMouseDown("axial")(e);
 							}}
 							onMouseMove={(e) => {
 								handlePaneHover("axial")(e);
 								smartFill.handleMouseMove("axial")(e);
 								activeDrawTool.handleMouseMove("axial")(e);
 								levelTracing.handleMouseMove("axial")(e);
+								boxSegment.handleMouseMove("axial")(e);
 							}}
 							onMouseLeave={handlePaneHoverLeave("axial")}
 							onWheel={focusedPane.handleWheel("axial")}
@@ -3649,12 +3695,12 @@ const aiAvailableOrgans = useMemo(() => {
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("sagittal"), ...paneGridStyle("sagittal") }}
-						onMouseUp={smartFill.handleMouseUp}>
+						onMouseUp={(e) => { smartFill.handleMouseUp(); boxSegment.handleMouseUp("sagittal")(e); }}>
 					<div
 						className={`sagittal ${loading ? "" : "vp-pane vp-pane--sagittal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Sagittal"
 						ref={sagittal_ref}
-						onClick={(e) => { handleMouseClick(e); }}
+						onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("sagittal")(e); }}
 						onDoubleClick={activeDrawTool.handleDoubleClick("sagittal")}
 						onMouseDown={(e) => {
 							focusedPane.handleMouseDown("sagittal")();
@@ -3662,12 +3708,14 @@ const aiAvailableOrgans = useMemo(() => {
 							morphPicker.handlePaneClick("sagittal")(e);
 							activeDrawTool.handleClick("sagittal")(e);
 							levelTracing.handleClick("sagittal")(e);
+							boxSegment.handleMouseDown("sagittal")(e);
 						}}
 						onMouseMove={(e) => {
 							handlePaneHover("sagittal")(e);
 							smartFill.handleMouseMove("sagittal")(e);
 							activeDrawTool.handleMouseMove("sagittal")(e);
 							levelTracing.handleMouseMove("sagittal")(e);
+							boxSegment.handleMouseMove("sagittal")(e);
 						}}
 						onMouseLeave={handlePaneHoverLeave("sagittal")}
 						onWheel={focusedPane.handleWheel("sagittal")}
@@ -3731,12 +3779,12 @@ const aiAvailableOrgans = useMemo(() => {
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("coronal"), ...paneGridStyle("coronal") }}
-						onMouseUp={smartFill.handleMouseUp}>
+						onMouseUp={(e) => { smartFill.handleMouseUp(); boxSegment.handleMouseUp("coronal")(e); }}>
 					<div
 						className={`coronal ${loading ? "" : "vp-pane vp-pane--coronal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Coronal"
 						ref={coronal_ref}
-						onClick={(e) => { handleMouseClick(e); }}
+						onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("coronal")(e); }}
 						onDoubleClick={activeDrawTool.handleDoubleClick("coronal")}
 						onMouseDown={(e) => {
 							focusedPane.handleMouseDown("coronal")();
@@ -3744,6 +3792,7 @@ const aiAvailableOrgans = useMemo(() => {
 							morphPicker.handlePaneClick("coronal")(e);
 							activeDrawTool.handleClick("coronal")(e);
 							levelTracing.handleClick("coronal")(e);
+							boxSegment.handleMouseDown("coronal")(e);
 
 
 						}}
@@ -3752,6 +3801,7 @@ const aiAvailableOrgans = useMemo(() => {
 							smartFill.handleMouseMove("coronal")(e);
 							activeDrawTool.handleMouseMove("coronal")(e);
 							levelTracing.handleMouseMove("coronal")(e);
+							boxSegment.handleMouseMove("coronal")(e);
 						}}
 						onMouseLeave={handlePaneHoverLeave("coronal")}
 						onWheel={focusedPane.handleWheel("coronal")}

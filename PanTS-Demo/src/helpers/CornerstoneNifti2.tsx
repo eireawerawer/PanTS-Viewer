@@ -1452,6 +1452,158 @@ export async function upgradeSegmentationVolume(fullResSegUrl: string): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// Click-to-segment / box-to-segment (interactive prompt tools)
+//
+// Backend contract (flask-server/api/api_blueprint.py: POST
+// /api/interactive-segment/<case_id>): body { point_lps, box_lps?, tolerance?,
+// res: "low"|"full" }, response is a gzip'd .nii.gz mask IN THE SAME VOXEL
+// GRID as whichever `res` was requested. Because of that grid match, once
+// decompressed we can copy proposal voxels into the live segmentation volume
+// by flat index directly — no worldToIndex/geometry reconciliation needed,
+// unlike the HD-upgrade carry-over that broke earlier. The one hard
+// requirement is that `res` here must match whatever grid the *current*
+// segmentationId volume is actually on right now (i.e. gate this tool the
+// same way Annotate is gated — behind hdReady — so "low" vs "full" can't
+// drift out of sync mid-session).
+//
+// NOT YET TESTED end-to-end — this is new scaffolding. Test on a real case
+// before trusting it: submit a point prompt, confirm the proposal lands in
+// the right place on the right slice, and confirm undo/segment-switching
+// still behave normally afterward.
+export interface InteractivePrompt {
+  pointLps: Point3;
+  boxLps?: [Point3, Point3];
+  tolerance?: number;
+}
+
+async function _decompressGzip(buf: ArrayBuffer): Promise<ArrayBuffer> {
+  // Prefer the native DecompressionStream (Chrome/Edge/Safari 16.4+); if it's
+  // unavailable, this throws and the caller should show "unsupported browser"
+  // rather than silently failing — there's no bundled gzip fallback here.
+  const ds = new (window as any).DecompressionStream("gzip");
+  const stream = new Blob([buf]).stream().pipeThrough(ds);
+  return await new Response(stream).arrayBuffer();
+}
+
+/**
+ * Send a point/box prompt to the backend's interactive-segment endpoint and
+ * merge the returned proposal into the live segmentation volume as
+ * `activeSegmentIndex`, restricted to voxels the proposal actually covers
+ * (existing voxels elsewhere in the labelmap are untouched).
+ *
+ * `res` MUST match the grid the current segmentation volume is on (see the
+ * module comment above) — pass `isHd ? "full" : "low"` from the caller's own
+ * hdReady state, not a guess.
+ *
+ * Returns the number of voxels changed (0 if the proposal was empty), or
+ * throws with a message safe to show the user (the backend already returns
+ * plain-English error strings for the common cases — empty grow, no CT, etc).
+ */
+export async function submitInteractiveSegmentPrompt(
+  apiBase: string,
+  caseId: string | number,
+  activeSegmentIndex: number,
+  prompt: InteractivePrompt,
+  res: "low" | "full",
+): Promise<number> {
+  const segVolume = cache.getVolume(segmentationId);
+  if (!segVolume) throw new Error("No segmentation loaded for this case.");
+
+  const body: Record<string, unknown> = {
+    point_lps: [prompt.pointLps[0], prompt.pointLps[1], prompt.pointLps[2]],
+    res,
+  };
+  if (prompt.boxLps) {
+    body.box_lps = [
+      [prompt.boxLps[0][0], prompt.boxLps[0][1], prompt.boxLps[0][2]],
+      [prompt.boxLps[1][0], prompt.boxLps[1][1], prompt.boxLps[1][2]],
+    ];
+  }
+  if (prompt.tolerance != null) body.tolerance = prompt.tolerance;
+
+  const httpRes = await fetch(`${apiBase}/api/interactive-segment/${caseId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!httpRes.ok) {
+    let msg = `Interactive segmentation failed (${httpRes.status}).`;
+    try {
+      const j = await httpRes.json();
+      if (j?.error) msg = j.error;
+    } catch { /* body wasn't JSON — keep the generic message */ }
+    throw new Error(msg);
+  }
+
+  const gz = await httpRes.arrayBuffer();
+  const niiBytes = await _decompressGzip(gz);
+
+  // Parse the proposal mask's voxel data directly from the raw NIfTI bytes,
+  // instead of routing it through Cornerstone's volume loader. An earlier
+  // version created a throwaway Cornerstone volume for this — but Cornerstone
+  // prioritizes/cancels image loads based on which viewports are actively
+  // requesting them, and a volume attached to no viewport gets its loads
+  // cancelled outright ("volume load cancelled" for every slice). Reading
+  // the header ourselves avoids that whole pathway.
+  //
+  // The backend always writes this via nibabel with
+  // `out.header.set_data_dtype('uint8')` (see interactive_segment in
+  // api_blueprint.py) — a single-file .nii, uint8, standard 352-byte data
+  // offset, no extensions. If that ever changes server-side, this parser
+  // needs to change with it.
+  const proposal = _parseNiftiUint8Mask(niiBytes);
+
+  const segScalars = (segVolume as any)?.voxelManager?.getCompleteScalarDataArray?.()
+    ?? (segVolume as any)?.scalarData;
+  const segDims = segVolume.imageData.getDimensions() as [number, number, number];
+
+  if (!segScalars) throw new Error("Could not access voxel data to apply the proposal.");
+  if (segDims[0] !== proposal.dims[0] || segDims[1] !== proposal.dims[1] || segDims[2] !== proposal.dims[2]) {
+    // Grid mismatch — almost certainly `res` didn't match the segmentation
+    // volume's current resolution. Refuse rather than silently misapply.
+    throw new Error(
+      "The proposal's resolution doesn't match the loaded segmentation — try again once loading finishes."
+    );
+  }
+
+  let changed = 0;
+  for (let idx = 0; idx < proposal.data.length; idx++) {
+    if (proposal.data[idx]) {
+      segScalars[idx] = activeSegmentIndex;
+      changed++;
+    }
+  }
+  if (changed > 0) {
+    (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
+    await _rebuildSegmentationRepresentations();
+  }
+
+  return changed;
+}
+
+/**
+ * Minimal NIfTI-1 reader for exactly the shape the interactive-segment
+ * endpoint returns: single-file .nii, uint8 data, standard header, no
+ * extensions. Not a general-purpose NIfTI parser — reads only what's needed
+ * (dims + the voxel array) and assumes little-endian, matching nibabel's
+ * default write format.
+ */
+function _parseNiftiUint8Mask(buf: ArrayBuffer): { dims: [number, number, number]; data: Uint8Array } {
+  const view = new DataView(buf);
+  // NIfTI-1 header: dim[8] (int16 x8) starts at byte 40; dim[0]=ndims,
+  // dim[1..3]=nx,ny,nz. vox_offset (float32) is at byte 108 — where the
+  // voxel data actually begins (352 for a standard header with no
+  // extensions, but read it rather than assume, in case that ever changes).
+  const nx = view.getInt16(42, true);
+  const ny = view.getInt16(44, true);
+  const nz = view.getInt16(46, true);
+  const voxOffset = view.getFloat32(108, true);
+  const count = nx * ny * nz;
+  const data = new Uint8Array(buf, voxOffset, count);
+  return { dims: [nx, ny, nz], data };
+}
+
+// ---------------------------------------------------------------------------
 // Shaded GPU volume rendering ("Volume" mode in the 3D pane): ray-cast VTK.js
 // rendering of the CT itself with clinical transfer-function presets, driven
 // by a trackball camera. Works with or without a segmentation (local DICOM).
