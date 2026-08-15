@@ -157,11 +157,28 @@ _lock = threading.Lock()
 _stats = {"requests": 0, "failures": 0, "last_seconds": None}
 
 
-def run_inference(case_id, input_dir, output_dir, output_csv_path):
+def _discover_case(input_dir):
+    """Derive case_id from a file actually present in the validated input_dir,
+    the same pattern lesionseg_warm_server.py uses (CodeQL-verified there): the
+    client's case_id string must never reach a path operation, even after
+    input_dir itself is validated -- a containment check on input_dir alone
+    does not make case_id safe to interpolate into a filename (CodeQL flagged
+    exactly this: os.path.join(dir, f"{case_id}...") lets an absolute-path
+    case_id discard dir entirely). Removing the tainted flow, not auditing it.
+    """
+    candidates = [f for f in os.listdir(input_dir) if f.endswith("_0000.nii.gz")]
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"expected exactly one *_0000.nii.gz case in {input_dir}, found {len(candidates)}"
+        )
+    fname = candidates[0]
+    return fname, fname[: -len("_0000.nii.gz")]
+
+
+def run_inference(input_dir, output_dir, output_csv_path):
     os.makedirs(output_dir, exist_ok=True)
-    ct = os.path.join(input_dir, f"{case_id}_0000.nii.gz")
-    if not os.path.exists(ct):
-        raise RuntimeError(f"input not found: {ct}")
+    fname, case_id = _discover_case(input_dir)
+    ct = os.path.join(input_dir, fname)
 
     t0 = time.time()
     data, props = reader_writer.read_images([ct])
@@ -231,7 +248,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(length))
-            case_id = req["case_id"]
+            # case_id is accepted for schema compatibility with the client but is
+            # NEVER used to build a path -- see _discover_case's docstring.
+            _ = req["case_id"]
             rel_input = req["input_rel"]
             rel_output = req["output_rel"]
             rel_output_csv = req["output_csv_rel"]
@@ -273,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(503, {"error": "predictor busy, timed out waiting for GPU"})
             return
         try:
-            result = run_inference(case_id, input_dir, output_dir, output_csv_path)
+            result = run_inference(input_dir, output_dir, output_csv_path)
             _stats["requests"] += 1
             _stats["last_seconds"] = round(time.time() - t0, 2)
             self._json(200, {
