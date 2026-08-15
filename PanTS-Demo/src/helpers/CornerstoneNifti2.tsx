@@ -1410,6 +1410,47 @@ export async function upgradeCtVolume(fullResCtUrl: string): Promise<string | nu
   }
 }
 
+/**
+ * Rebuild the segmentation (labelmap) volume against a full-res mask, so its
+ * voxel grid actually matches the full-res CT after upgradeCtVolume() swaps
+ * that in. Without this, the labelmap keeps the low-res grid it was created
+ * with at initial load — a brush click computed against the now-full-res
+ * viewport gets worldToIndex'd onto the *old* low-res slice spacing, which
+ * lands one slice off (sometimes the slice before, sometimes after,
+ * depending on where the two grids' boundaries happen to fall). Call this
+ * right after upgradeCtVolume() succeeds, before re-enabling annotation.
+ *
+ * This replaces the labelmap outright with the server's full-res mask — it
+ * does not attempt to carry over voxels painted before the HD swap. (An
+ * earlier version tried a world-position carry-over; it isn't reliable
+ * across differently-shaped vtkImageData volumes and was removed rather than
+ * risk a broken partial state. If preserving pre-HD edits turns out to
+ * matter in practice, that needs its own careful pass, not a quick patch
+ * here.)
+ *
+ * Returns true on success; false leaves the existing (low-res) labelmap in
+ * place — caller should keep annotation disabled in that case.
+ */
+export async function upgradeSegmentationVolume(fullResSegUrl: string): Promise<boolean> {
+  if (!cache.getVolume(segmentationId)) return false;
+  try {
+    const segmentationImageIds = await createNiftiImageIdsAndCacheMetadata({ url: fullResSegUrl });
+    if (!segmentationImageIds.length) return false;
+
+    cache.removeVolumeLoadObject(segmentationId);
+    const newVolume = await volumeLoader.createAndCacheVolume(segmentationId, {
+      imageIds: segmentationImageIds,
+    });
+    await newVolume.load();
+
+    await _rebuildSegmentationRepresentations();
+    return true;
+  } catch (e) {
+    console.warn("Full-res segmentation upgrade failed; keeping the low-res labelmap.", e);
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Shaded GPU volume rendering ("Volume" mode in the 3D pane): ray-cast VTK.js
 // rendering of the CT itself with clinical transfer-function presets, driven

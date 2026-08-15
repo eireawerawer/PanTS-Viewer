@@ -128,6 +128,7 @@ import {
     toggleCrosshairTool,
     undoMaskEdit,
     upgradeCtVolume,
+    upgradeSegmentationVolume,
     VOLUME_3D_PRESETS,
     VOLUME_3D_PRESETS_MR,
     zoomToFit,
@@ -1710,6 +1711,23 @@ function VisualizationPage() {
 				true,
 				...checkBoxDataRef.current.map((item) => !!checkStateRef.current[item.id]),
 			]);
+			// The segmentation volume must be rebuilt at full-res too, or its voxel
+			// grid stays on the old low-res spacing while the CT (and displayed
+			// slice) is now full-res — brush strokes then compute against mismatched
+			// grids and land on the wrong slice. Annotation stays gated (see
+			// hdReady in the Annotate button) until this completes, since painting
+			// mid-swap would hit the same mismatch this is meant to fix.
+			if (segUrl) {
+				const segOk = await upgradeSegmentationVolume(`${API_BASE}/api/get-segmentations/${pantsCase}.nii.gz`);
+				if (!segOk) {
+					// CT upgraded but mask didn't — don't claim "done" (which the
+					// Annotate button treats as a green light) while the mask is
+					// still misaligned. Report failed so the button stays disabled
+					// and hdReady falls back to isHd if/when the case is reloaded.
+					setEnhance({ state: "failed", pct: null });
+					return;
+				}
+			}
 			setEnhance({ state: "done", pct: 100 });
 			sessionRef.current?.log("session", "Enhanced to full resolution");
 		} catch {
