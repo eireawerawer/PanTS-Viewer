@@ -2556,6 +2556,25 @@ function VisualizationPage() {
 		}
 	};
 
+	// Every OTHER main-toolbar icon (crosshair, measure, view, cine, layout,
+	// window preset, adjust, download, HD) needs to close the annotation
+	// toolbar/SegmentsPopup the same way pressing Annotate again does —
+	// previously only the Annotate button itself (and a couple of the
+	// right-side panel togglers like Stats/Metadata/Measurements) ran this
+	// teardown, so clicking e.g. Crosshair or Measure while annotating left
+	// the horizontal toolbar and the class popup visibly open even though
+	// navigation/measurement mode had taken over underneath them. Mirrors
+	// the closing branch of handleToggleAnnotationToolbar exactly, just
+	// gated on "was it open" instead of always toggling.
+	const closeAnnotationToolbarIfOpen = () => {
+		if (!showAnnotationToolbar) return;
+		setShowAnnotationToolbar(false);
+		setActiveCatalogOrganId(null);
+		setActiveSegmentState(null);
+		setEditMode(null);
+		setActiveToolbarTool(null);
+	};
+
 	const handleToggleStats = () => {
 		// The right-side slot is shared by stats / metadata / measurements / mask editing.
 		setShowMetadata(false);
@@ -2814,21 +2833,6 @@ const aiAvailableOrgans = useMemo(() => {
 				<div
 					className="vp-topbar"
 					ref={topbarRef}
-					onClick={(e) => {
-						// Clicking any OTHER control in the main toolbar while the
-						// annotation ribbon is open closes it — same as clicking the
-						// pencil again. The pencil button is excluded here since its
-						// own onClick already toggles the state; without the
-						// exclusion this bubbling handler would immediately flip it
-						// back off right after turning it on.
-						if (
-							showAnnotationToolbar &&
-							!annotatePencilRef.current?.contains(e.target as Node) &&
-							!undoRedoGroupRef.current?.contains(e.target as Node)
-						) {
-							setShowAnnotationToolbar(false);
-						}
-					}}
 				>
 					{/* Gear (hides the bar) + home, in-flow so there's no dead corner space */}
 					<button
@@ -3482,7 +3486,7 @@ const aiAvailableOrgans = useMemo(() => {
 											{!isLocal && (
 												<button
 													className="vp-tool"
-													onClick={handleDownloadClick}
+													onClick={() => { closeAnnotationToolbarIfOpen(); handleDownloadClick(); }}
 													aria-label="Download segmentations"
 												>
 													<IconDownload size={20} color="white" />
@@ -3506,6 +3510,7 @@ const aiAvailableOrgans = useMemo(() => {
 												<button
 													className={`vp-tool ${isHd || enhance.state === "done" ? "vp-tool--active" : ""} ${enhance.state === "streaming" ? "vp-tool--busy" : ""}`}
 													onClick={() => {
+														closeAnnotationToolbarIfOpen();
 														// Full-res streams in automatically and swaps in place; the button
 														// is the status + manual trigger, with reload as the failure path.
 														if (isHd) toggleHd();
