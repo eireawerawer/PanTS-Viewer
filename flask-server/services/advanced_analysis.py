@@ -99,15 +99,14 @@ def region_grow(
     # Fill interior holes so the proposal is a solid object.
     mask = ndimage.binary_fill_holes(mask)
     return mask.astype(np.uint8)
+USE_NNINTERACTIVE = True
 
 
-def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict) -> np.ndarray:
+def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_key: str | None = None) -> np.ndarray:
     """Model-agnostic entry point for the click-to-segment tool.
 
-    `prompt` carries a seed (`point_lps` or `point_ijk`), optional `tolerance`
-    and `box_lps`. This is the seam to swap in a promptable foundation model:
-    replace the region_grow call with `medsam2.infer(ct, prompt)` returning a
-    mask of the same shape — nothing upstream or in the frontend changes.
+    `case_key` (e.g. "17:full") lets the nnInteractive path cache the
+    uploaded volume across requests for the same case+resolution.
     """
     if "point_ijk" in prompt:
         seed = tuple(int(v) for v in prompt["point_ijk"])
@@ -124,15 +123,24 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict) -> np.
             tuple(min(a, b) for a, b in zip(c0, c1)),
             tuple(max(a, b) + 1 for a, b in zip(c0, c1)),
         )
-    # The prompt comes straight from a public endpoint — clamp client numerics.
-    tolerance = min(max(float(prompt.get("tolerance", 80.0)), 1.0), 1000.0)
-    return region_grow(
-        ct,
-        seed,
-        tolerance=tolerance,
-        box_ijk=box_ijk,
-    )
 
+    if USE_NNINTERACTIVE:
+        try:
+            from services.nninteractive_predictor import predict
+            mask = predict(
+                ct,
+                case_key or "unkeyed",
+                point_ijk=seed if box_ijk is None else None,
+                box_ijk=box_ijk,
+            )
+            if mask.sum() > 0:
+                return mask
+            print("[segment_from_prompt] nnInteractive returned empty mask, falling back to region_grow")
+        except Exception as e:
+            print(f"[segment_from_prompt] nnInteractive failed ({type(e).__name__}: {e}), falling back to region_grow")
+
+    tolerance = min(max(float(prompt.get("tolerance", 80.0)), 1.0), 1000.0)
+    return region_grow(ct, seed, tolerance=tolerance, box_ijk=box_ijk)
 
 # --------------------------------------------------------------------------- #
 # 2. Vessel curved-planar analysis

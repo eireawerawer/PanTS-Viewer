@@ -5143,7 +5143,8 @@ def interactive_segment(case_id):
         # float32: half the RAM of nibabel's float64 default — these are public
         # endpoints and a full-res CT at float64 is multiple GB per request.
         ct = ct_obj.get_fdata(dtype=np.float32)
-        mask = segment_from_prompt(ct, ct_obj.affine, body)
+        case_key = f"{case_id}:{'low' if low else 'full'}"
+        mask = segment_from_prompt(ct, ct_obj.affine, body, case_key=case_key)
         if int(mask.sum()) == 0:
             return jsonify({"error": "Nothing grew from that point — try a different spot or a higher tolerance."}), 422
 
