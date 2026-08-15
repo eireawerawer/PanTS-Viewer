@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 import "./App.css";
-import { prefetchCurated } from "./helpers/prefetchCurated";
+import { warmCuratedCache } from "./helpers/curatedCache";
 import AnalyticsRouteTracker from "./components/AnalyticsRouteTracker";
 import AuthModal from "./components/AuthModal";
 import { AnnotationProvider } from "./contexts/annotationContexts";
@@ -72,8 +72,8 @@ function App() {
     };
     const ric = w.requestIdleCallback;
     const id = ric
-      ? ric(() => prefetchCurated())
-      : window.setTimeout(prefetchCurated, 1200);
+      ? ric(() => warmCuratedCache())
+      : window.setTimeout(warmCuratedCache, 1200);
     return () => {
       if (ric) w.cancelIdleCallback?.(id as number);
       else window.clearTimeout(id as number);
