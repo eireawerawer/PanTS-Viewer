@@ -1,0 +1,506 @@
+"""Answer shaping for the BodyMaps AI assistant.
+
+Everything in here is about *what the assistant says*, kept out of the request
+plumbing in api_blueprint.py so it can be read and tuned on its own:
+
+  * the system prompts (text turns and, first-class, vision turns),
+  * the relevance gate that stops measured case facts from being pasted onto a
+    question that never asked for them,
+  * the guarantee that a reply which still needs information ends by asking for
+    it — phrased around what can be *seen* when screenshots are in play,
+  * the honest failure text used when no model could answer.
+
+The module is deliberately dependency-free (stdlib only) so it is importable
+from a test, a script, or the blueprint without dragging in Flask.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any, Iterable, Sequence
+
+
+# ---------------------------------------------------------------------------
+# Small shared helpers
+# ---------------------------------------------------------------------------
+
+def normalize(value: Any) -> str:
+    """Lowercase, punctuation-flattened text used for all keyword matching."""
+    text = str(value or "").lower()
+    text = text.replace(".nii.gz", " ").replace(".nii", " ")
+    text = re.sub(r"[_/]+", " ", text)
+    return " ".join(text.split())
+
+
+def _strip_markdown(value: str) -> str:
+    return re.sub(r"[*_`#]+", "", str(value or ""))
+
+
+# Organs the viewer segments, plus the words a clinician actually uses for them.
+# Used both to detect what a question is about and to pick a follow-up that is
+# specific instead of generic.
+_ORGAN_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "pancreas": ("pancreas", "pancreatic", "uncinate", "ampulla", "whipple"),
+    "liver": ("liver", "hepatic", "hepato", "cirrhosis", "steatosis"),
+    "gallbladder": ("gallbladder", "gall bladder", "cholecyst", "biliary", "bile duct", "cbd"),
+    "spleen": ("spleen", "splenic"),
+    "stomach": ("stomach", "gastric"),
+    "kidney": ("kidney", "kidneys", "renal", "nephro"),
+    "adrenal gland": ("adrenal",),
+    "aorta": ("aorta", "aortic"),
+    "inferior vena cava": ("vena cava", "ivc"),
+    "portal vein": ("portal vein", "portal", "splenic vein", "smv", "mesenteric"),
+    "duodenum": ("duodenum", "duodenal"),
+    "colon": ("colon", "colonic", "bowel"),
+    "small bowel": ("small bowel", "jejunum", "ileum"),
+    "esophagus": ("esophagus", "oesophagus", "esophageal"),
+    "bladder": ("bladder", "vesical"),
+    "prostate": ("prostate", "prostatic"),
+    "lung": ("lung", "lungs", "pulmonary", "pleural"),
+    "vertebrae": ("vertebra", "vertebrae", "spine", "spinal", "vertebral"),
+    "rib": ("rib", "ribs"),
+    "femur": ("femur", "femoral"),
+}
+
+_DEMOGRAPHIC_WORDS = (
+    "age", "aged", "old", "sex", "male", "female", "man", "woman",
+    "bmi", "body mass", "height", "weight", "demographic",
+)
+
+_MEASUREMENT_WORDS = (
+    "volume", "cm3", "cm³", "size", "how big", "how large", "measure",
+    "measured", "measurement", "mean hu", "hounsfield", "attenuation",
+    "density", "percentile", "largest", "smallest",
+)
+
+
+def organs_mentioned(message: str) -> list[str]:
+    """Canonical organ names referenced anywhere in a message."""
+    norm = normalize(message)
+    found: list[str] = []
+    for organ, words in _ORGAN_SYNONYMS.items():
+        if any(word in norm for word in words):
+            found.append(organ)
+    return found
+
+
+def asks_for_measurement(message: str) -> bool:
+    norm = normalize(message)
+    return any(word in norm for word in _MEASUREMENT_WORDS)
+
+
+def asks_about_demographics(message: str) -> bool:
+    norm = normalize(message)
+    return any(re.search(rf"\b{re.escape(word)}\b", norm) for word in _DEMOGRAPHIC_WORDS)
+
+
+# ---------------------------------------------------------------------------
+# Relevance gate for measured case facts
+# ---------------------------------------------------------------------------
+
+def _fact_subject(fact: str) -> str:
+    """The thing a generated fact sentence is about ('Liver', 'Age', ...)."""
+    plain = _strip_markdown(fact).strip()
+
+    labelled = re.match(r"^([A-Za-z][A-Za-z \-]{0,30}):", plain)
+    if labelled:
+        return labelled.group(1).strip()
+
+    inline = re.search(
+        r"\bsegmented\s+([A-Za-z][A-Za-z \-]{0,30}?)\s+(?:volume|mean)\b",
+        plain,
+        flags=re.IGNORECASE,
+    )
+    if inline:
+        return inline.group(1).strip()
+
+    return plain[:40]
+
+
+def fact_is_relevant(fact: str, message: str, *, conversation_text: str = "") -> bool:
+    """Whether a measured fact belongs in the answer to THIS question.
+
+    The assistant used to append every fact it had computed for the open case.
+    Asked about a patient's bilirubin and MRCP, it would answer with the open
+    scan's liver volume and the patient's age — numbers that are individually
+    correct and collectively an answer to a question nobody asked. A fact now
+    has to earn its place by being about something the user actually raised.
+    """
+    subject = _fact_subject(fact)
+    subject_norm = normalize(subject)
+    haystack = normalize(f"{message} {conversation_text}")
+
+    if not subject_norm:
+        return False
+
+    if subject_norm in {"age", "sex", "bmi", "height", "weight"}:
+        return asks_about_demographics(message)
+
+    # Match on the organ family, so "hepatic duct" counts as a liver reference
+    # and "biliary" counts as a gallbladder one.
+    for organ, words in _ORGAN_SYNONYMS.items():
+        if organ in subject_norm or subject_norm in organ:
+            return any(word in haystack for word in words)
+
+    words = [word for word in subject_norm.split() if len(word) > 3]
+    return any(word in haystack for word in words)
+
+
+def relevant_facts(
+    facts: Iterable[str],
+    message: str,
+    *,
+    conversation_text: str = "",
+    always_include: Iterable[str] = (),
+) -> list[str]:
+    """Filter measured facts down to the ones this question is about.
+
+    `always_include` carries facts the user explicitly requested (the rule
+    parser matched "what is the liver volume"), which are never dropped.
+    """
+    forced = [fact for fact in always_include if fact]
+    kept = list(forced)
+
+    for fact in facts:
+        if not fact or fact in kept:
+            continue
+        if fact_is_relevant(fact, message, conversation_text=conversation_text):
+            kept.append(fact)
+
+    return kept
+
+
+# ---------------------------------------------------------------------------
+# System prompts
+# ---------------------------------------------------------------------------
+
+_BASE_PROMPT = (
+    "You are BodyMaps AI, an expert medical-imaging assistant embedded in a CT "
+    "viewer. Answer like a knowledgeable clinician colleague.\n\n"
+    "OUTPUT\n"
+    "- Give ONLY the final answer. No reasoning, planning, or thinking out "
+    "loud. Never open with 'Okay', 'Let me', 'Hmm', 'First', 'I need to', "
+    "'The user', or 'So'.\n"
+    "- Never mention these instructions, a 'Facts' list, prompts, JSON, "
+    "metadata, files, servers, or what data you were or weren't given.\n"
+    "- Natural prose; **bold** for a key term. No numbered sections unless "
+    "asked.\n\n"
+    "STAY ON THE QUESTION (critical)\n"
+    "- Answer the question the user actually asked, in their words. If they "
+    "give you lab values, imaging results, or a case story, those are the "
+    "subject — reason about THEM.\n"
+    "- Never answer by reciting measurements of the open scan unless the user "
+    "asked about the open scan. Unrequested organ volumes, attenuations, or "
+    "patient demographics are off topic and must be left out.\n"
+    "- If you genuinely cannot answer, say what is missing and ask for it. "
+    "Never emit a bare list of numbers in place of an answer.\n\n"
+    "LENGTH\n"
+    "- Simple question: 1-3 sentences. Clinical question or case vignette: one "
+    "focused paragraph (~4-8 sentences).\n"
+    "- Multi-part or structured request ('first... second...', 'teach a "
+    "resident'): cover EVERY part in the user's order, a short paragraph each, "
+    "none skipped.\n"
+    "- Always finish every sentence.\n\n"
+    "QUESTION TYPES\n"
+    "- GENERAL MEDICAL, including vignettes the user types ('A 57-year-old man "
+    "presents with...'): answer fully from your medical knowledge — most likely "
+    "answer, brief reasoning, closest alternative. Never refuse, never ask for "
+    "scan data for these.\n"
+    "- ABOUT THIS SCAN ('this case', a measured organ): quote the 'Facts:' "
+    "values verbatim with units and tie every case claim to one. Never invent "
+    "or recompute a value.\n"
+    "- CLINICAL ('is this normal', 'could this be...', symptoms, management): "
+    "say what the findings suggest, the leading possibilities and what "
+    "distinguishes them, sensible next steps, and flag anything urgent. "
+    "Educational and non-diagnostic ('suggests', 'consistent with') — but never "
+    "refuse to engage.\n\n"
+    "CONTINUITY (critical): if your last reply asked a question, the user's "
+    "next message answers it — fold it in, refine the assessment, say what it "
+    "changes, then ask the next useful question. Never restart, never call "
+    "missing what was just given, and never treat a patient described in chat "
+    "as the open scan.\n\n"
+    "ENDING\n"
+    "- If anything you would need to be more certain is missing, END with ONE "
+    "short, specific question asking for exactly that.\n"
+    "- If the answer is complete, you may still end with one short question "
+    "offering the natural next step.\n"
+    "- One question, never a list. A pure viewer command needs only a brief "
+    "confirmation."
+)
+
+# HIDDEN VISION PROMPT.
+#
+# This is the instruction set that makes attached screenshots usable. It is the
+# most important prompt in the product — BodyMaps is a vision-first application,
+# and the model has to be told exactly what the artifacts in a captured CT pane
+# mean, or it reads crosshairs as hardware and mask colors as pathology.
+_VISION_PROMPT = (
+    "\n\n=== ATTACHED CT VIEWER SCREENSHOTS — THIS IS THE PRIMARY EVIDENCE ===\n"
+    "Images from the CT viewer are attached. They are the subject of this turn: "
+    "look at them and describe what is actually there. Ground every visual "
+    "claim in something visible in a specific pane, and name the pane you saw "
+    "it in.\n\n"
+    "WHAT THE PANES ARE\n"
+    "- Up to four panes may be attached, in this order: axial (cross-section, "
+    "viewed from the feet — the patient's LEFT is on the RIGHT of the image), "
+    "sagittal (side view, anterior to one side), coronal (front view), and a 3D "
+    "surface rendering of the segmented organs.\n"
+    "- Name each pane you are describing so the reader can follow along.\n\n"
+    "OVERLAYS ARE NOT ANATOMY\n"
+    "- Semi-transparent colored regions are SEGMENTATION MASKS, one color per "
+    "organ. Identify organs using the supplied color list and never contradict "
+    "it; if a color is not in the list, say the region is unlabeled rather than "
+    "guessing an organ.\n"
+    "- Thin straight crosshair lines are slice-position guides. They are "
+    "navigation, never a wire, catheter, fracture, or vessel.\n"
+    "- Corner letters are orientation (A/P/L/R/S/I). Corner numbers are window "
+    "width/level and zoom, not measurements of the patient.\n\n"
+    "HOW TO READ\n"
+    "- Work through the user's request in the order they asked for it, covering "
+    "every part.\n"
+    "- Describe position relationally (anterior/posterior, medial/lateral, "
+    "cranial/caudal) and relative to neighboring structures.\n"
+    "- Compare paired structures (the two kidneys) for size, level, and "
+    "symmetry when relevant.\n\n"
+    "HONESTY ABOUT WHAT A SCREENSHOT CANNOT SHOW (required)\n"
+    "- A single captured slice cannot establish contrast phase, lesion "
+    "conspicuity below screen resolution, true HU values, or anything outside "
+    "the captured field of view. When the user asks what cannot be judged, say "
+    "so plainly and specifically.\n"
+    "- Never invent a finding to fill a gap. 'Not assessable from this capture' "
+    "is a correct and useful answer.\n"
+    "- If a pane is blank, black, or unreadable, say which pane and ask the "
+    "user to re-capture it. Do not describe an image you cannot see.\n\n"
+    "ENDING A VISION ANSWER\n"
+    "- Finish with ONE specific request for what you would need to SEE next — a "
+    "named slice level, a different plane, a window preset (soft tissue, liver, "
+    "bone, lung), a zoom on a named structure, or a re-capture of a pane. Make "
+    "it something the user can do in this viewer.\n"
+    "Stay educational and non-diagnostic."
+)
+
+
+def build_system_prompt(
+    *,
+    has_images: bool,
+    has_case: bool = False,
+) -> str:
+    """System prompt for one streamed turn."""
+    prompt = _BASE_PROMPT
+    if has_case:
+        prompt += (
+            "\n\nA CT case is open in the viewer. Only bring it up if the user's "
+            "question is about it."
+        )
+    if has_images:
+        prompt += _VISION_PROMPT
+    return prompt
+
+
+def build_legend_fact(mask_legend: Sequence[dict[str, Any]]) -> str | None:
+    """One line mapping every visible mask color to its organ."""
+    pairs = [
+        f"{str(entry.get('organ') or '').replace('_', ' ')}: {entry.get('color')}"
+        for entry in mask_legend or []
+        if entry.get("organ") and entry.get("color")
+    ]
+    if not pairs:
+        return None
+    return (
+        "Segmentation mask colors in the attached screenshots — "
+        + ", ".join(pairs)
+        + "."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Follow-up question guarantee
+# ---------------------------------------------------------------------------
+
+# Phrases that mean the model knows it is short of information. When one of
+# these shows up without a question mark, the reply has stated a need and then
+# failed to ask — exactly the behavior we are correcting.
+_UNCERTAINTY_MARKERS = (
+    "cannot be determined", "can't be determined", "not assessable",
+    "cannot be assessed", "can't be assessed", "would need", "i would need",
+    "not enough information", "insufficient information", "unclear from",
+    "not possible to tell", "cannot tell", "can't tell", "more information",
+    "additional information", "not visible", "not shown", "unable to",
+    "cannot confirm", "can't confirm", "further evaluation", "further imaging",
+)
+
+
+def _ends_with_question(reply: str) -> bool:
+    """Whether the reply closes by asking something.
+
+    Only the tail counts: a rhetorical question in the middle of a teaching
+    paragraph is not the assistant asking the user for anything.
+    """
+    text = _strip_markdown(reply).strip()
+    if not text:
+        return False
+    tail = text[-320:]
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", tail) if s.strip()]
+    if not sentences:
+        return False
+    return sentences[-1].endswith("?")
+
+
+def signals_missing_information(reply: str) -> bool:
+    lowered = _strip_markdown(reply).lower()
+    return any(marker in lowered for marker in _UNCERTAINTY_MARKERS)
+
+
+_WINDOW_FOR_ORGAN = {
+    "liver": "liver",
+    "pancreas": "soft tissue",
+    "gallbladder": "soft tissue",
+    "spleen": "soft tissue",
+    "kidney": "soft tissue",
+    "lung": "lung",
+    "vertebrae": "bone",
+    "rib": "bone",
+    "femur": "bone",
+    "aorta": "soft tissue",
+}
+
+_GENERIC_VISION_QUESTIONS = (
+    "Which view should I look at next — a different slice level, another plane, "
+    "or the 3D surface rendering?",
+    "Would it help if you re-captured the panes at a different slice level, or "
+    "in a different window preset?",
+    "Is there a particular structure in these views you want me to zoom in on?",
+)
+
+_GENERIC_CASE_QUESTIONS = (
+    "Would you like me to isolate any of these structures in the viewer so we "
+    "can look at them directly?",
+    "Do you want me to pull up the measurements for a specific structure in "
+    "this case?",
+)
+
+_GENERIC_CLINICAL_QUESTIONS = (
+    "What other findings, labs, or history do you have for this patient?",
+    "Is there anything else from the workup you can share so I can narrow this "
+    "down?",
+)
+
+
+def _pick(options: Sequence[str], seed_text: str) -> str:
+    """Stable, varied choice — the same question never repeats twice in a row
+    for different messages, but one message always gets the same follow-up."""
+    if not options:
+        return ""
+    return options[sum(ord(ch) for ch in seed_text[:64]) % len(options)]
+
+
+def suggest_followup(
+    message: str,
+    *,
+    has_images: bool,
+    has_case: bool,
+) -> str:
+    """One short, specific question to close a reply with.
+
+    Vision-focused whenever screenshots are in play: BodyMaps is a viewer, so
+    the most useful next step is nearly always something to LOOK at.
+    """
+    organs = organs_mentioned(message)
+
+    if has_images:
+        if organs:
+            organ = organs[0]
+            window = _WINDOW_FOR_ORGAN.get(organ, "soft tissue")
+            return (
+                f"Which {organ} slice would you like me to look at next — a "
+                f"different level, or the same one in the {window} window?"
+            )
+        return _pick(_GENERIC_VISION_QUESTIONS, message)
+
+    if has_case and organs:
+        organ = organs[0]
+        return (
+            f"Would you like me to isolate the {organ} in the viewer and capture "
+            "the views so I can look at it directly?"
+        )
+
+    if has_case:
+        return _pick(_GENERIC_CASE_QUESTIONS, message)
+
+    return _pick(_GENERIC_CLINICAL_QUESTIONS, message)
+
+
+def ensure_followup(
+    reply: str,
+    message: str,
+    *,
+    has_images: bool,
+    has_case: bool = False,
+    force: bool = False,
+) -> str:
+    """Guarantee the reply ends by asking for what it still needs.
+
+    The model is instructed to do this, but small local models drop the closing
+    question exactly when it matters most — after admitting something could not
+    be determined. `force` appends one unconditionally (used for vision turns,
+    where there is always a next thing worth looking at).
+    """
+    text = str(reply or "").rstrip()
+    if not text:
+        return text
+
+    if _ends_with_question(text):
+        return text
+
+    if not force and not signals_missing_information(text):
+        return text
+
+    question = suggest_followup(message, has_images=has_images, has_case=has_case)
+    if not question:
+        return text
+
+    separator = "\n\n" if "\n" in text else " "
+    return f"{text}{separator}{question}"
+
+
+# ---------------------------------------------------------------------------
+# Honest failure text
+# ---------------------------------------------------------------------------
+
+def model_offline_reply(
+    *,
+    has_images: bool,
+    vision_model_missing: bool = False,
+    configured_vision_model: str = "",
+) -> str:
+    """What to say when no model produced an answer.
+
+    Never a dump of whatever numbers happened to be computed for the open case:
+    that reads as a confident non-sequitur. Say what failed and what fixes it.
+    """
+    if vision_model_missing:
+        model = configured_vision_model or "qwen3-vl:4b"
+        return (
+            "I can't read the attached views right now — no vision model is "
+            f"available on this server. Pulling one (`ollama pull {model}`) and "
+            "restarting the backend will enable image reading. In the meantime "
+            "I can still answer from text, and the viewer controls in the left "
+            "panel all work.\n\n"
+            "Would you like me to answer the anatomy question from the case "
+            "measurements instead, while the model is set up?"
+        )
+
+    if has_images:
+        return (
+            "I couldn't finish reading the attached views — the local model "
+            "didn't return an answer. Please send them again in a moment.\n\n"
+            "If it keeps failing, would you re-capture the panes? A blank or "
+            "partially rendered pane can stall the read."
+        )
+
+    return (
+        "I couldn't get an answer just now — the local model didn't respond. "
+        "Please try again in a moment; the viewer controls in the left panel "
+        "still work.\n\n"
+        "Would you like me to retry the same question?"
+    )

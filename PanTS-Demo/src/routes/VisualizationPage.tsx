@@ -1543,6 +1543,10 @@ function VisualizationPage() {
 				c.height = Math.round(img.height * scale);
 				const ctx = c.getContext("2d");
 				if (!ctx) return resolve(dataUrl);
+				// JPEG has no alpha: paint the CT viewer's black ground first so a
+				// source with transparent pixels does not decode as white fringing.
+				ctx.fillStyle = "#000";
+				ctx.fillRect(0, 0, c.width, c.height);
 				ctx.drawImage(img, 0, 0, c.width, c.height);
 				resolve(c.toDataURL("image/jpeg", 0.85));
 			};
@@ -1555,14 +1559,72 @@ function VisualizationPage() {
 	// grid. The segmentation masks are left VISIBLE so the model can identify
 	// each organ by its color (paired with the mask legend). Images are
 	// downscaled before returning so the vision model responds quickly.
+	// Wait for a frame that has actually been presented. rAF never fires in a
+	// background tab, so cap the wait rather than hanging the capture.
+	const nextPresentedFrame = () =>
+		new Promise<void>((resolve) => {
+			const done = () => resolve();
+			const timer = window.setTimeout(done, 250);
+			requestAnimationFrame(() =>
+				requestAnimationFrame(() => {
+					window.clearTimeout(timer);
+					done();
+				})
+			);
+		});
+
+	// A WebGL canvas read back after its drawing buffer was cleared comes out as
+	// one flat color — the "black 3D screenshot". Sample a tiny copy so a dead
+	// capture is detected here instead of being sent to the vision model, which
+	// would then confidently describe an empty image.
+	const captureLooksBlank = (source: HTMLCanvasElement): boolean => {
+		try {
+			const probe = document.createElement("canvas");
+			probe.width = 32;
+			probe.height = 32;
+			const ctx = probe.getContext("2d", { willReadFrequently: true });
+			if (!ctx) return false;
+			ctx.drawImage(source, 0, 0, probe.width, probe.height);
+			const { data } = ctx.getImageData(0, 0, probe.width, probe.height);
+			let min = 255;
+			let max = 0;
+			for (let i = 0; i < data.length; i += 4) {
+				const luma = (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
+				if (luma < min) min = luma;
+				if (luma > max) max = luma;
+			}
+			return max - min < 4;
+		} catch {
+			return false; // unreadable canvas — assume the shot is usable
+		}
+	};
+
 	const captureAllViews = useCallback(async () => {
 		const shots: { name: string; dataUrl: string }[] = await captureViewportImages();
 		try {
 			const pane = document.querySelector<HTMLElement>(".render");
-			const canvas = pane?.querySelector<HTMLCanvasElement>("canvas");
-			if (canvas && canvas.width && pane && pane.offsetParent !== null) {
-				const url = canvas.toDataURL("image/png");
-				if (url && url.length > 128) shots.push({ name: "3d", dataUrl: url });
+			// Prefer the canvas the mesh viewer tags on creation; the positional
+			// lookup is only a fallback for an older render tree.
+			const canvas =
+				document.querySelector<HTMLCanvasElement>("canvas[data-bodymaps-3d]") ??
+				pane?.querySelector<HTMLCanvasElement>("canvas") ??
+				null;
+			const paneVisible = !pane || pane.offsetParent !== null;
+			if (canvas && canvas.width && paneVisible) {
+				await nextPresentedFrame();
+				let url = canvas.toDataURL("image/png");
+				if (captureLooksBlank(canvas)) {
+					// One more frame: the pane may have only just become visible.
+					await nextPresentedFrame();
+					url = canvas.toDataURL("image/png");
+				}
+				if (captureLooksBlank(canvas)) {
+					console.warn(
+						"[BodyMaps AI] 3D pane captured blank — omitting it rather than sending a black image"
+					);
+				} else if (url && url.length > 128) {
+					shots.push({ name: "3d", dataUrl: url });
+				}
 			}
 		} catch (error) {
 			console.warn("[BodyMaps AI] 3D capture skipped", error);
