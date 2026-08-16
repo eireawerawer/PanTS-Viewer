@@ -765,6 +765,26 @@
   white-space: nowrap;
 }
 
+/* ---- Composer warning (shown before send, e.g. no vision model) ---- */
+.ai-composer__warning {
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border: 1px solid rgba(240, 173, 78, 0.35);
+  border-radius: 9px;
+  background: rgba(240, 173, 78, 0.1);
+  color: var(--vp-text, rgba(255, 255, 255, 0.86));
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ai-composer__warning code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.28);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
 /* ---- Composer attachment chips (pending, before send) ---- */
 .ai-composer__chips {
   display: flex;
