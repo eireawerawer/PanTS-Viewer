@@ -10,12 +10,17 @@ from services.ollama_client import (
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_VISION_MODEL,
     OLLAMA_THINK,
+    OllamaModelMissing,
     OllamaUnavailable,
     chat_json,
     chat_stream,
     chat_with_tools,
+    is_reasoning_model,
     list_ollama_models,
+    resolve_text_model,
+    resolve_vision_model,
 )
+from services import ai_reasoning
 from services.segmentation_metrics import calculate_session_metrics
 from services.search_ranking import rank_quality_results, select_balanced_tumor_results
 from services.site_normalization import site_country_label, split_site_codes
@@ -2810,8 +2815,11 @@ _AI_AGENT_SYSTEM_PROMPT = (
     "FINAL ANSWER RULES: start directly with the answer (no reasoning, no "
     "preamble); never mention tools, data blocks, or any internal machinery; "
     "quote measured values verbatim with their units and never invent one; "
-    "1-3 sentences for a simple question, one short readable paragraph for a "
-    "clinical one; optionally end with one short, natural follow-up question."
+    "answer the question that was asked and never substitute an unrelated "
+    "measurement for an answer; 1-3 sentences for a simple question, one short "
+    "readable paragraph for a clinical one; END with one short, specific "
+    "question — when the next useful step is something to LOOK at, ask for that "
+    "(a slice level, a plane, a window preset, a structure to isolate)."
 )
 
 
@@ -3677,8 +3685,17 @@ def _ai_grounded_reply(
 
         return reply
 
-    # Deterministically ground exact case measurements.
-    for action in actions:
+    # Deterministically ground exact case measurements — but ONLY when the user
+    # asked for a measurement. The rule parser emits get_organ_metric whenever an
+    # organ name and a word like "size" appear anywhere in the message, which in
+    # a long clinical question is a coincidence. Returning the volume here threw
+    # away the model's actual answer and replied with an unrelated number.
+    wants_measurement = (
+        question_mode == "case_measurement"
+        or ai_reasoning.asks_for_measurement(message)
+    )
+
+    for action in (actions if wants_measurement else []):
         if action.get("type") != "get_organ_metric":
             continue
 
@@ -4111,13 +4128,20 @@ def ai_models():
         models = list_ollama_models()
         model_names = [model["name"] for model in models]
         default_model = DEFAULT_OLLAMA_MODEL if DEFAULT_OLLAMA_MODEL in model_names else (model_names[0] if model_names else DEFAULT_OLLAMA_MODEL)
+        # Report the vision model that will ACTUALLY be used, not the one that
+        # happens to be configured. When they differ, the configured model was
+        # never pulled — the single most common reason image messages fail, and
+        # something worth being able to see from a browser before a demo.
+        active_vision_model = resolve_vision_model()
         return jsonify({
             "available": True,
             "models": models,
             "default_model": default_model,
             # The model automatically used when a message carries images, so
             # the UI can show the switch the moment snapshots are attached.
-            "vision_model": DEFAULT_OLLAMA_VISION_MODEL,
+            "vision_model": active_vision_model or DEFAULT_OLLAMA_VISION_MODEL,
+            "vision_available": bool(active_vision_model),
+            "configured_vision_model": DEFAULT_OLLAMA_VISION_MODEL,
         })
     except OllamaUnavailable as error:
         return jsonify({
@@ -4125,6 +4149,8 @@ def ai_models():
             "models": [],
             "default_model": DEFAULT_OLLAMA_MODEL,
             "vision_model": DEFAULT_OLLAMA_VISION_MODEL,
+            "vision_available": False,
+            "configured_vision_model": DEFAULT_OLLAMA_VISION_MODEL,
             "error": f"Ollama is not reachable at the configured local endpoint: {error}",
         }), 200
 
@@ -4137,6 +4163,128 @@ def _ai_gate():
     record_ai_message calls at both endpoints).
     """
     return None
+
+
+def _ai_normalize_conversation(raw, limit=12, chars=2000):
+    """Defensively normalize client-supplied chat history."""
+    turns = []
+    if not isinstance(raw, list):
+        return turns
+    for turn in raw[-limit:]:
+        if not isinstance(turn, dict):
+            continue
+        role = str(turn.get("role") or "").strip()
+        content = str(turn.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            turns.append({"role": role, "content": content[:chars]})
+    return turns
+
+
+def _ai_normalize_legend(raw):
+    """Normalize the color→organ legend for the attached screenshots."""
+    legend = []
+    if not isinstance(raw, list):
+        return legend
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        organ = str(item.get("organ") or "").strip()
+        color = str(item.get("color") or "").strip()
+        if organ and color:
+            legend.append({"organ": organ, "color": color})
+    return legend
+
+
+def _ai_command_vision_reply(*, message, images, body, case_id, selected_model):
+    """Non-streaming answer for a message that carries CT screenshots.
+
+    The browser falls back to /ai-command whenever the streaming endpoint fails,
+    and a vision question is exactly the kind most likely to hit that fallback
+    (bigger payload, slower model). Answering it blind is worse than not
+    answering, so this path uses the same vision model, the same prompt, and the
+    same follow-up guarantee as the streaming endpoint — it just collects the
+    tokens into one string instead of forwarding them.
+    """
+    mask_legend = _ai_normalize_legend(body.get("mask_legend"))
+    conversation = _ai_normalize_conversation(body.get("conversation"))
+
+    vision_model = resolve_vision_model(selected_model)
+
+    if not vision_model:
+        return jsonify({
+            "reply": ai_reasoning.model_offline_reply(
+                has_images=True,
+                vision_model_missing=True,
+                configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+            ),
+            "actions": [],
+            "source": "vision_model_unavailable",
+            "model": None,
+            "intent": "read_images",
+        })
+
+    user_prompt = (
+        f"{len(images)} CT viewer screenshot(s) are attached to this message, "
+        "in the viewer's pane order (axial, sagittal, coronal, then the 3D "
+        "surface rendering when present). Look at them before answering.\n\n"
+        f"{message or 'Describe what is shown in the attached views.'}"
+    )
+
+    legend_fact = ai_reasoning.build_legend_fact(mask_legend)
+    if legend_fact:
+        user_prompt += f"\n\nFacts:\n- {legend_fact}"
+
+    collected = ""
+    try:
+        for kind, text in chat_stream(
+            model=vision_model,
+            system_prompt=ai_reasoning.build_system_prompt(
+                has_images=True,
+                has_case=bool(case_id),
+            ),
+            user_prompt=user_prompt,
+            images=images,
+            history=conversation[-6:],
+        ):
+            if kind == "content" and text:
+                collected += text
+    except OllamaModelMissing as error:
+        print(f"[ai_command vision] model '{vision_model}' not installed: {error}")
+        collected = ""
+    except (OllamaUnavailable, Exception) as error:
+        print("[ai_command vision]", type(error).__name__, str(error))
+        collected = ""
+
+    reply = _ai_strip_think(
+        collected,
+        orphan_closer=is_reasoning_model(vision_model),
+    ).strip()
+
+    if not reply:
+        return jsonify({
+            "reply": ai_reasoning.model_offline_reply(
+                has_images=True,
+                configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+            ),
+            "actions": [],
+            "source": "rule_fallback",
+            "model": None,
+            "intent": "read_images",
+        })
+
+    return jsonify({
+        "reply": ai_reasoning.ensure_followup(
+            reply,
+            message,
+            has_images=True,
+            has_case=bool(case_id),
+            force=True,
+        ),
+        "actions": [],
+        "source": "ollama",
+        "model": vision_model,
+        "intent": "read_images",
+    })
 
 
 @api_blueprint.route("/ai-command", methods=["POST"])
@@ -4209,6 +4357,31 @@ def ai_command():
             and requested_model.strip()
             else DEFAULT_OLLAMA_MODEL
         )
+
+        # Attached CT screenshots. This endpoint is what the browser retries on
+        # when the streaming call fails, so it has to be able to read images
+        # too: previously it dropped them silently and answered from text alone,
+        # producing a confident description of views it had never looked at.
+        raw_images = body.get("images") if isinstance(body.get("images"), list) else []
+        images = []
+        for item in raw_images:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            value = item.strip()
+            if value.startswith("data:"):
+                comma = value.find(",")
+                if comma != -1:
+                    value = value[comma + 1:]
+            images.append(value)
+
+        if images:
+            return _ai_command_vision_reply(
+                message=message,
+                images=images,
+                body=body,
+                case_id=case_id,
+                selected_model=selected_model,
+            )
 
         metrics, metric_source = _ai_load_metrics(
             case_id,
@@ -4343,14 +4516,19 @@ def ai_command():
                 or question_mode
             )
 
-        reply = _ai_grounded_reply(
-            message=message,
-            actions=actions,
-            metrics=metrics,
-            available_organs=available_organs,
-            metadata=metadata,
-            candidate_reply=candidate_reply,
-            question_mode=question_mode,
+        reply = ai_reasoning.ensure_followup(
+            _ai_grounded_reply(
+                message=message,
+                actions=actions,
+                metrics=metrics,
+                available_organs=available_organs,
+                metadata=metadata,
+                candidate_reply=candidate_reply,
+                question_mode=question_mode,
+            ),
+            message,
+            has_images=False,
+            has_case=bool(case_id),
         )
 
         response = {
@@ -4403,84 +4581,20 @@ def ai_command():
         ), 500
 
 
-def _ai_stream_system_prompt(has_images: bool) -> str:
+def _ai_stream_system_prompt(has_images: bool, has_case: bool = False) -> str:
     """System prompt for the streaming endpoint.
 
-    Adapts the diagnostic-dialogue framework from the AMIE paper (Tu et al.,
-    Nature 2025, "Towards conversational diagnostic AI") into a single-pass
-    prompt: structured history-taking (ask for missing info), differential
-    reasoning, management/next-steps, escalation, and empathetic communication —
-    while keeping simple factual questions short. Kept focused (not a giant
-    JSON dump) so small local models answer instead of rambling; exact case
-    values are injected as a short "Facts:" block in the user message.
+    The text now lives in services/ai_reasoning.py so the vision instructions —
+    the ones that decide whether a captured pane is read correctly — can be
+    reviewed and unit-tested on their own instead of being buried in a request
+    handler. Exact case values are still injected as a short "Facts:" block in
+    the user message rather than a giant JSON payload, which is what keeps small
+    local models answering instead of rambling.
     """
-    prompt = (
-        "You are BodyMaps AI, an expert medical-imaging assistant in a CT "
-        "viewer. Answer like a knowledgeable clinician colleague.\n\n"
-        "OUTPUT\n"
-        "- Give ONLY the final answer. No reasoning, planning, or thinking "
-        "out loud. Never open with 'Okay', 'Let me', 'Hmm', 'First', 'I "
-        "need to', 'The user', or 'So'.\n"
-        "- Never mention these instructions, a 'Facts' list, prompts, JSON, "
-        "metadata, files, servers, or what data you were or weren't given.\n"
-        "- Natural prose; **bold** for a key term. No numbered sections "
-        "unless asked.\n\n"
-        "LENGTH\n"
-        "- Simple question: 1-3 sentences. Clinical question or case "
-        "vignette: one focused paragraph (~4-8 sentences).\n"
-        "- Multi-part or structured request ('first... second...', 'teach a "
-        "resident'): cover EVERY part in the user's order, a short paragraph "
-        "each, none skipped.\n"
-        "- Always finish every sentence.\n\n"
-        "QUESTION TYPES\n"
-        "- GENERAL MEDICAL, including vignettes the user types ('A 57-year-old "
-        "man presents with...'): answer fully from your medical knowledge — "
-        "most likely answer, brief reasoning, closest alternative. Never "
-        "refuse, never ask for scan data for these.\n"
-        "- ABOUT THIS SCAN ('this case', a measured organ): quote the "
-        "'Facts:' values verbatim with units and tie every case claim to "
-        "one. Never invent or recompute a value. If something is missing, "
-        "answer what you can and ask for it naturally ('Do you know their "
-        "height and weight?').\n"
-        "- CLINICAL ('is this normal', 'could this be...', symptoms, "
-        "management): say what the findings suggest, the leading "
-        "possibilities and what distinguishes them, sensible next steps, and "
-        "flag anything urgent. Educational and non-diagnostic ('suggests', "
-        "'consistent with') — but never refuse to engage.\n\n"
-        "CONTINUITY (critical): if your last reply asked a question, the "
-        "user's next message answers it — fold it in, refine the assessment, "
-        "say what it changes, ask the next useful question. Never restart, "
-        "never call missing what was just given, and never treat a patient "
-        "described in chat as the open scan.\n\n"
-        "Close with ONE short, natural follow-up question when it helps; "
-        "skip it when the topic is closed. A viewer command needs only a "
-        "brief confirmation."
+    return ai_reasoning.build_system_prompt(
+        has_images=has_images,
+        has_case=has_case,
     )
-    if has_images:
-        # HIDDEN PROMPT — SCREENSHOT ARTIFACTS (crosshairs + color segmentation).
-        # Tells the model how to read a captured CT screenshot: it WILL contain
-        # (1) semi-transparent colored segmentation masks and (2) thin crosshair
-        # reference lines. The model names organs by mask color (via the legend)
-        # and treats crosshairs as navigation, not anatomy.
-        prompt += (
-            "\n\nATTACHED IMAGES\n"
-            "CT viewer screenshots are attached (axial, sagittal, coronal, "
-            "sometimes 3D). Answer any question about them as fully as you "
-            "can: identify organs, describe the anatomy and anything notable, "
-            "compare views. If you need a different slice, view, or window, "
-            "say what you can and then ask for it.\n"
-            "- Semi-transparent colored shapes are segmentation masks, one "
-            "color per organ. Name organs using the provided color list; "
-            "never contradict it.\n"
-            "- Thin crosshair lines are slice-position guides — navigation, "
-            "never anatomy, a wire, or a fracture.\n"
-            "- Corner letters are orientation (A/P/L/R/S/I); corner numbers "
-            "are window width/level; the 3D view shows the same organs as "
-            "colored surfaces.\n"
-            "Keep the anatomy separate from these overlays; stay "
-            "non-diagnostic."
-        )
-    return prompt
 
 
 @api_blueprint.route("/ai-command-stream", methods=["POST"])
@@ -4663,14 +4777,33 @@ def ai_command_stream():
             if fallback_actions:
                 yield sse({"type": "actions", "actions": fallback_actions})
 
-            exact_facts = _ai_case_facts(message, metrics, metadata) if references_case else []
-
             # Exact measurement sentences that MUST appear when the user asked
             # for an organ metric (guarantees the volume is always answered).
             required_facts = _ai_required_metric_facts(fallback_actions, metrics, available_organs)
-            for fact in required_facts:
-                if fact not in exact_facts:
-                    exact_facts.append(fact)
+
+            # Measured values for the open case are only allowed into the answer
+            # when the question is actually about them. Previously every fact
+            # that had been computed was appended, so a message carrying a
+            # patient's bilirubin and MRCP report came back with the open scan's
+            # liver volume and the patient's age — correct numbers, and a
+            # complete non-answer to what was asked.
+            conversation_text = " ".join(turn["content"] for turn in conversation[-4:])
+            candidate_facts = _ai_case_facts(message, metrics, metadata) if references_case else []
+            forced_facts = (
+                required_facts
+                if (
+                    question_mode == "case_measurement"
+                    or ai_reasoning.asks_for_measurement(message)
+                )
+                else []
+            )
+            exact_facts = ai_reasoning.relevant_facts(
+                candidate_facts + required_facts,
+                message,
+                conversation_text=conversation_text,
+                always_include=forced_facts,
+            )
+            required_facts = forced_facts
 
             # A clean, buttonless confirmation of any viewer action (never the
             # rule parser's "click below ..." text, which has no button here).
@@ -4824,23 +4957,30 @@ def ai_command_stream():
             # actually needs. (A giant JSON payload makes small models ramble.)
             facts_lines = list(dict.fromkeys([f for f in (exact_facts + required_facts) if f]))
             if images and mask_legend:
-                legend_str = ", ".join(
-                    f"{str(e['organ']).replace('_', ' ')}: {e['color']}" for e in mask_legend
-                )
-                facts_lines.append(f"Segmentation mask colors — {legend_str}.")
+                legend_fact = ai_reasoning.build_legend_fact(mask_legend)
+                if legend_fact:
+                    facts_lines.append(legend_fact)
 
-            user_prompt = message or "Describe what is shown."
-            if conversation:
-                # Enough turns and characters that a long clinical vignette
-                # from earlier in the chat survives intact — a 200-char cap
-                # decapitated the case story and broke follow-up questions.
-                recent = conversation[-4:]
-                convo_str = "\n".join(
-                    f"{t['role']}: {t['content'][:800]}" for t in recent
+            user_prompt = message or "Describe what is shown in the attached views."
+            if images:
+                # Name the attachments explicitly. Without this the model has to
+                # infer from the images alone which pane is which, and a request
+                # phrased "for each pane" gets answered as one blended image.
+                user_prompt = (
+                    f"{len(images)} CT viewer screenshot(s) are attached to this "
+                    "message, in the viewer's pane order (axial, sagittal, "
+                    "coronal, then the 3D surface rendering when present). Look "
+                    "at them before answering.\n\n"
+                    f"{user_prompt}"
                 )
-                user_prompt = f"Recent conversation:\n{convo_str}\n\nQuestion: {user_prompt}"
             if facts_lines:
                 user_prompt += "\n\nFacts:\n" + "\n".join(f"- {f}" for f in facts_lines)
+
+            # Prior turns are sent as real conversation messages instead of being
+            # flattened into the prompt text: a model that can see its own last
+            # reply continues the thread, which is what makes "here are the labs
+            # you asked for" attach to the question that asked for them.
+            history = conversation[-6:]
         except Exception as error:
             print("[ai_command_stream setup error]", type(error).__name__, str(error))
             yield sse({"type": "error", "message": "An internal error occurred while preparing the answer."})
@@ -4848,16 +4988,42 @@ def ai_command_stream():
             return
 
         # Stream the model answer.
-        vision_model = None
+        #
+        # Vision is the point of this product, so the model that reads images is
+        # resolved against what is actually installed rather than assumed. The
+        # old code sent the configured name blindly; when that model had never
+        # been pulled (qwen3-vl needs Ollama 0.12.7+), every image message failed
+        # at the first byte and the user was told the assistant was unavailable.
+        vision_missing = False
         if images:
-            vision_model = (
-                DEFAULT_OLLAMA_VISION_MODEL
-                if DEFAULT_OLLAMA_VISION_MODEL
-                else selected_model
-            )
+            vision_model = resolve_vision_model(selected_model)
+            if not vision_model:
+                vision_missing = True
+                model_for_call = None
+            else:
+                model_for_call = vision_model
+        else:
+            model_for_call = resolve_text_model(selected_model)
 
-        model_for_call = vision_model or selected_model
         model_ok = False
+
+        if vision_missing:
+            offline = ai_reasoning.model_offline_reply(
+                has_images=True,
+                vision_model_missing=True,
+                configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+            )
+            yield sse({"type": "reply", "delta": offline})
+            yield sse({
+                "type": "final",
+                "reply": offline,
+                "actions": fallback_actions,
+                "source": "vision_model_unavailable",
+                "model": None,
+                "intent": fallback.get("intent") or question_mode,
+            })
+            yield sse({"type": "done"})
+            return
 
         yield sse({"type": "status", "text": "Composing the answer"})
 
@@ -4868,8 +5034,9 @@ def ai_command_stream():
         # real answer while it streams. For those models, hold the text back
         # until a think tag proves where the reasoning ends (or the stream
         # finishes); non-reasoning models (llama3.1, qwen3-vl) stream live.
-        hold_for_think = bool(_AI_REASONING_MODEL_RE.search(model_for_call or ""))
+        hold_for_think = is_reasoning_model(model_for_call or "")
         stream_error = False
+        stream_error_missing_model = False
         if agent_final is not None:
             # The agent loop already wrote the answer (and it is already
             # think-stripped) — emit it directly instead of generating twice.
@@ -4881,9 +5048,13 @@ def ai_command_stream():
             try:
                 for kind, text in chat_stream(
                     model=model_for_call,
-                    system_prompt=_ai_stream_system_prompt(bool(images)),
+                    system_prompt=_ai_stream_system_prompt(
+                        bool(images),
+                        has_case=bool(case_id),
+                    ),
                     user_prompt=user_prompt,
                     images=images or None,
+                    history=history,
                 ):
                     if not text:
                         continue
@@ -4904,6 +5075,13 @@ def ai_command_stream():
                         emitted = cleaned
                         model_ok = True
                         yield sse({"type": "reply", "delta": delta})
+            except OllamaModelMissing as error:
+                stream_error = True
+                stream_error_missing_model = True
+                print(
+                    f"[ai_command_stream] model '{model_for_call}' is not "
+                    f"installed on the Ollama host: {error}"
+                )
             except OllamaUnavailable as error:
                 stream_error = True
                 print("[ai_command_stream] Ollama unavailable:", str(error))
@@ -4948,30 +5126,47 @@ def ai_command_stream():
                         final_reply += "\n\n" + fact
             except Exception as error:
                 print("[ai_command_stream fact-check]", type(error).__name__, str(error))
+
+            # Guarantee the closing question. The prompt asks for one, but small
+            # local models drop it exactly when it matters — right after saying
+            # something could not be determined. On vision turns it is always
+            # appended, because there is always a next thing worth looking at.
+            final_reply = ai_reasoning.ensure_followup(
+                final_reply,
+                message,
+                has_images=bool(images),
+                has_case=bool(case_id),
+                force=bool(images),
+            )
         else:
-            # Model offline/empty -> build a clean deterministic reply. Order:
-            # image color legend, then viewer-action confirmation + measured
-            # value(s), then a short friendly message. Never the rule parser's
-            # "click below ..." text or a scary "verify Ollama" string.
+            # No model answer. Say so honestly.
+            #
+            # This branch used to concatenate whatever measurements had been
+            # computed for the open case and present them as the reply, which is
+            # how a question about a patient's bilirubin was answered with
+            # "The liver volume is 1209.11 cm³ ... Age: 52.0". A viewer action
+            # the user asked for is still worth confirming, but a bare list of
+            # unrelated numbers is not an answer to anything.
             parts = []
-            if images and mask_legend:
+            if action_confirmation:
+                parts.append(action_confirmation)
+            if images and mask_legend and _ai_norm(message):
                 legend_reply = _ai_legend_answer(message, mask_legend)
                 if legend_reply:
                     parts.append(legend_reply)
-            if action_confirmation:
-                parts.append(action_confirmation)
-            parts.extend(required_facts)
-            if parts:
-                final_reply = " ".join(parts)
-            else:
-                final_reply = (
-                    "I couldn't get an answer just now — please try again in a moment."
+            parts.append(
+                ai_reasoning.model_offline_reply(
+                    has_images=bool(images),
+                    vision_model_missing=stream_error_missing_model and bool(images),
+                    configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
                 )
+            )
+            final_reply = " ".join(part for part in parts if part).strip()
 
         if not final_reply:
-            final_reply = (
-                "I could not generate a response. The local model may be "
-                "offline — viewer controls still work from the left panel."
+            final_reply = ai_reasoning.model_offline_reply(
+                has_images=bool(images),
+                configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
             )
 
         yield sse({
