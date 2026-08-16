@@ -45,6 +45,7 @@ import { track } from "../helpers/analytics";
 import { buildViewerActions } from "../components/AIAssistant/assistantActions";
 import MeasurementPanel from "../components/MeasurementPanel/MeasurementPanel";
 import { SegmentationMeshViewer } from "../components/viewer/MeshViewer";
+import { captureMeshCanvas } from "../helpers/viewer/meshCapture";
 import OrganCheckbox from "../components/OrganCheckbox";
 import PercentileBar from "../components/PercentileBar";
 import SessionHUD from "../components/ReadingSession/SessionHUD";
@@ -1573,57 +1574,70 @@ function VisualizationPage() {
 			);
 		});
 
-	// A WebGL canvas read back after its drawing buffer was cleared comes out as
-	// one flat color — the "black 3D screenshot". Sample a tiny copy so a dead
-	// capture is detected here instead of being sent to the vision model, which
-	// would then confidently describe an empty image.
-	const captureLooksBlank = (source: HTMLCanvasElement): boolean => {
-		try {
-			const probe = document.createElement("canvas");
-			probe.width = 32;
-			probe.height = 32;
-			const ctx = probe.getContext("2d", { willReadFrequently: true });
-			if (!ctx) return false;
-			ctx.drawImage(source, 0, 0, probe.width, probe.height);
-			const { data } = ctx.getImageData(0, 0, probe.width, probe.height);
-			let min = 255;
-			let max = 0;
-			for (let i = 0; i < data.length; i += 4) {
-				const luma = (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
-				if (luma < min) min = luma;
-				if (luma > max) max = luma;
-			}
-			return max - min < 4;
-		} catch {
-			return false; // unreadable canvas — assume the shot is usable
-		}
-	};
+	// A WebGL readback that lost its drawing buffer comes out as one flat color —
+	// the "black 3D screenshot". Sample the CAPTURED IMAGE (not the canvas, which
+	// may have been redrawn since) so a dead capture is caught here instead of
+	// being sent to the vision model, which would then confidently describe it.
+	const imageLooksBlank = (dataUrl: string): Promise<boolean> =>
+		new Promise((resolve) => {
+			const img = new Image();
+			img.onload = () => {
+				try {
+					const probe = document.createElement("canvas");
+					probe.width = 32;
+					probe.height = 32;
+					const ctx = probe.getContext("2d", { willReadFrequently: true });
+					if (!ctx) return resolve(false);
+					ctx.drawImage(img, 0, 0, probe.width, probe.height);
+					const { data } = ctx.getImageData(0, 0, probe.width, probe.height);
+					let min = 255;
+					let max = 0;
+					for (let i = 0; i < data.length; i += 4) {
+						const luma = (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
+						if (luma < min) min = luma;
+						if (luma > max) max = luma;
+					}
+					resolve(max - min < 4);
+				} catch {
+					resolve(false); // unreadable — assume the shot is usable
+				}
+			};
+			img.onerror = () => resolve(true);
+			img.src = dataUrl;
+		});
 
 	const captureAllViews = useCallback(async () => {
 		const shots: { name: string; dataUrl: string }[] = await captureViewportImages();
 		try {
 			const pane = document.querySelector<HTMLElement>(".render");
-			// Prefer the canvas the mesh viewer tags on creation; the positional
-			// lookup is only a fallback for an older render tree.
-			const canvas =
-				document.querySelector<HTMLCanvasElement>("canvas[data-bodymaps-3d]") ??
-				pane?.querySelector<HTMLCanvasElement>("canvas") ??
-				null;
 			const paneVisible = !pane || pane.offsetParent !== null;
-			if (canvas && canvas.width && paneVisible) {
-				await nextPresentedFrame();
-				let url = canvas.toDataURL("image/png");
-				if (captureLooksBlank(canvas)) {
-					// One more frame: the pane may have only just become visible.
-					await nextPresentedFrame();
-					url = canvas.toDataURL("image/png");
+			if (paneVisible) {
+				// Preferred path: have the mesh viewer draw a frame and hand back the
+				// pixels in one synchronous step. Querying the canvas and reading it
+				// afterwards races the compositor, which is what left the 3D pane
+				// solid black even with preserveDrawingBuffer set.
+				let url = captureMeshCanvas();
+
+				if (!url) {
+					// Fallback for a render tree that never registered a handle.
+					const canvas =
+						document.querySelector<HTMLCanvasElement>("canvas[data-bodymaps-3d]") ??
+						pane?.querySelector<HTMLCanvasElement>("canvas") ??
+						null;
+					if (canvas && canvas.width) {
+						await nextPresentedFrame();
+						url = canvas.toDataURL("image/png");
+					}
 				}
-				if (captureLooksBlank(canvas)) {
-					console.warn(
-						"[BodyMaps AI] 3D pane captured blank — omitting it rather than sending a black image"
-					);
-				} else if (url && url.length > 128) {
-					shots.push({ name: "3d", dataUrl: url });
+
+				if (url && url.length > 128) {
+					if (await imageLooksBlank(url)) {
+						console.warn(
+							"[BodyMaps AI] 3D pane read back blank — omitting it rather than sending a black image"
+						);
+					} else {
+						shots.push({ name: "3d", dataUrl: url });
+					}
 				}
 			}
 		} catch (error) {

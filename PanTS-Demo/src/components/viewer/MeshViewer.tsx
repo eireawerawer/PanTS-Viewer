@@ -1,5 +1,6 @@
 import { Bounds, OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
+import { registerMeshRoot } from "../../helpers/viewer/meshCapture";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { APP_CONSTANTS } from "../../helpers/constants";
 import { cornerstoneLpsMmToThree, type Vec3 } from "../../helpers/utils";
@@ -45,6 +46,10 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
     return unsubscribe;
   }, []);
 
+  // Drop the renderer handle when this pane goes away, so a capture can never
+  // reach into a disposed WebGL context.
+  useEffect(() => () => registerMeshRoot(null), []);
+
   // Segment indices touched since the case loaded — includes edits to the STATIC
   // 32-organ catalog, not just brand-new custom classes.
   const editedSegments = useMemo(() => getEditedSegments(), [editVersion]);
@@ -88,8 +93,9 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
           camera={{ position: [0, 250, 650], fov: 45, near: 0.1, far: 5000 }}
           gl={{ preserveDrawingBuffer: true, antialias: true }}
           frameloop="always"
-          onCreated={({ gl }) => {
-            gl.domElement.setAttribute("data-bodymaps-3d", "1");
+          onCreated={(state) => {
+            registerMeshRoot(state);
+            state.gl.domElement.setAttribute("data-bodymaps-3d", "1");
           }}
         >
           <color attach="background" args={["#050505"]} />
