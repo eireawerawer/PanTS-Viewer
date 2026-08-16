@@ -125,6 +125,29 @@ def update_name(user_id: str, name: str | None) -> dict | None:
         return user.to_public_dict()
 
 
+ACCOUNT_TYPES = ("patient", "clinician", "researcher", "student")
+
+
+def update_account_type(user_id: str, account_type: str | None) -> dict | None:
+    """Set the self-reported account type. None (or empty) clears it back to
+    "not set", which is a real answer and not a failure.
+
+    Raises ValueError on anything outside ACCOUNT_TYPES — unlike the display
+    name this is a closed set, and analytics grouped by a free-text field would
+    be worthless.
+    """
+    value = (account_type or "").strip().lower() or None
+    if value is not None and value not in ACCOUNT_TYPES:
+        raise ValueError(f"Unknown account type {account_type!r}")
+    with session_scope() as s:
+        user = s.get(User, user_id)
+        if user is None or user.is_system:
+            return None
+        user.account_type = value
+        s.flush()
+        return user.to_public_dict()
+
+
 def authenticate(email: str, password: str) -> dict | None:
     """Return the user's public dict if the password matches, else None.
 

@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import Preview from "../../../../components/Preview";
 import type { CaseId } from "../../../../helpers/search";
 import type { SavedCase } from "../../../../helpers/savedCases";
@@ -30,6 +31,33 @@ export default function CaseGrid({
   onToggleSave,
   onToggleCompare,
 }: Props) {
+  // Synchronized reveal: hold every card of a fresh batch hidden (spinner) until
+  // they've all settled — loaded or errored — then reveal them together, so the
+  // grid never pops in card-by-card at the speed of the fastest thumbnail.
+  const gridIds = !showSaved && !loading ? previewIds : [];
+  const idsKey = gridIds.join(",");
+  const [revealAll, setRevealAll] = useState(false);
+  const settledRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    settledRef.current = new Set();
+    if (gridIds.length === 0) {
+      setRevealAll(true);
+      return;
+    }
+    setRevealAll(false);
+    // Safety cap: never let one slow/stuck thumbnail hold the whole grid hostage.
+    // Kept short since thumbnails are small, eager-loaded, and immutably cached.
+    const t = setTimeout(() => setRevealAll(true), 2500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idsKey]);
+
+  const handleSettled = (id: CaseId) => {
+    settledRef.current.add(String(id));
+    if (settledRef.current.size >= gridIds.length) setRevealAll(true);
+  };
+
   if (showSaved && savedCases.length === 0) {
     return (
       <div className={styles.emptyState}>
@@ -67,6 +95,8 @@ export default function CaseGrid({
                 onToggleSave={() => onToggleSave(id)}
                 compareSelected={compareIds.includes(id)}
                 onToggleCompare={() => onToggleCompare(id)}
+                reveal={revealAll}
+                onSettled={() => handleSettled(id)}
               />
             ))}
     </div>

@@ -4,7 +4,7 @@
   flex-direction: column;
   background: #08090b;
   color: #f4f5f7;
-  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   overflow: hidden;
 
   /* Re-declare the single viewer's design tokens so its vp-* classes (reused in the
@@ -19,8 +19,8 @@
   --vp-text-faint: rgba(255, 255, 255, 0.36);
   --vp-hover: rgba(255, 255, 255, 0.1);
   --vp-accent: #6ea8fe;
-  --vp-font: "Space Grotesk", system-ui, sans-serif;
-  --vp-mono: "JetBrains Mono", ui-monospace, monospace;
+  --vp-font: var(--font-sans);
+  --vp-mono: var(--font-mono);
 }
 
 .cmv__bar {
@@ -47,7 +47,7 @@
 .cmv__home:hover { background: rgba(255, 255, 255, 0.08); }
 .cmv__title { font-size: 16px; font-weight: 600; margin: 0; }
 .cmv__ids {
-  font-family: "Space Mono", monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 13px;
   color: rgba(255, 255, 255, 0.5);
   font-weight: 400;
@@ -99,7 +99,7 @@
 
 .cmv__msg { margin: auto; color: rgba(255, 255, 255, 0.55); font-size: 14px; }
 .cmv__msg code {
-  font-family: "Space Mono", monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   background: rgba(255, 255, 255, 0.08);
   padding: 2px 6px;
   border-radius: 5px;
@@ -132,7 +132,7 @@
   top: 8px;
   left: 10px;
   z-index: 2;
-  font-family: "Space Mono", monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 12px;
   font-weight: 600;
   color: #fff;
@@ -146,7 +146,7 @@
   bottom: 8px;
   left: 10px;
   z-index: 2;
-  font-family: "Space Mono", monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;

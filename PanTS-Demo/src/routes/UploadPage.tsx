@@ -7,6 +7,19 @@ import React, {
   useState,
 } from "react";
 
+// LesionSegmenter's four lesions, offered as a macOS-style submenu off the model
+// item. Only pancreatic is GT-validated; the rest are flagged experimental.
+const LESION_OPTIONS: {
+  id: "pancreatic" | "liver" | "kidney" | "colon";
+  label: string;
+  experimental?: boolean;
+}[] = [
+  { id: "pancreatic", label: "Pancreatic lesion" },
+  { id: "liver", label: "Liver lesion", experimental: true },
+  { id: "kidney", label: "Kidney lesion", experimental: true },
+  { id: "colon", label: "Colon lesion", experimental: true },
+];
+
 const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "None",
@@ -54,6 +67,8 @@ const DicomPreview = lazy(() => import("../components/CtPreview/DicomPreview"));
 import { API_BASE } from "../helpers/constants";
 import {
   addRecentUpload,
+  friendlyScanName,
+  renameRecentUpload,
   formatRelativeTime,
   groupUploads,
   isGroupInFlight,
@@ -67,6 +82,7 @@ import {
 import Header from "../components/Header";
 import ProcessingSummaryBar from "../components/ProcessingSummaryBar";
 import BatchDetailsModal from "../components/BatchDetailsModal";
+import { track } from "../helpers/analytics";
 import UpgradeDialog, { type UpgradeBlock } from "../components/UpgradeDialog";
 import { useAuth } from "../contexts/authContext";
 import {
@@ -87,6 +103,7 @@ import {
   type PendingUpload,
 } from "../helpers/pendingUploads";
 import { postWithRetry, resolveResumeStart } from "../helpers/chunkUpload";
+import SiteFooter from "../components/SiteFooter";
 
 const parseApiResponse = async (res: Response): Promise<any> => {
   const contentType = res.headers.get("content-type") || "";
@@ -98,6 +115,18 @@ const parseApiResponse = async (res: Response): Promise<any> => {
   throw new Error(
     `Expected JSON but got ${contentType || "unknown content-type"} (HTTP ${res.status}). Body: ${shortBody}`,
   );
+};
+
+const formatBytes = (bytes: number): string => {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
 };
 
 // Coarse on purpose: a to-the-second countdown on a throughput estimate reads as
@@ -199,6 +228,18 @@ const UploadPage: React.FC = () => {
   const [recentUploads, setRecentUploads] = useState<RecentUpload[]>(() =>
     loadRecentUploads(),
   );
+  // Inline rename of a scan in the history list: which one is being edited and
+  // the working text.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const startRename = (u: RecentUpload) => {
+    setRenamingId(u.sessionId);
+    setRenameValue(u.label);
+  };
+  const commitRename = () => {
+    if (renamingId) setRecentUploads(renameRecentUpload(renamingId, renameValue));
+    setRenamingId(null);
+  };
   // Which batch's "View details" popup is open (null = none).
   const [detailsBatchId, setDetailsBatchId] = useState<string | null>(null);
   // Sub-state of each Active card: "waiting" | "uploading" | "queued" | "running".
@@ -244,6 +285,7 @@ const UploadPage: React.FC = () => {
       alert("Please select .nii or .nii.gz files only");
       return;
     }
+    track("upload_files_selected");
     setSelectedItems((prev) => [
       ...prev,
       ...filteredFiles.map((f) => ({
@@ -267,6 +309,7 @@ const UploadPage: React.FC = () => {
       alert("Please drop .nii or .nii.gz files only");
       return;
     }
+    track("upload_files_selected");
     setSelectedItems((prev) => [
       ...prev,
       ...filteredFiles.map((f) => ({
@@ -304,7 +347,9 @@ const UploadPage: React.FC = () => {
     e.target.value = ""; // allow re-picking the same folder later
     const candidates = files.filter(looksLikeDicom);
     if (!candidates.length) {
-      alert("No DICOM files (.dcm) found in the selected folder.");
+      alert(
+        "No DICOM files found. Pick the folder holding the .dcm slices — or, on a phone or tablet (where folders can't be picked), select the slice files themselves.",
+      );
       return;
     }
     setSelectedItems((prev) => [
@@ -406,6 +451,7 @@ const UploadPage: React.FC = () => {
   // kills a queued/running server job.
   const cancelRun = (upload: RecentUpload) => {
     const sid = upload.sessionId;
+    track("upload_cancel_inference");
     stopPolling(sid);
     setPhase(sid);
 
@@ -627,7 +673,9 @@ const UploadPage: React.FC = () => {
       refreshUsage(); // a scan was just spent; keep the settings counter honest
       setSessionId(sid);
       setPhase(sid, "queued"); // server queues for the GPU; poll refines this
-      if (foreground) setMessage(`${model} inference started. Session: ${sid}`);
+      // No status-line message here: the processing card below already shows
+      // "Running..." for this session, so a raw-UUID line would just duplicate it.
+      if (foreground) setMessage("");
       startInferencePolling(sid, model);
     } catch (err) {
       if (controller.signal.aborted) return;
@@ -949,15 +997,21 @@ const UploadPage: React.FC = () => {
     batch?: { batchId: string; batchLabel: string },
   ) => {
     const sid = crypto.randomUUID();
-    const label = (item.kind === "dicom" ? item.label : item.file.name) || sid;
+    const ts = Date.now();
+    // Keep the raw filename for reference, but name the scan meaningfully by
+    // default (model + date); the user can rename it later.
+    const sourceName = (item.kind === "dicom" ? item.label : item.file.name) || undefined;
+    const label = friendlyScanName(model, ts);
 
+    track("upload_start_inference");
     setRecentUploads(
       addRecentUpload({
         sessionId: sid,
         label,
+        sourceName,
         model,
         status: "Processing",
-        timestamp: Date.now(),
+        timestamp: ts,
         isReconstruction: model === "OpenVAE",
         batchId: batch?.batchId,
         batchLabel: batch?.batchLabel,
@@ -1189,10 +1243,15 @@ const UploadPage: React.FC = () => {
             <input
               // Set the folder-picker attributes imperatively — passing webkitdirectory
               // as a JSX/spread prop doesn't reliably apply it, so the picker falls back
-              // to single files. directory is the Firefox spelling.
+              // to single files. The IDL property is set too: engines disagree on which
+              // one they read when it's applied after the element is parsed. On iOS and
+              // Android none of this has any effect (no browser there can pick a folder),
+              // so the picker hands back plain files — handleDicomInferenceSelect takes
+              // any file list, so selecting the slices themselves works there.
               ref={(el) => {
                 dicomUploadInputRef.current = el;
                 if (el) {
+                  el.webkitdirectory = true;
                   el.setAttribute("webkitdirectory", "");
                   el.setAttribute("directory", "");
                 }
@@ -1240,19 +1299,35 @@ const UploadPage: React.FC = () => {
             </div>
           </div>
 
-          {/* ── Selected items: NIfTI files + DICOM series, each individually previewable ── */}
+          {/* ── Selected items: NIfTI files + DICOM series, each individually previewable ──
+              Card rows (matching the Completed Uploads treatment below) instead of small
+              inline pills, so a selected file reads as clearly as everything else on the
+              page rather than looking like a stray tag. */}
           {selectedItems.length > 0 && (
             <div className="file-chips">
               {selectedItems.map((item) => {
                 const name =
                   item.kind === "dicom" ? item.label : item.file.name;
+                const subtext =
+                  item.kind === "dicom"
+                    ? `DICOM series · ${item.files.length} slice${item.files.length === 1 ? "" : "s"}`
+                    : `NIfTI · ${formatBytes(item.file.size)}`;
                 const isOpen = previewItemId === item.id;
                 return (
                   <div
                     key={item.id}
                     className={`file-chip${isOpen ? " file-chip--active" : ""}`}
                   >
-                    <span className="file-chip-name">{name}</span>
+                    <span className="file-chip-icon" aria-hidden="true">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                      </svg>
+                    </span>
+                    <span className="file-chip-text">
+                      <span className="file-chip-name">{name}</span>
+                      <span className="file-chip-sub">{subtext}</span>
+                    </span>
                     <button
                       className="file-chip-preview"
                       onClick={() =>
@@ -1266,6 +1341,7 @@ const UploadPage: React.FC = () => {
                     <button
                       className="file-chip-remove"
                       onClick={() => removeItem(item.id)}
+                      aria-label={`Remove ${name}`}
                     >
                       ×
                     </button>
@@ -1405,8 +1481,13 @@ const UploadPage: React.FC = () => {
                   <span>
                     {selectedModel === "None"
                       ? "None (view scan)"
-                      : MODEL_OPTIONS.find((m) => m.id === selectedModel)
-                          ?.label || "Select a model"}
+                      : selectedModel === "LesionSegmenter"
+                        ? `LesionSegmenter — ${
+                            LESION_OPTIONS.find((l) => l.id === lesionTarget)
+                              ?.label ?? "Pancreatic lesion"
+                          }`
+                        : MODEL_OPTIONS.find((m) => m.id === selectedModel)
+                            ?.label || "Select a model"}
                   </span>
                   <svg
                     className={`model-dropdown-chevron${modelDropOpen ? " rotated" : ""}`}
@@ -1431,10 +1512,11 @@ const UploadPage: React.FC = () => {
                       // than being hidden — you can't want what you can't see,
                       // and ChatGPT's model picker works the same way.
                       const locked = modelLocked(m.id);
+                      const hasSubmenu = !locked && m.id === "LesionSegmenter";
                       return (
                       <div
                         key={m.id}
-                        className={`model-dropdown-item${selectedModel === m.id ? " selected" : ""}${locked ? " locked" : ""}`}
+                        className={`model-dropdown-item${selectedModel === m.id ? " selected" : ""}${locked ? " locked" : ""}${hasSubmenu ? " has-submenu" : ""}`}
                         onClick={() => {
                           if (locked) {
                             setModelDropOpen(false);
@@ -1443,6 +1525,7 @@ const UploadPage: React.FC = () => {
                             });
                             return;
                           }
+                          track("upload_select_model");
                           setSelectedModel(m.id as typeof selectedModel);
                           setModelDropOpen(false);
                         }}
@@ -1456,8 +1539,25 @@ const UploadPage: React.FC = () => {
                           </span>
                         </div>
                         <div className="model-dropdown-item-side">
-                          {locked && <span className="model-dropdown-lock">Upgrade</span>}
-                          {!locked && selectedModel === m.id && (
+                          {locked && <span className="model-dropdown-lock">Donate</span>}
+                          {hasSubmenu ? (
+                            <svg
+                              className="model-submenu-arrow"
+                              width="7"
+                              height="10"
+                              viewBox="0 0 7 10"
+                              fill="none"
+                            >
+                              <path
+                                d="M1 1l4 4-4 4"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          ) : (
+                            !locked && selectedModel === m.id && (
                             <svg
                               width="12"
                               height="12"
@@ -1473,39 +1573,60 @@ const UploadPage: React.FC = () => {
                                 strokeLinejoin="round"
                               />
                             </svg>
+                            )
                           )}
                         </div>
+                        {hasSubmenu && (
+                          <div className="model-submenu" role="menu">
+                            {LESION_OPTIONS.map((l) => (
+                              <div
+                                key={l.id}
+                                role="menuitemradio"
+                                aria-checked={lesionTarget === l.id}
+                                className={`model-submenu-item${lesionTarget === l.id ? " selected" : ""}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedModel("LesionSegmenter");
+                                  setLesionTarget(l.id);
+                                  setModelDropOpen(false);
+                                }}
+                              >
+                                <span className="model-submenu-check">
+                                  {lesionTarget === l.id && (
+                                    <svg
+                                      width="12"
+                                      height="12"
+                                      viewBox="0 0 12 12"
+                                      fill="none"
+                                    >
+                                      <path
+                                        d="M2 6l3 3 5-5"
+                                        stroke="currentColor"
+                                        strokeWidth="1.5"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                      />
+                                    </svg>
+                                  )}
+                                </span>
+                                <span className="model-submenu-label">
+                                  {l.label}
+                                  {l.experimental && (
+                                    <span className="model-submenu-exp">
+                                      experimental
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                       );
                     })}
                   </div>
                 )}
               </div>
-              {selectedModel === "LesionSegmenter" && (
-                <div className="lesion-target-select">
-                  <label
-                    htmlFor="lesion-target"
-                    className="lesion-target-label"
-                  >
-                    Lesion
-                  </label>
-                  <select
-                    id="lesion-target"
-                    className="model-dropdown-btn"
-                    value={lesionTarget}
-                    onChange={(e) =>
-                      setLesionTarget(
-                        e.target.value as typeof lesionTarget
-                      )
-                    }
-                  >
-                    <option value="pancreatic">Pancreatic lesion</option>
-                    <option value="liver">Liver lesion (experimental)</option>
-                    <option value="kidney">Kidney lesion (experimental)</option>
-                    <option value="colon">Colon lesion (experimental)</option>
-                  </select>
-                </div>
-              )}
             </div>
 
             <div className="pipeline-arrow">→</div>
@@ -1568,6 +1689,7 @@ const UploadPage: React.FC = () => {
                             });
                             return;
                           }
+                          track("upload_select_postprocessing");
                           setPostValue(opt.id);
                           setPostDropOpen(false);
                         }}
@@ -1581,7 +1703,7 @@ const UploadPage: React.FC = () => {
                           </span>
                         </div>
                         <div className="model-dropdown-item-side">
-                          {locked && <span className="model-dropdown-lock">Upgrade</span>}
+                          {locked && <span className="model-dropdown-lock">Donate</span>}
                           {!locked && postValue === opt.id && (
                             <svg
                               width="12"
@@ -1805,28 +1927,39 @@ const UploadPage: React.FC = () => {
               phase === "queued" ? "Queued for GPU" : "Running…";
             return (
               <div style={{
-                background: "#f5f5f5", border: "1px solid rgba(0,45,114,0.14)", borderRadius: "12px",
-                padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between",
+                background: "#f5f5f5", border: "1px solid rgba(15, 23, 42, 0.14)", borderRadius: "12px",
+                padding: "16px 20px", display: "flex", flexDirection: "column", gap: "12px",
               }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-                  <div style={{
-                    width: "36px", height: "36px", borderRadius: "8px", flexShrink: 0,
-                    background: "rgba(0,45,114,0.04)", border: "1px solid rgba(0,45,114,0.12)",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                  }}><div className="upload-spinner" /></div>
-                  <div>
-                    <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
-                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
-                      {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}
-                      <span className={`proc-close-note${closeInfo.active ? "" : " proc-close-note--ready"}`}>
-                        {" "}· {closeNote}
-                      </span>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+                    <div style={{
+                      width: "36px", height: "36px", borderRadius: "8px", flexShrink: 0,
+                      background: "rgba(15, 23, 42, 0.04)", border: "1px solid rgba(15, 23, 42, 0.12)",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>{/* A static pulsing dot per scan instead of a spinning wheel:
+                         multiple in-flight scans shouldn't each spin. The single
+                         spinner lives in the batch ProcessingSummaryBar. */}
+                      <span className="animate-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: "#0F172A", display: "block" }} />
+                    </div>
+                    <div>
+                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
+                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
+                        {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}
+                        <span className={`proc-close-note${closeInfo.active ? "" : " proc-close-note--ready"}`}>
+                          {" "}· {closeNote}
+                        </span>
+                      </div>
                     </div>
                   </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                    <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: phase === "queued" ? "#6a6a6a" : "#0F172A" }}>{phaseLabel}</span>
+                    <button className="active-cancel-btn" onClick={() => cancelRun(u)}>Cancel</button>
+                  </div>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                  <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: phase === "queued" ? "#6a6a6a" : "#002D72" }}>{phaseLabel}</span>
-                  <button className="active-cancel-btn" onClick={() => cancelRun(u)}>Cancel</button>
+                {/* No real percent-complete exists for inference, so this is an
+                    indeterminate sweep — honest motion, not a fabricated number. */}
+                <div className="progress-track">
+                  <div className="progress-fill progress-fill--indeterminate" />
                 </div>
               </div>
             );
@@ -1838,7 +1971,31 @@ const UploadPage: React.FC = () => {
               <div style={{ display: "flex", alignItems: "center", gap: "16px", minWidth: 0 }}>
                 <FileIcon />
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
+                  {renamingId === u.sessionId ? (
+                    <input
+                      autoFocus
+                      value={renameValue}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitRename();
+                        else if (e.key === "Escape") setRenamingId(null);
+                      }}
+                      style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", border: "1px solid rgba(15, 23, 42, 0.3)", borderRadius: "6px", padding: "2px 6px", width: "100%", maxWidth: "260px" }}
+                    />
+                  ) : (
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0 }}>
+                      <span title={u.sourceName || undefined} style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.label}</span>
+                      <button
+                        title="Rename scan"
+                        onClick={(e) => { e.stopPropagation(); startRename(u); }}
+                        style={{ background: "none", border: "none", cursor: "pointer", padding: "2px", color: "#6a6a6a", flexShrink: 0, lineHeight: 0 }}
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                      </button>
+                    </div>
+                  )}
                   <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
                     {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}
                   </div>
@@ -1876,20 +2033,71 @@ const UploadPage: React.FC = () => {
                   </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
-                  <button style={smallBtn} onClick={() => setDetailsBatchId(batchId)}>View details</button>
-                  <button style={{ ...smallBtn, background: "#002d72", color: "#fff", borderColor: "#002d72" }} onClick={() => downloadBatch(uploads)}>Download</button>
+                  <button style={smallBtn} onClick={() => { track("upload_open_batch_details"); setDetailsBatchId(batchId); }}>View details</button>
+                  <button style={{ ...smallBtn, background: "#0F172A", color: "#fff", borderColor: "#0F172A" }} onClick={() => downloadBatch(uploads)}>Download</button>
                   <RemoveBtn onClick={() => removeBatch(uploads)} />
                 </div>
               </div>
             );
           };
 
+          // ── Model card: replaces the old placeholder text with a preview of what
+          // will actually run, using the same name the "Run" button will use. An
+          // empty state that just says "nothing here yet" wastes the space; showing
+          // the selected model gives the user something to check before they run it. ──
+          const selectedModelLabel =
+            selectedModel === "None"
+              ? "None (view scan)"
+              : selectedModel === "LesionSegmenter"
+                ? `LesionSegmenter — ${
+                    LESION_OPTIONS.find((l) => l.id === lesionTarget)?.label ??
+                    "Pancreatic lesion"
+                  }`
+                : MODEL_OPTIONS.find((m) => m.id === selectedModel)?.label ?? null;
+          const selectedModelDesc =
+            selectedModel === "LesionSegmenter"
+              ? LESION_OPTIONS.find((l) => l.id === lesionTarget)?.experimental
+                ? "Experimental — not yet validated against ground truth"
+                : MODEL_OPTIONS.find((m) => m.id === "LesionSegmenter")?.desc
+              : MODEL_OPTIONS.find((m) => m.id === selectedModel)?.desc;
+
           const emptyBox = (
             <div style={{
               background: "#f5f5f5", border: "1px dashed rgba(0,0,0,0.12)", borderRadius: "12px",
-              padding: "24px 20px", textAlign: "center", fontFamily: "'JetBrains Mono', monospace",
-              fontSize: "12px", color: "#8f8f8f",
-            }}>No uploads yet - run a model above and your results will appear here.</div>
+              padding: "20px", display: "flex", alignItems: "center", gap: "16px",
+            }}>
+              <div style={{
+                width: "40px", height: "40px", borderRadius: "8px", flexShrink: 0,
+                background: "rgba(0,0,0,0.06)", border: "1px solid rgba(0,0,0,0.12)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#111111" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9.5 2h5l.5 4.5 3.5 2-1 5-3 2.5-.5 4.5h-5l-.5-4.5-3-2.5-1-5 3.5-2z" />
+                  <circle cx="12" cy="12" r="2.5" />
+                </svg>
+              </div>
+              <div style={{ minWidth: 0, textAlign: "left" }}>
+                {selectedModelLabel ? (
+                  <>
+                    <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "13px", fontWeight: 600, color: "#111111" }}>
+                      {selectedModelLabel}
+                    </div>
+                    {selectedModelDesc && (
+                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#8f8f8f", marginTop: "3px" }}>
+                        {selectedModelDesc}
+                      </div>
+                    )}
+                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#8f8f8f", marginTop: "6px" }}>
+                      Select a file above and run to see results here.
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "12px", color: "#8f8f8f" }}>
+                    No uploads yet - run a model above and your results will appear here.
+                  </div>
+                )}
+              </div>
+            </div>
           );
 
           return (
@@ -1908,7 +2116,7 @@ const UploadPage: React.FC = () => {
                       <ProcessingSummaryBar key={g.batchId} title={g.label} running={running.length}
                         done={done} statusLabel={statusLabel}
                         closeNote={closeNote} closeReady={!closeInfo.active}
-                        onViewDetails={() => setDetailsBatchId(g.batchId)}
+                        onViewDetails={() => { track("upload_open_batch_details"); setDetailsBatchId(g.batchId); }}
                         onCancelAll={() => running.forEach(u => cancelRun(u))} />
                     );
                   })}
@@ -1955,6 +2163,7 @@ const UploadPage: React.FC = () => {
           );
         })()}
       </div>
+      <SiteFooter />
     </div>
   );
 };

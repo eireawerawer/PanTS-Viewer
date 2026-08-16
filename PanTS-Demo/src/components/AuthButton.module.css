@@ -5,7 +5,7 @@
 .signInBtn {
 	padding: 8px 20px;
 	border-radius: 22px;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 12px;
 	font-weight: 600;
 	letter-spacing: 0.06em;
@@ -25,7 +25,7 @@
 /* ── Signed-in trigger ── */
 .accountRoot {
 	position: relative;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 }
 
 .accountTrigger {
@@ -56,7 +56,7 @@
 	align-items: center;
 	justify-content: center;
 	font-size: 12px;
-	font-weight: 700;
+	font-weight: 600;
 }
 
 .accountEmail {
@@ -98,7 +98,7 @@
 	color: #111111;
 }
 .menuEmail {
-	font-family: 'JetBrains Mono', monospace;
+	font-family: "IBM Plex Mono", ui-monospace, monospace;
 	font-size: 11px;
 	color: #8f8f8f;
 	margin-top: 2px;
@@ -115,7 +115,7 @@
 	border: none;
 	background: transparent;
 	border-radius: 8px;
-	font-family: 'Space Grotesk', sans-serif;
+	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 13px;
 	color: #111111;
 	cursor: pointer;

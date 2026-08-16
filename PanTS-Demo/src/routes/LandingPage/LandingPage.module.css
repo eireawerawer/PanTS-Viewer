@@ -7,15 +7,16 @@
 }
 
 /* ---------- Root container ---------- */
-/* Theme: JHU Heritage Blue (#002D72) primary, Spirit Blue (#68ACE5) accent bars. */
+/* Theme: BodyMaps brand tokens — ink primary (fills/CTAs), orange strictly as accent. */
 .root {
   position: fixed;
   inset: 0;
   background: #ffffff;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  font-family: 'Space Grotesk', sans-serif;
+  overflow-x: hidden;
+  overflow-y: auto; /* short viewports scroll instead of clipping the hero */
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   color: #111111;
 }
 
@@ -79,7 +80,7 @@
 }
 .heroStatLabel {
   font-size: 11px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   color: #6a6a6a;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -102,7 +103,7 @@
 .btnPrimary {
   padding: 16px 44px;
   border-radius: 14px;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
@@ -119,7 +120,7 @@
 .btnSecondary {
   padding: 16px 44px;
   border-radius: 14px;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;

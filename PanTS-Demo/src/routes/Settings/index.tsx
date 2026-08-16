@@ -1,10 +1,11 @@
 import {
-	IconCreditCard, IconHistory, IconShieldLock, IconUser,
+	IconChartBar, IconHeart, IconHistory, IconShieldLock, IconUser, IconUsers,
 } from "@tabler/icons-react";
 import React, { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import Header from "../../components/Header";
 import { useAuth } from "../../contexts/authContext";
+import { track } from "../../helpers/analytics";
 import { SettingsContext } from "./context";
 import "./Settings.css";
 
@@ -24,16 +25,39 @@ import "./Settings.css";
 // Notifications is deliberately not a section: it's one switch, and a whole
 // page for one switch is a mostly-empty panel. It lives on Profile, the way
 // Claude keeps small preferences inside General.
-const SECTIONS = [
+type Section = {
+	to: string;
+	label: string;
+	icon: typeof IconUser;
+	/** Exact-match the URL, so "/account" isn't active on every child route. */
+	end?: boolean;
+};
+
+const SECTIONS: Section[] = [
 	{ to: "/account", label: "Profile", icon: IconUser, end: true },
-	{ to: "/account/plan", label: "Plan", icon: IconCreditCard },
+	{ to: "/account/plan", label: "Plan", icon: IconHeart },
 	{ to: "/account/history", label: "History", icon: IconHistory },
 	{ to: "/account/privacy", label: "Privacy", icon: IconShieldLock },
 ];
 
+// Admin-only sections, appended below the rest so the rail's ordinary shape
+// doesn't shift for the people who have them. Hiding these is presentation, not
+// protection — both pages and both APIs check the role themselves.
+const ADMIN_SECTIONS: Section[] = [
+	{ to: "/account/analytics", label: "Usage", icon: IconChartBar },
+	{ to: "/account/people", label: "People", icon: IconUsers },
+];
+
 const SettingsPage: React.FC = () => {
 	const navigate = useNavigate();
-	const { isAuthenticated, loading, promptAuth } = useAuth();
+	// Once per visit to the settings area, not once per section.
+	useEffect(() => {
+		track("account_open_settings");
+	}, []);
+	const { isAuthenticated, loading, promptAuth, user } = useAuth();
+	const sections = user?.roles.includes("admin")
+		? [...SECTIONS, ...ADMIN_SECTIONS]
+		: SECTIONS;
 
 	const [busy, setBusy] = useState(false);
 	const [notice, setNotice] = useState("");
@@ -80,7 +104,7 @@ const SettingsPage: React.FC = () => {
 
 				<div className="set-layout">
 					<nav className="set-nav" aria-label="Settings sections">
-						{SECTIONS.map((s) => (
+						{sections.map((s) => (
 							<NavLink
 								key={s.to}
 								to={s.to}

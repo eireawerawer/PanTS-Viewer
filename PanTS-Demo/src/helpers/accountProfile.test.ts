@@ -1,25 +1,13 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	canPostprocess,
-	clearProfile,
-	DEFAULT_PROFILE,
 	isModelLocked,
 	limitsFor,
-	loadProfile,
 	maxConcurrentScans,
 	nextPlanUp,
-	persistProfile,
 	PLAN_LIMITS,
 	PLANS,
-	PROFILE_KEY_PREFIX,
-	updateProfile,
 } from "./accountProfile";
-
-const USER = "user-1";
-
-beforeEach(() => {
-	localStorage.clear();
-});
 
 describe("plan limits", () => {
 	it("gives Free only the free model", () => {
@@ -102,61 +90,5 @@ describe("plan cards", () => {
 
 	it("has a limits entry for every card and vice versa", () => {
 		expect(PLANS.map((p) => p.id).sort()).toEqual(Object.keys(PLAN_LIMITS).sort());
-	});
-});
-
-describe("loadProfile", () => {
-	it("returns null when the user has no stored profile", () => {
-		expect(loadProfile(USER)).toBeNull();
-	});
-
-	it("returns null when storage holds malformed JSON", () => {
-		localStorage.setItem(`${PROFILE_KEY_PREFIX}${USER}`, "{not json");
-		expect(loadProfile(USER)).toBeNull();
-	});
-
-	it("ignores plan and onboarding keys left by an older build", () => {
-		// Both moved server-side; a stale local copy must not resurface.
-		localStorage.setItem(
-			`${PROFILE_KEY_PREFIX}${USER}`,
-			JSON.stringify({ plan: "enterprise", onboardingCompletedAt: "2026-01-01", accountType: "clinician" })
-		);
-		expect(loadProfile(USER)).toEqual({ accountType: "clinician" });
-	});
-
-	it("keeps profiles for different users separate", () => {
-		persistProfile(USER, { accountType: "clinician" });
-		persistProfile("user-2", { accountType: "researcher" });
-		expect(loadProfile(USER)?.accountType).toBe("clinician");
-		expect(loadProfile("user-2")?.accountType).toBe("researcher");
-	});
-});
-
-describe("updateProfile", () => {
-	it("starts from the defaults when nothing is stored yet", () => {
-		expect(updateProfile(USER, { accountType: "clinician" })).toEqual({
-			...DEFAULT_PROFILE,
-			accountType: "clinician",
-		});
-	});
-
-	it("persists across a reload", () => {
-		updateProfile(USER, { accountType: "researcher" });
-		expect(loadProfile(USER)?.accountType).toBe("researcher");
-	});
-
-	it("can clear the account type back to unset", () => {
-		updateProfile(USER, { accountType: "student" });
-		expect(updateProfile(USER, { accountType: null }).accountType).toBeNull();
-	});
-});
-
-describe("clearProfile", () => {
-	it("removes only the target user's profile", () => {
-		persistProfile(USER, { accountType: "clinician" });
-		persistProfile("user-2", { accountType: "researcher" });
-		clearProfile(USER);
-		expect(loadProfile(USER)).toBeNull();
-		expect(loadProfile("user-2")?.accountType).toBe("researcher");
 	});
 });

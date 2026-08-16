@@ -8,6 +8,18 @@
      (src/components/AIAssistant/AISidebar.css) and by the content shift below,
      so the CT views sit flush against the panel with no overlap. */
   --vp-ai-width: 400px;
+  /* Declared here (not just inside .annotation-open) so the property has a
+     transition defined in BOTH states — opening AND closing the segments
+     panel animates the viewport's width smoothly instead of the
+     padding-right jumping straight from 0 to ~320px (or back) the instant
+     the annotation-open class toggles. Matches .vp-stage's own
+     margin-top transition below so the ribbon opening and the panel
+     opening read as one coordinated resize instead of two different
+     speeds.
+   */
+  padding-right: 0px;
+  transition: padding-right 0.2s ease;
+  box-sizing: border-box;
 }
 
 /* When the AI sidebar is open the page container shrinks (see the inline width
@@ -15,6 +27,27 @@
    with it so it doesn't slide under the panel. */
 .VisualizationPage.ai-panel-open .checkbox-bottom-bar {
   width: calc(100vw - var(--vp-ai-width, 400px));
+}
+
+/* Annotation ribbon is docked to the top of the page (see AnnotationToolbar.css)
+   instead of floating over the canvas. When open, push the whole grid down by
+   the ribbon's height via padding on the outer container. --atb-ribbon-h is
+   defined in AnnotationToolbar.css and tracks the ribbon's actual height. */
+.VisualizationPage.annotation-open {
+  /* The root is a flex column (.vp-topbar and .vp-stage as siblings); the
+     fixed-position ribbon anchors via `top: var(--vp-topbar-h)` in
+     AnnotationToolbar.css, so only .vp-stage (not the topbar) needs pushing
+     down to make room for it. */
+  padding-right: var(--atb-segpanel-w, 320px);
+}
+
+.VisualizationPage.annotation-open .vp-stage {
+  /* Shrinks automatically (flex: 1 1 auto, overflow:hidden) by the
+     ribbon+panel height plus 10px breathing room below. */
+  margin-top: calc(var(--atb-ribbon-h, 49px) + var(--atb-panel-h, 0px) + 10px);
+  /* Kept in sync with .atb-shell's / .segpop's own open/close transitions
+     so the ribbon, popup, and viewport resize move together. */
+  transition: margin-top 0.2s ease;
 }
 
 @media (max-width: 899px) {
@@ -239,7 +272,11 @@
 }
 
 .vp-seg__btn {
-  flex: 1 1 auto;
+  /* Equal width within a row regardless of label length ("MPR" vs "Axial
+     Large") — flex-basis 0 ignores each button's own content size and
+     divides the row evenly, instead of every button sizing to its own text. */
+  flex: 1 1 0;
+  min-width: 0;
   padding: 7px 10px;
   border-radius: 8px;
   font-family: var(--vp-font);
@@ -405,7 +442,25 @@
   border-bottom: 1px solid var(--vp-border);
   font-family: var(--vp-font);
   position: relative;
-  z-index: 40;
+  /* Above .atb-shell's z-index (50) so this bar's downward-pointing tool
+     tooltips render on top of the annotation ribbon when it's open. */
+  z-index: 55;
+  transition: background 0.25s ease, border-color 0.25s ease;
+}
+
+/* While the annotation ribbon is open, the main toolbar steps back —
+   lower background contrast and dimmer inactive icons — so attention
+   reads as "focused on the annotation toolbar now open below" instead of
+   two equally-loud bars competing for it. The Annotate button itself
+   (and anything else already flagged active) stays at full strength so
+   it doesn't look broken or disabled. */
+.VisualizationPage.annotation-open .vp-topbar {
+  background: rgba(12, 13, 16, 0.6);
+  border-bottom-color: rgba(255, 255, 255, 0.05);
+}
+
+.VisualizationPage.annotation-open .vp-topbar .vp-tool:not(.vp-tool--active) {
+  opacity: 0.5;
 }
 
 /* Floating gear shown only when the toolbar is hidden. */
@@ -666,7 +721,7 @@
   border: 1px solid var(--vp-border);
   color: var(--vp-text);
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s, border-color 0.15s, opacity 0.25s ease;
 }
 
 .vp-tool:hover {
@@ -678,6 +733,18 @@
   background: #ffffff;
   border-color: #ffffff;
   color: #08090b;
+}
+
+.vp-tool--disabled,
+.vp-tool:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.vp-tool--disabled:hover,
+.vp-tool:disabled:hover {
+  background: var(--vp-panel);
+  border-color: var(--vp-border);
 }
 
 .vp-tool__tip {
@@ -1374,7 +1441,8 @@
 }
 
 .vp-stats__summary strong {
-  color: #ffb454;
+  color: #465bfc
+;
 }
 
 .vp-stats__msg {
@@ -1441,7 +1509,8 @@
 
 /* Muted by default, highlighted when in the extreme tails (<p5 / >p95). */
 .vp-stats__pct--flag {
-  color: #ffb454 !important;
+  color: #465bfc
+ !important;
   font-weight: 600;
 }
 
@@ -1476,7 +1545,7 @@
 }
 
 .vp-spark__marker--flag {
-  background: #ffb454;
+  background: #465bfc;
 }
 
 /* Explicit index-based stripe (not :nth-child) since expanded detail rows are interleaved
@@ -1527,7 +1596,8 @@
 .vp-stats__truncated-flag {
   margin-left: 5px;
   font-size: 10px;
-  color: #ffb454;
+  color: #465bfc
+;
   cursor: help;
 }
 
@@ -1729,3 +1799,7 @@
   z-index: 35;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
 }
+
+/* Point/box-segment SUCCESS/ERROR now reuses the shared GuidedStepModal
+   (SliceAnchorPickerUI.tsx) instead of its own bottom pill — no CSS of
+   its own needed here anymore. */

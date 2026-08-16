@@ -1,7 +1,8 @@
 /* ===== UploadPage.css =====
-   Redesigned to match the BodyMaps landing page aesthetic.
-   Color palette: #ffffff / #f5f5f5 / #111111 (monochrome)
-   Fonts: Space Grotesk, JetBrains Mono
+   DEFERRED pre-brand surface: still monochrome + Space Grotesk while
+   in-flight PRs on this file land. Do not copy this vocabulary — new
+   styling uses the BodyMaps tokens (ink/paper/accent, IBM Plex); see
+   BRANDING.md at the repo root.
 */
 
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
@@ -15,6 +16,8 @@
   font-family: 'Space Grotesk', sans-serif;
   position: relative;
   overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ── Ambient glow orbs ── */
@@ -46,6 +49,9 @@
 
 /* ── Main content area ── */
 .upload-main {
+  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
   max-width: 1152px;
   margin: 0 auto;
   padding: 36px 24px 60px;
@@ -152,34 +158,57 @@
   letter-spacing: 0.04em;
 }
 
-/* ── File chips ── */
+/* ── Selected-file cards (was a row of small pills; now matches the
+   icon+name+subtext row treatment used by Completed Uploads below) ── */
 .file-chips {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 8px;
   margin-bottom: 20px;
 }
 .file-chip {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 14px;
-  background: rgba(0,0,0,.06);
-  border: 1px solid rgba(0,0,0,.12);
-  border-radius: 20px;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #f5f5f5;
+  border: 1px solid rgba(0,0,0,.08);
+  border-radius: 10px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.file-chip-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  flex-shrink: 0;
+  background: rgba(0,0,0,.05);
+  border: 1px solid rgba(0,0,0,.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: #111111;
+}
+.file-chip-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.file-chip-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: #8f8f8f;
+  margin-top: 1px;
   letter-spacing: 0.02em;
 }
 .file-chip-remove {
-  width: 16px;
-  height: 16px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
-  background: rgba(0,0,0,.08);
+  background: rgba(0,0,0,.06);
   border: none;
   color: #8f8f8f;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1;
   cursor: pointer;
   display: flex;
@@ -188,9 +217,10 @@
   transition: all 0.15s;
   padding: 0;
   font-family: inherit;
+  flex-shrink: 0;
 }
 .file-chip-remove:hover {
-  background: rgba(239,68,68,.2);
+  background: rgba(239,68,68,.15);
   color: #ef4444;
 }
 
@@ -215,7 +245,7 @@
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: #002D72;
+  background: #0F172A;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -496,13 +526,18 @@
   border-radius: 10px;
   box-shadow: 0 8px 24px rgba(0,0,0,.12);
   z-index: 100;
-  overflow: hidden;
+  /* visible (not hidden) so the LesionSegmenter submenu can fly out past the edge */
+  overflow: visible;
 }
 .model-dropdown-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 10px 14px;
+  /* Shared row height so the (2-line) model rows and the (1-line) submenu rows
+     line up at the same height instead of the parent looking taller. */
+  min-height: 48px;
+  box-sizing: border-box;
   cursor: pointer;
   transition: background 0.1s;
 }
@@ -510,7 +545,7 @@
   background: rgba(0,0,0,.04);
 }
 .model-dropdown-item.selected {
-  background: rgba(0,45,114,.05);
+  background: rgba(15, 23, 42, .05);
 }
 .model-dropdown-item-content {
   display: flex;
@@ -527,7 +562,7 @@
   color: #111111;
 }
 .model-dropdown-item.selected .model-dropdown-item-name {
-  color: #002D72;
+  color: #C2532F;
 }
 .model-dropdown-item-desc {
   font-family: 'Space Grotesk', sans-serif;
@@ -535,7 +570,7 @@
   color: #8f8f8f;
 }
 .model-dropdown-check {
-  color: #002D72;
+  color: #C2532F;
   flex-shrink: 0;
 }
 .model-dropdown-item-side {
@@ -559,8 +594,8 @@
   text-transform: uppercase;
   padding: 3px 7px;
   border-radius: 999px;
-  background: rgba(0, 45, 114, 0.08);
-  color: #002d72;
+  background: rgba(15, 23, 42, 0.08);
+  color: #C2532F;
   white-space: nowrap;
 }
 
@@ -599,8 +634,8 @@
   flex-shrink: 0;
   margin-left: 12px;
   padding: 10px 32px;
-  background: #002D72;
-  border: 1px solid #002D72;
+  background: #0F172A;
+  border: 1px solid #0F172A;
   border-radius: 8px;
   color: #ffffff;
   font-family: 'Space Grotesk', sans-serif;
@@ -611,8 +646,8 @@
   letter-spacing: 0.02em;
 }
 .run-btn:hover:not(:disabled) {
-  background: #00399a;
-  border-color: #00399a;
+  background: #1B2436;
+  border-color: #1B2436;
   color: #ffffff;
 }
 .run-btn:disabled {
@@ -708,10 +743,23 @@
   transition: width 0.4s cubic-bezier(.2,.8,.2,1);
 }
 .progress-fill-upload {
-  background: linear-gradient(90deg, #8f8f8f, #002D72);
+  background: linear-gradient(90deg, #8f8f8f, #0F172A);
 }
 .progress-fill-inference {
-  background: linear-gradient(90deg, #6a6a6a, #00399a);
+  background: linear-gradient(90deg, #6a6a6a, #E76F51);
+}
+
+/* Indeterminate variant: inference has no real percent-complete signal (nnU-Net
+   doesn't report progress mid-run), so a sweeping segment communicates "still
+   working" honestly instead of faking a percentage. */
+.progress-fill--indeterminate {
+  width: 40% !important;
+  background: linear-gradient(90deg, #6a6a6a, #0F172A);
+  animation: progress-indeterminate-sweep 1.4s ease-in-out infinite;
+}
+@keyframes progress-indeterminate-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
 }
 
 /* ── Result actions ── */
@@ -754,13 +802,13 @@
   color: #111111;
 }
 .result-btn-primary {
-  background: #002D72;
-  border-color: #002D72;
+  background: #0F172A;
+  border-color: #C2532F;
   color: #ffffff;
 }
 .result-btn-primary:hover {
-  background: #00399a;
-  border-color: #00399a;
+  background: #1B2436;
+  border-color: #1B2436;
   color: #ffffff;
 }
 
@@ -795,7 +843,7 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #002D72;
+  background: #0F172A;
   animation: upload-pulse 1.6s ease-in-out infinite;
   flex-shrink: 0;
 }
@@ -845,20 +893,22 @@
 
 /* ── File chip internals ── */
 .file-chip-name {
-  flex: 1;
-  min-width: 0;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: #111111;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .file-chip-preview {
-  padding: 2px 8px;
-  background: rgba(0,45,114,.1);
-  border: 1px solid rgba(0,45,114,.2);
-  border-radius: 10px;
-  color: #002D72;
+  padding: 5px 12px;
+  background: rgba(15, 23, 42, .1);
+  border: 1px solid rgba(15, 23, 42, .2);
+  border-radius: 8px;
+  color: #C2532F;
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   letter-spacing: 0.04em;
@@ -866,11 +916,11 @@
   flex-shrink: 0;
 }
 .file-chip-preview:hover {
-  background: rgba(0,45,114,.18);
+  background: rgba(15, 23, 42, .18);
 }
 .file-chip--active {
-  border-color: rgba(0,45,114,.3);
-  background: rgba(0,45,114,.06);
+  border-color: rgba(15, 23, 42, .3);
+  background: rgba(15, 23, 42, .06);
 }
 
 /* ── Pending CT preview panel ── */
@@ -940,10 +990,10 @@
   transition: width 0.35s cubic-bezier(.2,.8,.2,1);
 }
 .upload-progress-fill--upload {
-  background: linear-gradient(90deg, #8f8f8f, #002D72);
+  background: linear-gradient(90deg, #8f8f8f, #0F172A);
 }
 .upload-progress-fill--inference {
-  background: linear-gradient(90deg, #6a6a6a, #00399a);
+  background: linear-gradient(90deg, #6a6a6a, #E76F51);
 }
 .upload-progress-pct {
   font-family: 'JetBrains Mono', monospace;
@@ -1066,8 +1116,8 @@
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  border: 2px solid rgba(0, 45, 114, 0.12);
-  border-top-color: #002D72;
+  border: 2px solid rgba(15, 23, 42, 0.12);
+  border-top-color: #C2532F;
   animation: upload-spin 0.75s linear infinite;
 }
 
@@ -1092,7 +1142,7 @@
   padding: 0;
   font: inherit;
   font-weight: 700;
-  color: #002d72;
+  color: #C2532F;
   cursor: pointer;
   text-decoration: underline;
 }
@@ -1109,7 +1159,7 @@
   cursor: pointer;
 }
 .upload-history-link:hover {
-  color: #002d72;
+  color: #C2532F;
 }
 
 /* ── Processing summary bar (all in-flight scans in one row) ── */
@@ -1121,7 +1171,7 @@
   padding: 16px 20px;
   border-radius: 12px;
   background: #f5f5f5;
-  border: 1px solid rgba(0, 45, 114, 0.14);
+  border: 1px solid rgba(15, 23, 42, 0.14);
 }
 .proc-wheel {
   position: relative;
@@ -1135,7 +1185,7 @@
   font-family: 'Space Grotesk', sans-serif;
   font-size: 11px;
   font-weight: 700;
-  color: #002d72;
+  color: #C2532F;
 }
 .proc-info {
   flex: 1;
@@ -1154,7 +1204,7 @@
   font-family: 'JetBrains Mono', monospace;
   font-size: 13px;
   font-weight: 700;
-  color: #002d72;
+  color: #C2532F;
 }
 .proc-sub {
   display: flex;
@@ -1198,22 +1248,91 @@
   border-color: rgba(0, 0, 0, 0.2);
 }
 
-/* LesionSegmenter lesion-target sub-selector (appears under Model when
-   LesionSegmenter is chosen). Reuses .model-dropdown-btn for the select. */
-.lesion-target-select {
+/* LesionSegmenter lesion picker — a macOS-style submenu that flies out from the
+   model item (replaces the old inline "Lesion" select). */
+.model-dropdown-item.has-submenu {
+  position: relative;
+}
+.model-submenu-arrow {
+  color: #8f8f8f;
+  flex-shrink: 0;
+}
+.model-submenu {
+  position: absolute;
+  top: -1px;
+  left: calc(100% + 4px);
+  min-width: 220px;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.10);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  padding: 4px 0;
+  z-index: 110;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(-4px);
+  transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+}
+/* Invisible bridge across the gap so the hover doesn't drop between the item and
+   its flyout. */
+.model-submenu::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -8px;
+  width: 8px;
+  height: 100%;
+}
+.model-dropdown-item.has-submenu:hover > .model-submenu,
+.model-dropdown-item.has-submenu:focus-within > .model-submenu {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(0);
+}
+.model-submenu-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 8px;
-}
-.lesion-target-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: rgba(0, 0, 0, 0.6);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.lesion-target-select select.model-dropdown-btn {
-  flex: 1;
+  padding: 8px 14px 8px 8px;
+  /* Match .model-dropdown-item so every row in the menu is the same height. */
+  min-height: 48px;
+  box-sizing: border-box;
   cursor: pointer;
+  transition: background 0.1s;
+}
+.model-submenu-item:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+.model-submenu-item.selected {
+  background: rgba(15, 23, 42, 0.05);
+}
+.model-submenu-check {
+  width: 14px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #C2532F;
+}
+.model-submenu-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  color: #111111;
+}
+.model-submenu-item.selected .model-submenu-label {
+  color: #C2532F;
+}
+.model-submenu-exp {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #b06a00;
+  background: rgba(255, 170, 0, 0.12);
+  padding: 1px 5px;
+  border-radius: 4px;
 }

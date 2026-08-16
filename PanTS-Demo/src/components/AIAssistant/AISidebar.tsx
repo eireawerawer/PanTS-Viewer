@@ -20,13 +20,72 @@ class PlanLimitError extends Error {}
 // Also its own type, for the same no-pointless-retry reason.
 class AuthRequiredError extends Error {}
 
+// Turn a send failure into something the person reading it can act on.
+//
+// Both endpoints failing used to collapse into one sentence — "The assistant
+// service is unavailable right now" — which is true of a stopped backend, a
+// crashed request, and a vision model that was never pulled alike. That single
+// string sent people looking in the wrong place every time.
+function describeSendFailure(error: unknown, hadImages: boolean): string {
+  const raw = error instanceof Error ? error.message : String(error ?? "");
+
+  // fetch() rejects with a TypeError when it never reached a server at all.
+  if (error instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(raw)) {
+    return (
+      `I couldn't reach the BodyMaps backend at ${API_BASE}. Check that the ` +
+      "Flask server is running and that VITE_API_BASE points at it."
+    );
+  }
+
+  const status = /HTTP (\d{3})/.exec(raw)?.[1];
+
+  if (status === "413") {
+    return "The captured views were too large for the server to accept. Try attaching fewer panes.";
+  }
+
+  if (status && status.startsWith("5")) {
+    return (
+      `The backend returned an error (HTTP ${status}) while answering` +
+      (hadImages ? " a request with attached views" : "") +
+      ". The Flask terminal has the traceback."
+    );
+  }
+
+  if (hadImages) {
+    return (
+      "I couldn't complete the read of the attached views. If this keeps " +
+      "happening, check that a vision model is installed on the server " +
+      "(`ollama list`) — image messages need one."
+    );
+  }
+
+  return "The assistant didn't return an answer. Viewer controls still work from the left panel.";
+}
+
 // Bumped to v2 so a previously-stored reasoning model (e.g. qwen3) is reset —
 // the default now prefers a non-reasoning model that never leaks "thinking".
 const MODEL_STORAGE_KEY = "bodymaps-ai-model-v2";
 
 // Reasoning models emit a chain-of-thought that can leak into the answer on
 // older Ollama; we avoid picking them as the initial default.
-const REASONING_MODEL = /qwen3|deepseek-r1|-r1\b|:think|marco-o1|qwq/i;
+const REASONING_MODEL = /qwen3(?!-vl)|deepseek-r1|-r1\b|:think|marco-o1|qwq/i;
+
+// Short "best for ..." line shown under each model in the picker, so someone
+// who has never used local models knows which one to pick. Order matters:
+// vision ("vl") must match before the generic qwen check.
+function modelDescription(name: string): string {
+  const n = name.toLowerCase();
+  if (n.includes("vl") || n.includes("vision")) {
+    return "For complex image and snapshot tasks";
+  }
+  if (n.includes("llama")) {
+    return "Best all-around";
+  }
+  if (n.includes("qwen")) {
+    return "Fastest for quick answers";
+  }
+  return "General-purpose local model";
+}
 
 const SendIcon = () => (
   <svg
@@ -229,6 +288,48 @@ function readFileAsDataURL(file: File): Promise<string> {
   });
 }
 
+// Cap on extracted document text sent to the model — keeps the prompt inside
+// the local model's context window (roughly 1.5k tokens of document).
+const PDF_TEXT_LIMIT = 6000;
+
+// Extract the text layer of an attached PDF in the browser, so the model can
+// actually read the document instead of only seeing its filename. Returns null
+// for scanned/image-only PDFs (no text layer) and on any parse failure.
+async function extractPdfText(file: File): Promise<string | null> {
+  try {
+    const pdfjs = await import("pdfjs-dist");
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+      "pdfjs-dist/build/pdf.worker.min.mjs",
+      import.meta.url
+    ).toString();
+    const loadingTask = pdfjs.getDocument({ data: await file.arrayBuffer() });
+    try {
+      const doc = await loadingTask.promise;
+      const maxPages = Math.min(doc.numPages, 12);
+      let text = "";
+      for (let pageNum = 1; pageNum <= maxPages && text.length < PDF_TEXT_LIMIT; pageNum++) {
+        const page = await doc.getPage(pageNum);
+        const content = await page.getTextContent();
+        const pageText = content.items
+          .map((item) => ("str" in item ? item.str : ""))
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (pageText) text += pageText + "\n";
+      }
+      const trimmed = text.trim();
+      return trimmed ? trimmed.slice(0, PDF_TEXT_LIMIT) : null;
+    } finally {
+      // Release the worker-side parsed document — pdf.js pins it otherwise,
+      // so attaching several PDFs would grow tab memory until reload.
+      void loadingTask.destroy();
+    }
+  } catch (error) {
+    console.warn("[BodyMaps AI pdf extract]", error);
+    return null;
+  }
+}
+
 // Minimal markdown: **bold** and line breaks. Kept intentionally small so the
 // assistant text stays clean and minimalist rather than heavily styled.
 function renderMessageText(content: string) {
@@ -259,7 +360,10 @@ type StreamEvent =
   | { type: "actions"; actions?: AIAction[] }
   | { type: "final"; reply?: string; actions?: AIAction[]; source?: string; model?: string | null }
   | { type: "done" }
-  | { type: "error"; message?: string };
+  | { type: "error"; message?: string }
+  // The agent decided it needs to SEE the CT views: the browser captures the
+  // four panes and re-sends this turn with the images attached (self-capture).
+  | { type: "need_capture" };
 
 export default function AISidebar({
   open,
@@ -284,9 +388,17 @@ export default function AISidebar({
   const [capturing, setCapturing] = useState(false);
   const [models, setModels] = useState<AIModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
-  // The assistant runs on the server and is metered per account, so it needs a
-  // signed-in user — the same rule the Upload page applies to inference.
-  const { isAuthenticated, promptAuth } = useAuth();
+  // Backend's vision model — shown as the active model whenever images are
+  // attached, because the backend switches to it for those messages.
+  const [visionModel, setVisionModel] = useState("");
+  // Whether the server actually has a vision-capable model pulled. The configured
+  // name is not proof: qwen3-vl needs Ollama 0.12.7+, and when it was never
+  // downloaded every image message failed with a generic "unavailable" error
+  // that gave no hint the cause was a missing model.
+  const [visionAvailable, setVisionAvailable] = useState(true);
+  // The assistant is open to everyone — no sign-in required. promptAuth is
+  // kept only to handle a 401 from an older backend that still gates it.
+  const { promptAuth } = useAuth();
 
   const [modelState, setModelState] = useState<ModelState>("loading");
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -313,6 +425,10 @@ export default function AISidebar({
 
       const nextModels: AIModelInfo[] = Array.isArray(data.models) ? data.models : [];
       setModels(nextModels);
+      setVisionModel(String(data.vision_model || ""));
+      // Older backends do not report this field; treat its absence as "assume
+      // yes" so this never invents a warning on a server that works fine.
+      setVisionAvailable(data.vision_available !== false);
 
       if (!data.available || nextModels.length === 0) {
         setSelectedModel("");
@@ -511,6 +627,17 @@ export default function AISidebar({
         } catch {
           next.push({ id: makeId("att"), name: file.name, kind: "file", source: "upload" });
         }
+      } else if (file.type === "application/pdf" || /\.pdf$/i.test(file.name)) {
+        // Pull the PDF's text so the model can read the document and react to
+        // its content (and ask follow-ups), not just see a filename.
+        const textContent = await extractPdfText(file);
+        next.push({
+          id: makeId("att"),
+          name: file.name,
+          kind: "file",
+          source: "upload",
+          textContent: textContent ?? undefined,
+        });
       } else {
         next.push({ id: makeId("att"), name: file.name, kind: "file", source: "upload" });
       }
@@ -631,7 +758,7 @@ export default function AISidebar({
       assistantId: string,
       payload: Record<string, unknown>,
       signal?: AbortSignal
-    ): Promise<boolean> => {
+    ): Promise<{ captureRequested: boolean }> => {
       const response = await fetch(`${API_BASE}/api/ai-command-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -649,15 +776,27 @@ export default function AISidebar({
         const limit = await response.json().catch(() => ({}));
         throw new PlanLimitError(limit.message || "You've reached today's message limit.");
       }
-      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok || !response.body) {
+        // Carry the server's own words along with the status: a 500 from the
+        // assistant endpoint usually explains itself, and swallowing that text
+        // is what made every failure look identical from the chat panel.
+        const detail = await response.text().catch(() => "");
+        throw new Error(
+          `HTTP ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`
+        );
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
       let actionsApplied = false;
+      let captureRequested = false;
 
       const handleEvent = (event: StreamEvent) => {
         switch (event.type) {
+          case "need_capture":
+            captureRequested = true;
+            break;
           case "status":
             updateMessage(assistantId, (m) => ({ ...m, status: event.text ?? "" }));
             break;
@@ -732,7 +871,7 @@ export default function AISidebar({
           /* ignore trailing partial */
         }
       }
-      return true;
+      return { captureRequested };
     },
     [applyReturnedActions, updateMessage]
   );
@@ -772,13 +911,6 @@ export default function AISidebar({
       const text = (overrideText ?? input).trim();
       const outgoingAttachments = attachments;
       if ((!text && outgoingAttachments.length === 0) || loading) return;
-
-      // Caught here as well as server-side: no point sending a request that can
-      // only come back 401, and the popup is the useful response either way.
-      if (!isAuthenticated) {
-        promptAuth();
-        return;
-      }
 
       const conversation = messages
         .filter((message) => message.role === "user" || message.role === "assistant")
@@ -823,9 +955,19 @@ export default function AISidebar({
         .filter((item) => item.kind === "file")
         .map((item) => item.name);
 
-      const composedMessage = fileNames.length
-        ? `${text}\n\n[Attached files: ${fileNames.join(", ")}]`.trim()
-        : text;
+      // Extracted document text rides inside the message so the model can
+      // read what was attached and respond to its actual content.
+      const documentExcerpts = outgoingAttachments
+        .filter((item) => item.kind === "file" && item.textContent)
+        .map((item) => `Content of attached document "${item.name}":\n${item.textContent}`);
+
+      let composedMessage = text;
+      if (fileNames.length) {
+        composedMessage = `${composedMessage}\n\n[Attached files: ${fileNames.join(", ")}]`.trim();
+      }
+      if (documentExcerpts.length) {
+        composedMessage = `${composedMessage}\n\n${documentExcerpts.join("\n\n")}`.trim();
+      }
 
       // When screenshots are attached, include the color→organ legend so the
       // vision model can identify each colored region.
@@ -845,6 +987,10 @@ export default function AISidebar({
         model: selectedModel || null,
         images,
         mask_legend: maskLegend,
+        // Lets the backend's agent offer its capture_views tool; auto_captured
+        // marks the follow-up request so capture is requested at most once.
+        can_capture: !!captureViewport,
+        auto_captured: false,
       };
 
       const controller = new AbortController();
@@ -853,7 +999,43 @@ export default function AISidebar({
         e instanceof DOMException ? e.name === "AbortError" : (e as { name?: string })?.name === "AbortError";
 
       try {
-        await streamResponse(assistantId, payload, controller.signal);
+        const first = await streamResponse(assistantId, payload, controller.signal);
+        // Self-capture: the agent asked to SEE the views. Capture the four
+        // panes right here in the browser and continue the same turn with the
+        // images attached (the backend switches to the vision model).
+        if (first.captureRequested && captureViewport && !controller.signal.aborted) {
+          updateMessage(assistantId, (m) => ({ ...m, status: "Capturing the CT views" }));
+          let shots: { name: string; dataUrl: string }[] = [];
+          try {
+            shots = await captureViewport();
+          } catch (error) {
+            console.error("[BodyMaps AI self-capture]", error);
+          }
+          if (shots.length) {
+            // Transparency: show the shots the assistant took on the user's
+            // message, exactly as if they had clicked the camera themselves.
+            const shotAttachments: ChatAttachment[] = shots.map((shot) => ({
+              id: makeId("shot"),
+              name: `${shot.name} view`,
+              kind: "image",
+              dataUrl: shot.dataUrl,
+              label: shot.name,
+              source: "screenshot",
+            }));
+            updateMessage(userId, (m) => ({
+              ...m,
+              attachments: [...(m.attachments ?? []), ...shotAttachments],
+            }));
+          }
+          updateMessage(assistantId, (m) => ({ ...m, status: "Reading the views" }));
+          const followPayload: Record<string, unknown> = {
+            ...payload,
+            images: shots.map((shot) => shot.dataUrl),
+            mask_legend: getMaskLegend ? getMaskLegend() : maskLegend,
+            auto_captured: true,
+          };
+          await streamResponse(assistantId, followPayload, controller.signal);
+        }
       } catch (streamError) {
         if (isAbort(streamError)) {
           // User pressed Stop — keep whatever was streamed, no error.
@@ -883,12 +1065,13 @@ export default function AISidebar({
                 ...m, content: error.message, status: undefined,
               }));
             } else if (!isAbort(error)) {
-              console.error("[BodyMaps AI send error]", error);
+              // Log BOTH failures: the streaming error is the real cause, and
+              // the fallback error is usually just the same thing again.
+              console.error("[BodyMaps AI] streaming endpoint failed:", streamError);
+              console.error("[BodyMaps AI] fallback endpoint failed:", error);
               updateMessage(assistantId, (m) => ({
                 ...m,
-                content:
-                  m.content ||
-                  "The assistant service is unavailable right now. Viewer controls are still available from the left panel.",
+                content: m.content || describeSendFailure(streamError, images.length > 0),
                 status: undefined,
               }));
             }
@@ -905,9 +1088,6 @@ export default function AISidebar({
       attachments,
       loading,
       messages,
-      // Without these the guard closes over a stale auth state, and signing in
-      // mid-session would leave the composer still refusing to send.
-      isAuthenticated,
       promptAuth,
       caseId,
       sessionId,
@@ -935,12 +1115,18 @@ export default function AISidebar({
     }
   };
 
+  // The instant images are attached, the picker reflects the vision model —
+  // that IS the model that will answer this message (backend switches too).
+  const hasImageAttachments = attachments.some((att) => att.kind === "image");
+  const effectiveModel =
+    hasImageAttachments && visionModel ? visionModel : selectedModel;
+
   const modelLabel =
     modelState === "loading"
       ? "Loading models"
       : modelState === "fallback"
         ? "Local fallback"
-        : selectedModel || models[0]?.name || "Model";
+        : effectiveModel || models[0]?.name || "Model";
 
   const canSend = !loading && (input.trim().length > 0 || attachments.length > 0);
 
@@ -1081,6 +1267,15 @@ export default function AISidebar({
       </div>
 
       <div className="ai-sidebar__composer-wrap">
+        {hasImageAttachments && !visionAvailable && (
+          // Say this BEFORE the message is sent. Discovering that no vision
+          // model exists only after the answer fails is the worst possible time.
+          <div className="ai-composer__warning" role="status">
+            No vision model is installed on the server, so these views can't be
+            read. Run <code>ollama pull qwen3-vl:4b</code> on the backend host
+            and restart it.
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="ai-composer__chips" aria-label="Attachments">
             {attachments.map((att) =>
@@ -1146,10 +1341,11 @@ export default function AISidebar({
                 aria-hidden="true"
                 tabIndex={-1}
               />
+              {/* Attach stays usable while a reply is generating, so the next
+                  message can be prepared without waiting. */}
               <button
                 className="ai-tool-btn"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={loading}
                 aria-label="Attach a file"
                 title="Attach image, PDF, or scan"
                 type="button"
@@ -1161,7 +1357,7 @@ export default function AISidebar({
                   className="ai-tool-btn"
                   data-active={attachments.some((att) => att.source === "screenshot")}
                   onClick={() => void handleCapture()}
-                  disabled={loading || capturing}
+                  disabled={capturing}
                   aria-label={
                     attachments.some((att) => att.source === "screenshot")
                       ? "Remove the captured CT views"
@@ -1183,7 +1379,12 @@ export default function AISidebar({
               <div ref={modelPickerRef} className="ai-model-picker">
                 {modelMenuOpen && (
                   <div className="ai-model-menu ai-model-menu--right" role="menu" aria-label="Choose an Ollama model">
-                    <div className="ai-model-menu__heading">Local model</div>
+                    <div className="ai-model-menu__heading">Local models</div>
+                    {hasImageAttachments && visionModel && (
+                      <div className="ai-model-menu__note">
+                        Images attached — {visionModel} will answer this message.
+                      </div>
+                    )}
                     {models.length > 0 ? (
                       models.map((model) => (
                         <button
@@ -1195,7 +1396,12 @@ export default function AISidebar({
                           aria-checked={selectedModel === model.name}
                           type="button"
                         >
-                          <strong>{model.name}</strong>
+                          <span className="ai-model-menu__info">
+                            <strong>{model.name}</strong>
+                            <span className="ai-model-menu__desc">
+                              {modelDescription(model.name)}
+                            </span>
+                          </span>
                           {selectedModel === model.name ? <CheckIcon /> : null}
                         </button>
                       ))
@@ -1207,10 +1413,16 @@ export default function AISidebar({
                 <button
                   className="ai-model-picker__button"
                   data-state={modelState}
+                  data-vision={hasImageAttachments && !!visionModel}
                   onClick={() => setModelMenuOpen((current) => !current)}
                   disabled={modelState === "loading"}
                   aria-haspopup="menu"
                   aria-expanded={modelMenuOpen}
+                  title={
+                    hasImageAttachments && visionModel
+                      ? "Images attached — the vision model answers this message"
+                      : "Choose the local model"
+                  }
                   type="button"
                 >
                   <span className="ai-model-picker__dot" aria-hidden="true" />

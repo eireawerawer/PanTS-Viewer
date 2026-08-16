@@ -27,8 +27,8 @@ const TERMS: Section[] = [
 		body: "Who may upload imaging, what rights and permissions you are confirming you have when you upload it, and what we are permitted to do with it in order to run the service.",
 	},
 	{
-		heading: "Plans and payment",
-		body: "How plans, quotas, and any future billing work. Nothing is charged today and no pricing has been set.",
+		heading: "Plans and donations",
+		body: "How plans, quotas, and any future donations work. Nothing is charged today and no donation amounts have been set.",
 	},
 	{
 		heading: "Acceptable use",

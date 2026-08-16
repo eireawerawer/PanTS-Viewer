@@ -7,6 +7,7 @@ import ResultsSummary from "./components/ResultsSummary";
 import CaseGrid from "./components/CaseGrid";
 import Pagination from "./components/Pagination";
 import CompareTray from "./components/CompareTray";
+import SiteFooter from "../../components/SiteFooter";
 import styles from "./Homepage.module.css";
 import { PER_PAGE } from "./constants";
 
@@ -14,7 +15,7 @@ export default function Homepage() {
   const dash = useDashboard();
 
   return (
-    <div className="min-h-screen bg-white text-black relative overflow-x-hidden">
+    <div className="min-h-screen bg-white text-black relative overflow-x-hidden flex flex-col">
       <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
         <div className={styles.orb1} />
         <div className={styles.orb2} />
@@ -23,13 +24,12 @@ export default function Homepage() {
 
       <Header />
 
-      <section className="mx-auto max-w-6xl px-6 pt-8 pb-16">
+      <section className="mx-auto w-full max-w-6xl flex-1 px-6 pt-8 pb-16">
         <div className={styles.libraryCard}>
           <LibraryHeader
             showSaved={dash.showSaved}
             setShowSaved={dash.setShowSaved}
             savedCases={dash.savedCases}
-            matchTotal={dash.matchTotal}
             onBrowseAll={dash.handleBrowseAll}
             onShuffle={dash.handleShuffle}
           />
@@ -50,6 +50,19 @@ export default function Homepage() {
               facetData={dash.facetData}
               toggleMulti={dash.toggleMulti}
             />
+          )}
+
+          {/* Match count sits at the bottom-left of the library card — below the
+              filters (Study Year / Any) when they're open — rather than floating. */}
+          {!dash.showSaved && dash.matchTotal !== null && (
+            <div
+              aria-live="polite"
+              className="mt-4 text-sm font-medium text-gray-500"
+            >
+              {`${dash.matchTotal.toLocaleString()} ${
+                dash.matchTotal === 1 ? "case matches" : "cases match"
+              }`}
+            </div>
           )}
         </div>
 
@@ -95,6 +108,7 @@ export default function Homepage() {
           onCompare={dash.handleCompare}
         />
       )}
+      <SiteFooter />
     </div>
   );
 }

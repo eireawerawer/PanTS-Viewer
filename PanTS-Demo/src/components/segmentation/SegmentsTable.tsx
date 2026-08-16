@@ -52,7 +52,7 @@ export default function SegmentsTable({
           <button
             className="seg-table__vis"
             onClick={(e) => { e.stopPropagation(); onToggleVisibility(s.id); }}
-            aria-label={visibility[s.id] ? "Hide segment" : "Show segment"}
+            aria-label={visibility[s.id] ? "Hide class" : "Show class"}
           >
             {visibility[s.id] !== false ? <IconEye size={16} /> : <IconEyeOff size={16} />}
           </button>
@@ -88,7 +88,7 @@ export default function SegmentsTable({
           <button
             className="seg-table__delete"
             onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
-            aria-label="Delete segment"
+            aria-label="Delete class"
           >
             <IconTrash size={14} />
           </button>
