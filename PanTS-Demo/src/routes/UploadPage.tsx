@@ -56,6 +56,11 @@ const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
     label: "LesionSegmenter",
     desc: "For fast pancreatic lesion detection",
   },
+  {
+    id: "AtlasNet-Organs",
+    label: "AtlasNet-Organs",
+    desc: "For liver segments and detailed anatomy",
+  },
 ];
 import { useNavigate } from "react-router-dom";
 import "./UploadPage.css";
@@ -191,6 +196,7 @@ const UploadPage: React.FC = () => {
     | "MedFormer"
     | "R-Super"
     | "Atlas-Net"
+    | "AtlasNet-Organs"
     | "LesionSegmenter"
     | ""
   >("None");

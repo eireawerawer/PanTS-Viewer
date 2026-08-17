@@ -82,6 +82,20 @@ export const segmentation_category_colors: { [key: number]: Color } = {
 	33: [255, 140, 0, 254],   // Liver lesion (dark orange)
 	34: [255, 215, 0, 254],   // Kidney lesion (gold)
 	35: [220, 20, 60, 254],   // Colon lesion (crimson)
+	36: [205, 133, 63, 254],  // Esophagus (peru)
+	37: [233, 150, 122, 254], // Rectum (dark salmon, reads with the colon)
+	38: [160, 82, 45, 254],   // Hepatic vessel (sienna)
+	39: [95, 158, 160, 254],  // Portal + splenic vein (cadet blue)
+	// Couinaud segments: a warm-to-cool ramp so all eight stay tellable apart
+	// side by side, which is the whole point of showing them.
+	40: [220, 90, 60, 254],   // Liver segment 1
+	41: [230, 130, 70, 254],  // Liver segment 2
+	42: [240, 175, 85, 254],  // Liver segment 3
+	43: [215, 200, 95, 254],  // Liver segment 4
+	44: [170, 200, 110, 254], // Liver segment 5
+	45: [120, 190, 140, 254], // Liver segment 6
+	46: [90, 170, 175, 254],  // Liver segment 7
+	47: [80, 140, 195, 254],  // Liver segment 8
 };
 
 // Rotating palette of colours to hand out to new classes.
@@ -134,6 +148,18 @@ export const segmentation_categories: SegmentationCategories[] = [
 	"liver_lesion",
 	"kidney_lesion",
 	"colon_lesion",
+	"esophagus",
+	"rectum",
+	"hepatic_vessel",
+	"portal_vein_and_splenic_vein",
+	"liver_segment_1",
+	"liver_segment_2",
+	"liver_segment_3",
+	"liver_segment_4",
+	"liver_segment_5",
+	"liver_segment_6",
+	"liver_segment_7",
+	"liver_segment_8",
 ];
 
 export const OrganSystemsArray: Systems[] = [
@@ -155,12 +181,14 @@ export const OrganSystemsArray: Systems[] = [
 
 export const OrgansSubsystemsArray: SubSystems[] = [
 	"Kidneys",
-	"Pancreas"
+	"Pancreas",
+	"Liver Segments"
 ]
 
 export const MiscColorMap: MiscColorMapType = {
 	"Kidneys": [144, 238, 200],
-	"Pancreas": [244, 160, 160]
+	"Pancreas": [244, 160, 160],
+	"Liver Segments": [200, 120, 90]
 }
 
 export const OrganSystems: OrganSystemsType = {
@@ -172,6 +200,8 @@ export const OrganSystems: OrganSystemsType = {
 		"veins",
 		"renal_vein_left",
 		"renal_vein_right",
+		"hepatic_vessel",
+		"portal_vein_and_splenic_vein",
 	],
 	"Endocrine System": ["adrenal_gland_left", "adrenal_gland_right"],
 	"Urinary System": [{ Kidneys: ["kidney_left", "kidney_right", "kidney_lesion"] }, "bladder"],
@@ -192,10 +222,24 @@ export const OrganSystems: OrganSystemsType = {
 		"colon",
 		"colon_lesion",
 		"duodenum",
+		"esophagus",
 		"intestine",
+		"rectum",
 		"stomach",
 		"liver",
 		"liver_lesion",
+		{
+			"Liver Segments": [
+				"liver_segment_1",
+				"liver_segment_2",
+				"liver_segment_3",
+				"liver_segment_4",
+				"liver_segment_5",
+				"liver_segment_6",
+				"liver_segment_7",
+				"liver_segment_8",
+			],
+		},
 		"common_bile_duct",
 		"gall_bladder",
 		"cbd_stent",
