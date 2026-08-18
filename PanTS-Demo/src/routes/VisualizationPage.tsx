@@ -495,6 +495,18 @@ function CloseLoopHint({ nearClose, anchor }: { nearClose: boolean; anchor: [num
 	);
 }
 
+// The 3D surface pane is EXCLUDED from the assistant's snapshots.
+//
+// Its WebGL drawing buffer cannot be read back reliably across every
+// GPU/driver/browser combination: on some machines toDataURL returns the
+// cleared buffer no matter how the read is timed, producing a solid black
+// image. A black pane is worse than an absent one — the vision model receives
+// it as evidence and describes an empty scene. The three MPR views carry the
+// anatomy the model actually reasons about.
+//
+// Set this to true to send the 3D view again.
+const INCLUDE_3D_PANE_IN_SNAPSHOTS: boolean = false;
+
 function VisualizationPage() {
 	// References and state
 	const params = useParams();
@@ -1608,40 +1620,33 @@ function VisualizationPage() {
 
 	const captureAllViews = useCallback(async () => {
 		const shots: { name: string; dataUrl: string }[] = await captureViewportImages();
-		try {
-			const pane = document.querySelector<HTMLElement>(".render");
-			const paneVisible = !pane || pane.offsetParent !== null;
-			if (paneVisible) {
-				// Preferred path: have the mesh viewer draw a frame and hand back the
-				// pixels in one synchronous step. Querying the canvas and reading it
-				// afterwards races the compositor, which is what left the 3D pane
-				// solid black even with preserveDrawingBuffer set.
-				let url = captureMeshCanvas();
+		if (INCLUDE_3D_PANE_IN_SNAPSHOTS) {
+			try {
+				const pane = document.querySelector<HTMLElement>(".render");
+				const paneVisible = !pane || pane.offsetParent !== null;
+				if (paneVisible) {
+					// Draw a frame and read the pixels back in one synchronous step;
+					// querying the canvas and reading it later races the compositor.
+					let url = captureMeshCanvas();
 
-				if (!url) {
-					// Fallback for a render tree that never registered a handle.
-					const canvas =
-						document.querySelector<HTMLCanvasElement>("canvas[data-bodymaps-3d]") ??
-						pane?.querySelector<HTMLCanvasElement>("canvas") ??
-						null;
-					if (canvas && canvas.width) {
-						await nextPresentedFrame();
-						url = canvas.toDataURL("image/png");
+					if (!url) {
+						const canvas =
+							document.querySelector<HTMLCanvasElement>("canvas[data-bodymaps-3d]") ??
+							pane?.querySelector<HTMLCanvasElement>("canvas") ??
+							null;
+						if (canvas && canvas.width) {
+							await nextPresentedFrame();
+							url = canvas.toDataURL("image/png");
+						}
 					}
-				}
 
-				if (url && url.length > 128) {
-					if (await imageLooksBlank(url)) {
-						console.warn(
-							"[BodyMaps AI] 3D pane read back blank — omitting it rather than sending a black image"
-						);
-					} else {
+					if (url && url.length > 128 && !(await imageLooksBlank(url))) {
 						shots.push({ name: "3d", dataUrl: url });
 					}
 				}
+			} catch (error) {
+				console.warn("[BodyMaps AI] 3D capture skipped", error);
 			}
-		} catch (error) {
-			console.warn("[BodyMaps AI] 3D capture skipped", error);
 		}
 		// Downscale all shots for fast vision inference.
 		return Promise.all(
