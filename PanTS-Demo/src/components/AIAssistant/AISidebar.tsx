@@ -59,7 +59,7 @@ function describeSendFailure(error: unknown, hadImages: boolean): string {
     );
   }
 
-  return "The assistant didn't return an answer. Viewer controls still work from the left panel.";
+  return "The assistant didn't return an answer. Viewer controls still work from the top panel.";
 }
 
 // Bumped to v2 so a previously-stored reasoning model (e.g. qwen3) is reset —
