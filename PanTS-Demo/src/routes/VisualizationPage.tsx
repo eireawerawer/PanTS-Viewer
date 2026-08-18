@@ -531,12 +531,18 @@ function VisualizationPage() {
 		new URLSearchParams(window.location.search).get("hd") === "1";
 	
 	useEffect(() => {
-		if (!isDicom && caseId && !reportDataCache[caseId]) {
+		if (isDicom || !caseId || reportDataCache[caseId]) return;
+		// Deferred ~2s so this doesn't compete with the CT/segmentation load for
+		// server CPU and disk I/O right when the viewer first opens — the scan
+		// is what the user needs immediately; the report data just needs to be
+		// warm in the cache well before anyone would actually click "Report."
+		const t = setTimeout(() => {
 			fetch(`${API_BASE}/api/get-report-data/${caseId}`)
 				.then(r => r.json())
 				.then(j => { if (!j.error) reportDataCache[caseId] = j; })
 				.catch(() => {});
-		}
+		}, 2000);
+		return () => clearTimeout(t);
 	}, [caseId, isDicom]);
 
 	const [showAnnotationToolbar, setShowAnnotationToolbar] = useState(false);
