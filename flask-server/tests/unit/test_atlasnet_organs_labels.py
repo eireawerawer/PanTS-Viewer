@@ -108,3 +108,70 @@ def test_python_and_typescript_label_order_agree():
         f"index mismatches="
         f"{ {k: (ts_labels[k], _VIEWER_LABELS[k]) for k in ts_labels.keys() & _VIEWER_LABELS.keys() if ts_labels[k] != _VIEWER_LABELS[k]} }"
     )
+
+
+# ---------------------------------------------------------------------------
+# AtlasNet-Tumors, the region-based checkpoint from the same release.
+#
+# The failure mode here is different from Organs: this one does NOT emit a
+# dense range, so a map written on the assumption that it does would paint the
+# wrong organs without erroring. These pin the sparse set and the precedence.
+# ---------------------------------------------------------------------------
+
+from services.auto_segmentor import _ATLASNET_TUMORS_TO_VIEWER
+
+# Emitted values, derived from regions_class_order in the checkpoint's
+# dataset.json (Dataset225_AbdomenAtlas3.0_Lesions).
+ATLASNET_TUMORS_EMITTED = {
+    1: "kidney_right", 2: "kidney_left", 3: "kidney_lesion",
+    6: "pancreas", 7: "pancreas_head", 8: "pancreas_body", 9: "pancreas_tail",
+    10: "pancreatic_lesion",
+    14: "liver",
+    15: "liver_segment_1", 16: "liver_segment_2", 17: "liver_segment_3",
+    18: "liver_segment_4", 19: "liver_segment_5", 20: "liver_segment_6",
+    21: "liver_segment_7", 22: "liver_segment_8",
+    23: "liver_lesion",
+}
+
+
+def test_tumors_covers_exactly_the_emitted_values():
+    assert set(_ATLASNET_TUMORS_TO_VIEWER) == set(ATLASNET_TUMORS_EMITTED)
+
+
+def test_tumors_label_set_is_sparse_not_dense():
+    """Guards the whole point: this checkpoint skips 4, 5, 11, 12, 13.
+
+    If someone 'tidies' the map into a dense 1..18 range this fails, which is
+    the intent -- the sparseness is the model's contract, not an oversight.
+    """
+    keys = set(_ATLASNET_TUMORS_TO_VIEWER)
+    assert keys != set(range(1, len(keys) + 1)), "map went dense; regions decode was lost"
+    assert {4, 5, 11, 12, 13}.isdisjoint(keys)
+    assert max(keys) == 23
+
+
+def test_tumors_targets_need_no_new_viewer_slots():
+    """Every target must already exist; this model adds no labels of its own."""
+    valid = set(_VIEWER_LABELS.values())
+    assert set(_ATLASNET_TUMORS_TO_VIEWER.values()) <= valid
+
+
+def test_tumors_and_organs_agree_on_the_liver_segments():
+    """Both checkpoints must land the eight segments on the same viewer slots.
+
+    They are separate maps over different source numbering (Organs 24-31,
+    Tumors 15-22), so nothing but a test keeps them consistent.
+    """
+    organs = {n: _ATLASNET_ORGANS_TO_VIEWER[s]
+              for s, n in ATLASNET_ORGANS_CLASSES.items() if n.startswith("liver_segment_")}
+    tumors = {n: _ATLASNET_TUMORS_TO_VIEWER[s]
+              for s, n in ATLASNET_TUMORS_EMITTED.items() if n.startswith("liver_segment_")}
+    assert organs == tumors
+    assert len(organs) == 8
+
+
+@pytest.mark.parametrize("src,name", sorted(ATLASNET_TUMORS_EMITTED.items()))
+def test_tumors_mapping_is_semantically_right(src, name):
+    assert _ATLASNET_TUMORS_TO_VIEWER[src] == _VIEWER_LABELS[name], (
+        f"tumors label {src} ({name}) mapped to the wrong viewer slot"
+    )
