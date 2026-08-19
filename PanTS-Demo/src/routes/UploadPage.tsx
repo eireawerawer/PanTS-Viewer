@@ -1927,19 +1927,19 @@ const UploadPage: React.FC = () => {
               phase === "queued" ? "Queued for GPU" : "Running…";
             return (
               <div style={{
-                background: "#f5f5f5", border: "1px solid rgba(15, 23, 42, 0.14)", borderRadius: "12px",
+                background: "#f5f5f5", border: "1px solid rgba(0, 45, 114, 0.14)", borderRadius: "12px",
                 padding: "16px 20px", display: "flex", flexDirection: "column", gap: "12px",
               }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
                     <div style={{
                       width: "36px", height: "36px", borderRadius: "8px", flexShrink: 0,
-                      background: "rgba(15, 23, 42, 0.04)", border: "1px solid rgba(15, 23, 42, 0.12)",
+                      background: "rgba(0, 45, 114, 0.04)", border: "1px solid rgba(0, 45, 114, 0.12)",
                       display: "flex", alignItems: "center", justifyContent: "center",
                     }}>{/* A static pulsing dot per scan instead of a spinning wheel:
                          multiple in-flight scans shouldn't each spin. The single
                          spinner lives in the batch ProcessingSummaryBar. */}
-                      <span className="animate-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: "#0F172A", display: "block" }} />
+                      <span className="animate-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: "#002d72", display: "block" }} />
                     </div>
                     <div>
                       <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
@@ -1952,7 +1952,7 @@ const UploadPage: React.FC = () => {
                     </div>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                    <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: phase === "queued" ? "#6a6a6a" : "#0F172A" }}>{phaseLabel}</span>
+                    <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: phase === "queued" ? "#6a6a6a" : "#002d72" }}>{phaseLabel}</span>
                     <button className="active-cancel-btn" onClick={() => cancelRun(u)}>Cancel</button>
                   </div>
                 </div>
@@ -1982,7 +1982,7 @@ const UploadPage: React.FC = () => {
                         if (e.key === "Enter") commitRename();
                         else if (e.key === "Escape") setRenamingId(null);
                       }}
-                      style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", border: "1px solid rgba(15, 23, 42, 0.3)", borderRadius: "6px", padding: "2px 6px", width: "100%", maxWidth: "260px" }}
+                      style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", border: "1px solid rgba(0, 45, 114, 0.3)", borderRadius: "6px", padding: "2px 6px", width: "100%", maxWidth: "260px" }}
                     />
                   ) : (
                     <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0 }}>
@@ -2034,7 +2034,7 @@ const UploadPage: React.FC = () => {
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
                   <button style={smallBtn} onClick={() => { track("upload_open_batch_details"); setDetailsBatchId(batchId); }}>View details</button>
-                  <button style={{ ...smallBtn, background: "#0F172A", color: "#fff", borderColor: "#0F172A" }} onClick={() => downloadBatch(uploads)}>Download</button>
+                  <button style={{ ...smallBtn, background: "#002d72", color: "#fff", borderColor: "#002d72" }} onClick={() => downloadBatch(uploads)}>Download</button>
                   <RemoveBtn onClick={() => removeBatch(uploads)} />
                 </div>
               </div>

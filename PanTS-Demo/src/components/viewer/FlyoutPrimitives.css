@@ -340,7 +340,7 @@
 }
 
 .atb-menu-row__expand-chip.is-open {
-    background: rgba(15, 23, 42, 0.35);
+    background: rgba(0, 45, 114, 0.35);
     border-color: rgba(104, 172, 229, 0.5);
     color: #3499ff;
 }
