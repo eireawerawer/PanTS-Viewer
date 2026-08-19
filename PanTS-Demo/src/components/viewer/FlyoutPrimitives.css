@@ -371,7 +371,7 @@
     justify-content: center;
     width: 16px;
     height: 16px;
-    color: var(--accent, #3499ff);
+    color: #68ACE5;
     animation: atb-check-pop 0.15s ease-out;
 }
 
