@@ -1,9 +1,9 @@
 import { IconAlertTriangle, IconArrowLeft, IconUsersGroup } from "@tabler/icons-react";
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import VisualizationPage from "../routes/VisualizationPage";
-import { bootstrapLiveRoom, consumeCreatorAutoJoinName, roomKeyFromFragment } from "./protocol";
-import type { LiveQuizState, LiveRoomDurableState, LiveRoomMetadata } from "./types";
+import { appRootRelativeUrl, bootstrapLiveRoom, getLiveRoomParticipantCredential, roomKeyFromFragment } from "./protocol";
+import type { LiveQuizHostCredential, LiveQuizState, LiveRoomDurableState, LiveRoomMetadata } from "./types";
 import { useLiveRoom } from "./useLiveRoom";
 import "./liveRooms.css";
 
@@ -11,8 +11,15 @@ type Bootstrap = {
 	metadata: LiveRoomMetadata;
 	state: LiveRoomDurableState;
 	maskUrl: string;
-	maskSequence: number;
+	snapshotSequence: number;
 	quiz: LiveQuizState | null;
+};
+
+type LiveRoomNavigationState = {
+	liveRoomCreation?: {
+		creatorName?: string;
+		quizHostCredential?: LiveQuizHostCredential;
+	};
 };
 
 function JoinDialog({ initialName, onJoin }: { initialName: string; onJoin: (name: string) => void }) {
@@ -47,7 +54,7 @@ function LiveRoomErrorPage({ message, roomId }: { message: string; roomId: strin
 				<IconAlertTriangle size={28} />
 				<h1>{expired ? "Live Room expired" : "Room unavailable"}</h1>
 				<p>{expired ? "Room data was deleted after its 24-hour lifetime." : message}</p>
-				<a className="lr-button lr-button--primary" href={caseId ? `/case/${caseId}` : "/dashboard"}>
+				<a className="lr-button lr-button--primary" href={appRootRelativeUrl(caseId ? `/case/${caseId}` : "/dashboard")}>
 					<IconArrowLeft size={18} /> {caseId ? `Return to case ${caseId}` : "Return to dashboard"}
 				</a>
 			</div>
@@ -55,20 +62,35 @@ function LiveRoomErrorPage({ message, roomId }: { message: string; roomId: strin
 	);
 }
 
-function ConnectedRoom({ bootstrap, roomKey, name }: { bootstrap: Bootstrap; roomKey: string; name: string }) {
+function ConnectedRoom({ bootstrap, roomKey, name, quizHostCredential, onQuizHostCredentialAccepted }: {
+	bootstrap: Bootstrap;
+	roomKey: string;
+	name: string;
+	quizHostCredential?: LiveQuizHostCredential;
+	onQuizHostCredentialAccepted: () => void;
+}) {
 	const controller = useLiveRoom({
 		metadata: bootstrap.metadata,
 		roomKey,
 		name,
 		maskUrl: bootstrap.maskUrl,
-		maskSequence: bootstrap.maskSequence,
+		snapshotSequence: bootstrap.snapshotSequence,
 		initialState: bootstrap.state,
 		initialQuiz: bootstrap.quiz,
+		quizHostCredential,
+		onQuizHostCredentialAccepted,
+		onAuthoritativeResync: () => window.location.reload(),
 	});
 	return <VisualizationPage liveRoom={controller} />;
 }
 
-function BootstrappingRoom({ roomId, roomKey, name }: { roomId: string; roomKey: string; name: string }) {
+function BootstrappingRoom({ roomId, roomKey, name, quizHostCredential, onQuizHostCredentialAccepted }: {
+	roomId: string;
+	roomKey: string;
+	name: string;
+	quizHostCredential?: LiveQuizHostCredential;
+	onQuizHostCredentialAccepted: () => void;
+}) {
 	const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	useEffect(() => {
@@ -100,14 +122,26 @@ function BootstrappingRoom({ roomId, roomKey, name }: { roomId: string; roomKey:
 			<p>Loading shared scan…</p>
 		</div>
 	);
-	return <ConnectedRoom key={`${roomId}:${roomKey}`} bootstrap={bootstrap} roomKey={roomKey} name={name} />;
+	return <ConnectedRoom key={`${roomId}:${roomKey}`} bootstrap={bootstrap} roomKey={roomKey} name={name} quizHostCredential={quizHostCredential} onQuizHostCredentialAccepted={onQuizHostCredentialAccepted} />;
 }
 
 export default function LiveRoomPage() {
 	const { roomId = "" } = useParams();
+	const location = useLocation();
+	const navigate = useNavigate();
 	const roomKey = roomKeyFromFragment();
 	const storedName = sessionStorage.getItem("bodymaps.live-room.name") || "";
-	const [name, setName] = useState<string | null>(() => consumeCreatorAutoJoinName(roomId, storedName));
+	const navigationState = location.state as LiveRoomNavigationState | null;
+	const creation = navigationState?.liveRoomCreation;
+	const [name, setName] = useState<string | null>(() => {
+		if (creation?.creatorName) return creation.creatorName;
+		return storedName && getLiveRoomParticipantCredential(roomId) ? storedName : null;
+	});
+	const [quizHostCredential, setQuizHostCredential] = useState(creation?.quizHostCredential);
+	const clearQuizHostCredential = () => {
+		setQuizHostCredential(undefined);
+		navigate(`${location.pathname}${location.search}${location.hash}`, { replace: true, state: null });
+	};
 
 	useEffect(() => {
 		document.querySelector('meta[name="referrer"]')?.setAttribute("content", "no-referrer");
@@ -118,5 +152,5 @@ export default function LiveRoomPage() {
 		sessionStorage.setItem("bodymaps.live-room.name", value);
 		setName(value);
 	}} />;
-	return <BootstrappingRoom key={`${roomId}:${roomKey}`} roomId={roomId} roomKey={roomKey} name={name} />;
+	return <BootstrappingRoom key={`${roomId}:${roomKey}`} roomId={roomId} roomKey={roomKey} name={name} quizHostCredential={quizHostCredential} onQuizHostCredentialAccepted={clearQuizHostCredential} />;
 }

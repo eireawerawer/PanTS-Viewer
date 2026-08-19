@@ -87,7 +87,7 @@ def create_live_room():
     case_id = str(body.get("case_id", ""))
     resolution = str(body.get("resolution", "low")).lower()
     mode = str(body.get("mode", "review")).lower()
-    host_secret = None
+    host_claim = None
     if mode == "quiz":
         timer = body.get("quiz_timer_seconds", 30)
         if timer == "untimed":
@@ -104,7 +104,7 @@ def create_live_room():
         excluded = body.get("quiz_exclude_pack_ids") or []
         if not isinstance(excluded, list) or not all(isinstance(item, str) for item in excluded):
             raise LiveRoomError("quiz_exclude_pack_ids must be a string list")
-        metadata, room_key, host_secret = get_live_room_store().create_quiz_room(
+        metadata, room_key, host_claim = get_live_room_store().create_quiz_room(
             case_id,
             resolution,
             quiz_pack_id=str(pack_id or QUIZ_PACK_ID),
@@ -120,8 +120,11 @@ def create_live_room():
     base = (Constants.BASE_PATH or "").rstrip("/")
     share_url = f"{base}/live/{metadata['room_id']}#{room_key}"
     response = {**metadata, "room_key": room_key, "share_url": share_url}
-    if host_secret:
-        response["quiz_host_secret"] = host_secret
+    if host_claim:
+        response["quiz_host_claim"] = host_claim
+        # Protocol 1 rolling-deploy alias. Existing clients and rooms expire in
+        # 24 hours; new clients use quiz_host_claim and acknowledge room.ready.
+        response["quiz_host_secret"] = host_claim
     return jsonify(response), 201
 
 
@@ -141,8 +144,9 @@ def get_live_room_snapshot(room_id: str):
     store = get_live_room_store()
     if request.args.get("format") == "mask":
         path, sequence = store.get_mask_snapshot(room_id, _room_key())
+        artifact = store.open_artifact(room_id, _room_key(), path)
         response = send_file(
-            path,
+            artifact,
             mimetype="application/gzip",
             as_attachment=False,
             download_name="live-room-labelmap.nii.gz",
@@ -155,9 +159,10 @@ def get_live_room_snapshot(room_id: str):
 
 @live_rooms_blueprint.get("/live-rooms/<room_id>/export.zip")
 def export_live_room(room_id: str):
-    path = get_live_room_store().build_export(room_id, _room_key())
+    store = get_live_room_store()
+    path = store.build_export(room_id, _room_key())
     return send_file(
-        path,
+        store.open_artifact(room_id, _room_key(), path),
         mimetype="application/zip",
         as_attachment=True,
         download_name=f"bodymaps-live-room-{room_id}.zip",
@@ -167,9 +172,10 @@ def export_live_room(room_id: str):
 
 @live_rooms_blueprint.get("/live-rooms/<room_id>/report.pdf")
 def live_room_report(room_id: str):
-    path = get_live_room_store().get_report(room_id, _room_key())
+    store = get_live_room_store()
+    path = store.get_report(room_id, _room_key())
     return send_file(
-        path,
+        store.open_artifact(room_id, _room_key(), path),
         mimetype="application/pdf",
         as_attachment=True,
         download_name=f"bodymaps-live-room-{room_id}-report.pdf",

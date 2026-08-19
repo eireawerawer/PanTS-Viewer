@@ -2,7 +2,8 @@ import { IconArrowLeft, IconBolt, IconClipboardCheck, IconClockPlay, IconUsersGr
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { API_BASE } from "../helpers/constants";
-import { liveRoomCreatorAutoJoinKey } from "./protocol";
+import { liveRoomRoute } from "./protocol";
+import type { LiveQuizHostCredential } from "./types";
 import "./liveRooms.css";
 
 type Props = {
@@ -114,10 +115,21 @@ export default function LiveRoomCreateDialog({ caseId, open, onClose }: Props) {
 			});
 			const body = await response.json().catch(() => ({}));
 			if (!response.ok) throw new Error(body.error || `Could not create room (${response.status})`);
+			const quizHostCredential: LiveQuizHostCredential | undefined = typeof body.quiz_host_claim === "string"
+				? { mode: "modern", value: body.quiz_host_claim }
+				: typeof body.quiz_host_secret === "string"
+					? { mode: "legacy", value: body.quiz_host_secret }
+					: undefined;
 			sessionStorage.setItem("bodymaps.live-room.name", cleanName);
-				sessionStorage.setItem(`bodymaps.live-room.${body.room_id}.case-id`, String(body.case_id));
-			sessionStorage.setItem(liveRoomCreatorAutoJoinKey(body.room_id), "1");
-			window.location.assign(body.share_url);
+			sessionStorage.setItem(`bodymaps.live-room.${body.room_id}.case-id`, String(body.case_id));
+			navigate(liveRoomRoute(String(body.room_id), String(body.room_key)), {
+				state: {
+					liveRoomCreation: {
+						creatorName: cleanName,
+						quizHostCredential,
+					},
+				},
+			});
 		} catch (caught) {
 			setError(caught instanceof Error ? caught.message : "Could not create Live Room");
 			setSubmitting(false);

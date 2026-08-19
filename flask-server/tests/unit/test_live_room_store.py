@@ -4,6 +4,7 @@ import json
 import asyncio
 import shutil
 import sys
+import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ from services.live_room_store import (
     RoomUnauthorized,
 )
 from live_rooms_ws import LiveRoomWebSocketService
+import live_rooms_ws
 import api.live_rooms as live_rooms_api
 import services.live_room_store as live_room_store_module
 from websockets.asyncio.client import connect
@@ -80,6 +82,19 @@ def test_fast_room_keeps_full_resolution_mask(room_store):
     assert stored["base_ct_path"].endswith("ct_lowres.nii.gz")
     assert stored["base_mask_path"].endswith("combined_labels.nii.gz")
     assert metadata["dimensions"] == [4, 4, 2]
+
+
+def test_websocket_origin_allowlist_is_exact(monkeypatch):
+    monkeypatch.setenv(
+        "LIVE_ROOMS_ALLOWED_ORIGINS",
+        "https://bodymaps.example, http://localhost:5173",
+    )
+    assert live_rooms_ws._allowed_origins() == [
+        "https://bodymaps.example", "http://localhost:5173",
+    ]
+    monkeypatch.setenv("LIVE_ROOMS_ALLOWED_ORIGINS", "*")
+    with pytest.raises(RuntimeError, match="non-wildcard"):
+        live_rooms_ws._allowed_origins()
 
 
 def commit_chat(store: LiveRoomStore, room_id: str, key: str, index: int):
@@ -194,6 +209,93 @@ def test_atomic_sequences_and_event_id_idempotency(room_store):
     assert duplicate is True
     assert first["seq"] == original["seq"]
     assert store.get_metadata(metadata["room_id"], key)["latest_seq"] == 24
+    restarted = LiveRoomStore(store.root.parent, store.pants_path, now=room_store[1])
+    first, duplicate = commit_chat(restarted, metadata["room_id"], key, 3)
+    assert duplicate is True
+    assert first["seq"] == original["seq"]
+
+
+def test_replay_is_bounded_and_last_sequence_is_validated(room_store):
+    store, metadata, key = create(room_store)
+    for index in range(3):
+        commit_chat(store, metadata["room_id"], key, index)
+
+    events, resync = store.replay_after(metadata["room_id"], key, 0, budget=2)
+    assert events == []
+    assert resync is True
+    events, resync = store.replay_after(metadata["room_id"], key, 1, budget=2)
+    assert [event["seq"] for event in events] == [2, 3]
+    assert resync is False
+    for invalid in (-1, True, 4):
+        with pytest.raises(live_room_store_module.LiveRoomError) as error:
+            store.replay_after(metadata["room_id"], key, invalid)
+        assert error.value.code == "invalid_last_seq"
+
+
+def test_replay_aggregate_byte_budget_requires_resync_below_event_limit(room_store):
+    store, metadata, key = create(room_store)
+    room_dir = store.root / metadata["room_id"]
+    events = [
+        {
+            "seq": index,
+            "event_id": f"large-{index}",
+            "type": "chat.add",
+            "participant_id": "participant-1",
+            "name": "Reviewer",
+            "created_at": "2026-07-12T12:00:00Z",
+            "payload": {"padding": "x" * (300 * 1024)},
+        }
+        for index in range(1, 9)
+    ]
+    (room_dir / "events.jsonl").write_bytes(
+        b"".join(
+            json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n"
+            for event in events
+        )
+    )
+    stored_metadata = json.loads((room_dir / "metadata.json").read_text())
+    stored_metadata["latest_seq"] = len(events)
+    (room_dir / "metadata.json").write_text(json.dumps(stored_metadata))
+
+    replay, resync = store.replay_after(metadata["room_id"], key, 0)
+
+    assert len(events) < live_room_store_module.MAX_REPLAY_EVENTS
+    assert replay == []
+    assert resync is True
+
+
+def test_room_permissions_and_undo_share_event_quota(room_store, monkeypatch):
+    store, metadata, key = create(room_store)
+    room_dir = store.root / metadata["room_id"]
+    assert store.root.stat().st_mode & 0o777 == 0o700
+    assert room_dir.stat().st_mode & 0o777 == 0o700
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in room_dir.iterdir() if path.is_file())
+
+    store.commit_event(
+        metadata["room_id"], key, event_id="note-quota", event_type="note.upsert",
+        participant_id="participant-1", name="Reviewer",
+        payload={"note": {"id": "note-1", "text": "finding", "world": [1, 2, 3]}},
+    )
+    monkeypatch.setattr(live_room_store_module, "MAX_EVENTS", 1)
+    with pytest.raises(live_room_store_module.RoomFull):
+        store.undo_latest(metadata["room_id"], key, "participant-1", "Reviewer")
+    assert "note-1" in store.get_snapshot(metadata["room_id"], key)["state"]["notes"]
+
+
+def test_export_csv_escapes_spreadsheet_formulas(room_store):
+    store, metadata, key = create(room_store)
+    store.commit_event(
+        metadata["room_id"], key, event_id="formula-measurement",
+        event_type="measurement.upsert", participant_id="participant-1", name="Reviewer",
+        payload={"measurement": {
+            "id": "measurement-1", "tool": "Length", "points": [[1, 2, 3], [2, 3, 4]],
+            "polyline": [], "label": "=HYPERLINK(\"https://example.invalid\")", "text": "+cmd",
+        }},
+    )
+    with zipfile.ZipFile(store.build_export(metadata["room_id"], key)) as archive:
+        exported = archive.read("measurements.csv").decode("utf-8")
+    assert "'=HYPERLINK" in exported
+    assert "'+cmd" in exported
 
 
 @pytest.mark.parametrize("tool", sorted(MEASUREMENT_TOOLS))
@@ -302,6 +404,118 @@ def test_restart_replays_event_after_stale_snapshot_files(room_store):
     assert snapshot["state"]["chat"][0]["text"] == "message 7"
 
 
+@pytest.mark.parametrize("failed_file", ["state.json", "metadata.json"])
+def test_event_transaction_recovers_after_derived_or_final_metadata_failure(
+    room_store, monkeypatch, failed_file
+):
+    store, metadata, key = create(room_store)
+    room_dir = store.root / metadata["room_id"]
+    atomic_json = live_room_store_module._atomic_json
+    failed = False
+
+    def fail_once(path, value):
+        nonlocal failed
+        if (
+            not failed
+            and path.name == failed_file
+            and (room_dir / "events.jsonl").stat().st_size > 0
+        ):
+            failed = True
+            raise OSError("injected persistence failure")
+        return atomic_json(path, value)
+
+    monkeypatch.setattr(live_room_store_module, "_atomic_json", fail_once)
+    with pytest.raises(OSError, match="injected"):
+        commit_chat(store, metadata["room_id"], key, 41)
+    assert json.loads((room_dir / "metadata.json").read_text())["latest_seq"] == 0
+    assert (room_dir / ".pending_event.json").is_file()
+
+    monkeypatch.setattr(live_room_store_module, "_atomic_json", atomic_json)
+    restarted = LiveRoomStore(store.root.parent, store.pants_path, now=room_store[1])
+    snapshot = restarted.get_snapshot(metadata["room_id"], key)
+    assert snapshot["latest_seq"] == 1
+    assert snapshot["state"]["chat"][0]["text"] == "message 41"
+    assert not (room_dir / ".pending_event.json").exists()
+
+
+def test_recovery_discards_incomplete_final_append_before_retry(room_store, monkeypatch):
+    store, metadata, key = create(room_store)
+    room_dir = store.root / metadata["room_id"]
+    atomic_json = live_room_store_module._atomic_json
+
+    def fail_state(path, value):
+        if path.name == "state.json" and (room_dir / "events.jsonl").stat().st_size:
+            raise OSError("injected persistence failure")
+        return atomic_json(path, value)
+
+    monkeypatch.setattr(live_room_store_module, "_atomic_json", fail_state)
+    with pytest.raises(OSError):
+        commit_chat(store, metadata["room_id"], key, 42)
+    event_bytes = (room_dir / "events.jsonl").read_bytes()
+    (room_dir / "events.jsonl").write_bytes(event_bytes[: len(event_bytes) // 2])
+
+    monkeypatch.setattr(live_room_store_module, "_atomic_json", atomic_json)
+    restarted = LiveRoomStore(store.root.parent, store.pants_path, now=room_store[1])
+    assert restarted.get_snapshot(metadata["room_id"], key)["latest_seq"] == 0
+    event, duplicate = commit_chat(restarted, metadata["room_id"], key, 42)
+    assert duplicate is False
+    assert event["seq"] == 1
+
+
+def test_join_queues_commit_between_replay_and_ready(room_store, monkeypatch):
+    store, metadata, key = create(room_store)
+
+    async def scenario():
+        service = LiveRoomWebSocketService(store)
+        async with serve(service.handler, "127.0.0.1", 0, max_size=512 * 1024) as server:
+            port = server.sockets[0].getsockname()[1]
+            uri = f"ws://127.0.0.1:{port}/ws/live-rooms/{metadata['room_id']}"
+            async with connect(uri) as first, connect(uri) as joining:
+                await first.send(json.dumps({
+                    "type": "hello", "protocol": 1, "room_key": key,
+                    "name": "First", "last_seq": 0,
+                }))
+                assert json.loads(await first.recv())["type"] == "room.ready"
+                await first.send(json.dumps({
+                    "type": "chat.add", "event_id": "before-join",
+                    "payload": {"message": {"id": "before-join-message", "text": "before"}},
+                }))
+                assert json.loads(await first.recv())["event"]["seq"] == 1
+
+                replay_captured = threading.Event()
+                release_replay = threading.Event()
+                replay_after = store.replay_after
+
+                def delayed_replay(*args, **kwargs):
+                    result = replay_after(*args, **kwargs)
+                    replay_captured.set()
+                    assert release_replay.wait(timeout=5)
+                    return result
+
+                monkeypatch.setattr(store, "replay_after", delayed_replay)
+                await joining.send(json.dumps({
+                    "type": "hello", "protocol": 1, "room_key": key,
+                    "name": "Joining", "last_seq": 1,
+                }))
+                assert await asyncio.to_thread(replay_captured.wait, 5)
+                await first.send(json.dumps({
+                    "type": "chat.add", "event_id": "join-race",
+                    "payload": {"message": {"id": "join-race-message", "text": "not missed"}},
+                }))
+                committed = json.loads(await asyncio.wait_for(first.recv(), timeout=2))
+                assert committed["type"] == "event.committed"
+                release_replay.set()
+
+                ready = json.loads(await asyncio.wait_for(joining.recv(), timeout=2))
+                queued = json.loads(await asyncio.wait_for(joining.recv(), timeout=2))
+                assert ready["type"] == "room.ready"
+                assert ready["events"] == []
+                assert queued["type"] == "event.committed"
+                assert queued["event"]["event_id"] == "join-race"
+
+    asyncio.run(scenario())
+
+
 def test_expiry_and_cleanup(room_store):
     store, clock = room_store
     metadata, key = store.create_room("35", "low")
@@ -328,6 +542,13 @@ def test_two_websocket_clients_converge_and_reconnect(room_store):
                 await first.send(json.dumps(hello))
                 ready_one = json.loads(await first.recv())
                 assert ready_one["type"] == "room.ready"
+                await first.send(json.dumps({
+                    "type": "presence.update",
+                    "payload": {"cursor": {"pane": "axial", "x": float("nan"), "y": 0.5}},
+                }))
+                invalid_presence = json.loads(await first.recv())
+                assert invalid_presence["type"] == "error"
+                assert invalid_presence["fatal"] is False
                 async with connect(uri) as second:
                     await second.send(json.dumps({
                         **hello,
@@ -402,6 +623,41 @@ def test_reconnecting_same_participant_replaces_stale_socket(room_store):
                     assert first.close_code == 4000
                     await replacement.send(json.dumps({"type": "ping"}))
                     assert json.loads(await replacement.recv())["type"] == "pong"
+
+    asyncio.run(scenario())
+
+
+def test_websocket_capacity_rejects_before_minting_identity(room_store):
+    store, metadata, key = create(room_store)
+
+    async def scenario():
+        service = LiveRoomWebSocketService(store)
+        sockets = []
+        try:
+            async with serve(service.handler, "127.0.0.1", 0, max_size=512 * 1024) as server:
+                port = server.sockets[0].getsockname()[1]
+                uri = f"ws://127.0.0.1:{port}/ws/live-rooms/{metadata['room_id']}"
+                for index in range(8):
+                    websocket = await connect(uri)
+                    sockets.append(websocket)
+                    await websocket.send(json.dumps({
+                        "type": "hello", "protocol": 1, "room_key": key,
+                        "name": f"Peer {index}", "last_seq": 0,
+                    }))
+                    assert json.loads(await websocket.recv())["type"] == "room.ready"
+                rejected = await connect(uri)
+                sockets.append(rejected)
+                await rejected.send(json.dumps({
+                    "type": "hello", "protocol": 1, "room_key": key,
+                    "name": "Ninth", "last_seq": 0,
+                }))
+                error = json.loads(await rejected.recv())
+                assert error["code"] == "participant_limit"
+                room_dir = store.root / metadata["room_id"]
+                stored = json.loads((room_dir / "metadata.json").read_text())
+                assert len(stored["participant_credentials"]) == 8
+        finally:
+            await asyncio.gather(*(websocket.close() for websocket in sockets), return_exceptions=True)
 
     asyncio.run(scenario())
 

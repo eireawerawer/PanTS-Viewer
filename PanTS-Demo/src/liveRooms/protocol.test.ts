@@ -1,17 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { gzip } from "pako";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	MAX_LIVE_ROOM_CHAT_MESSAGES,
+	appRootRelativeUrl,
 	applyCommittedEvent,
+	bootstrapLiveRoom,
 	chunkMaskRanges,
-	consumeCreatorAutoJoinName,
 	emptyDurableState,
-	liveRoomCreatorAutoJoinKey,
-	liveQuizHostSecretKey,
+	liveRoomShareUrl,
 	roomKeyFromFragment,
+	sanitizeLiveRoomPresence,
+	sanitizeLiveRoomView,
 } from "./protocol";
 import type { LiveRoomEvent } from "./types";
 
 describe("Live Room protocol helpers", () => {
+	afterEach(() => {
+		sessionStorage.clear();
+		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
+	});
+
 	it("extracts capability only from URL fragment", () => {
 		expect(roomKeyFromFragment("#secret%2Fkey")).toBe("secret/key");
 		expect(roomKeyFromFragment("#%zz")).toBe("");
@@ -56,18 +65,59 @@ describe("Live Room protocol helpers", () => {
 		expect(state.chat[0].text).toBe("1");
 	});
 
-	it("auto-joins only the creator once", () => {
-		const roomId = "00000000-0000-4000-8000-000000000001";
-		const key = liveRoomCreatorAutoJoinKey(roomId);
-		sessionStorage.setItem(key, "1");
-		expect(consumeCreatorAutoJoinName(roomId, "Creator")).toBe("Creator");
-		expect(sessionStorage.getItem(key)).toBeNull();
-		expect(consumeCreatorAutoJoinName(roomId, "Creator")).toBeNull();
+	it("generates basename-aware app and room URLs", () => {
+		expect(appRootRelativeUrl("/case/35", "/bodymaps/")).toBe("/bodymaps/case/35");
+		expect(liveRoomShareUrl("room 1", "key/value", "https://bodymaps.test", "/app"))
+			.toBe("https://bodymaps.test/app/live/room%201#key%2Fvalue");
 	});
 
-	it("uses a separate tab-scoped key for the quiz host credential", () => {
-		const roomId = "00000000-0000-4000-8000-000000000001";
-		expect(liveQuizHostSecretKey(roomId)).toBe(`bodymaps.live-room.${roomId}.quiz-host-secret`);
-		expect(liveQuizHostSecretKey(roomId)).not.toBe(liveRoomCreatorAutoJoinKey(roomId));
+	it("allows only small typed transient fields and preserves explicit clears", () => {
+		expect(sanitizeLiveRoomPresence({
+			cursor: null,
+			plane: "axial",
+			crosshair: [1, 2, 3],
+			unknown: "discard",
+		})).toEqual({ cursor: null, plane: "axial", crosshair: [1, 2, 3] });
+		expect(sanitizeLiveRoomView({ view: {
+			crosshair: [1, 2, 3],
+			cameras: { axial: { position: [1, 2, 3], injected: "discard" }, injected: {} },
+			visibleOrgans: [1, 0],
+			injected: "discard",
+		} })).toEqual({ view: {
+			crosshair: [1, 2, 3],
+			cameras: { axial: { position: [1, 2, 3] } },
+			visibleOrgans: [true, false],
+		} });
+	});
+
+	it("bootstraps state first and resumes after its sequence when over 500 non-mask events exist", async () => {
+		const room = {
+			room_id: "room-501", case_id: "35", resolution: "low", created_at: "now", expires_at: "later",
+			geometry_hash: "hash", dimensions: [1, 1, 1], latest_seq: 501, mode: "review",
+		};
+		const requests: string[] = [];
+		vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+			const url = String(input);
+			requests.push(url);
+			if (url.endsWith("/snapshot")) {
+				return Promise.resolve(new Response(JSON.stringify({
+					room,
+					latest_seq: 501,
+					state: emptyDurableState(),
+				}), { status: 200, headers: { "Content-Type": "application/json" } }));
+			}
+			return Promise.resolve(new Response(gzip(new Uint8Array([1, 2, 3])), {
+				status: 200,
+				headers: { "X-Live-Room-Sequence": "0" },
+			}));
+		}));
+		vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:authoritative-mask");
+
+		const result = await bootstrapLiveRoom(room.room_id, "secret");
+
+		expect(requests[0]).toMatch(/\/snapshot$/);
+		expect(requests[1]).toMatch(/\/snapshot\?format=mask$/);
+		expect(result.snapshotSequence).toBe(501);
+		expect(result.maskUrl).toBe("blob:authoritative-mask");
 	});
 });

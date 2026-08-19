@@ -9,11 +9,13 @@ database.
 from __future__ import annotations
 
 import csv
+import copy
 import hashlib
 import hmac
 import html
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -68,6 +70,12 @@ MAX_MASK_VOXELS_PER_EVENT = 8_000_000
 MAX_PARTICIPANT_IDENTITIES = 128
 SNAPSHOT_MASK_EVENT_INTERVAL = 50
 SNAPSHOT_TIME_INTERVAL = timedelta(minutes=5)
+MAX_REPLAY_EVENTS = 500
+MAX_REPLAY_BYTES = 2 * 1024 * 1024
+LIFECYCLE_EVENT_RESERVE = 64
+LIFECYCLE_EVENT_BYTE_RESERVE = 1024 * 1024
+
+logger = logging.getLogger(__name__)
 
 MEASUREMENT_TOOLS = {
     "Length",
@@ -171,15 +179,28 @@ def _clean_text(value: Any, limit: int, *, required: bool = True) -> str:
     return cleaned
 
 
+def _csv_safe(value: Any) -> Any:
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + value
+    return value
+
+
 def _atomic_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(value, stream, ensure_ascii=False, separators=(",", ":"))
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temp_name, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except Exception:
         try:
             os.unlink(temp_name)
@@ -198,13 +219,15 @@ class LiveRoomStore:
         quiz_registry: QuizPackRegistry | None = None,
     ) -> None:
         self.root = Path(sessions_dir).resolve() / "live_rooms"
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.root.chmod(0o700)
         self.pants_path = Path(pants_path).resolve() if pants_path else None
         self._now = now
         self.quiz_registry = quiz_registry or get_registry()
         self.quiz_telemetry = QuizTelemetry(sessions_dir)
         self._locks: weakref.WeakValueDictionary[str, threading.RLock] = weakref.WeakValueDictionary()
         self._locks_guard = threading.Lock()
+        self._event_id_cache: dict[str, tuple[int, set[str]]] = {}
 
     @staticmethod
     def validate_room_id(room_id: str) -> str:
@@ -240,8 +263,13 @@ class LiveRoomStore:
             if require_exists and not (room_dir / "metadata.json").is_file():
                 raise RoomNotFound("Room not found")
             room_dir.mkdir(parents=True, exist_ok=True)
+            room_dir.chmod(0o700)
+            for child in room_dir.iterdir():
+                if child.is_file() and not child.is_symlink():
+                    child.chmod(0o600)
             lock_path = room_dir / ".lock"
             with lock_path.open("a+b") as lock_file:
+                os.chmod(lock_path, 0o600)
                 if fcntl is not None:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
                 try:
@@ -271,6 +299,32 @@ class LiveRoomStore:
 
     def _recover_from_event_log(self, room_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         """Replay committed events if a process stopped between event fsync and JSON replace."""
+        self._truncate_incomplete_event_tail(room_dir)
+        pending_path = room_dir / ".pending_event.json"
+        if pending_path.is_file():
+            pending = self._read_json(pending_path)
+            event = pending.get("event")
+            target_metadata = pending.get("metadata")
+            derived = pending.get("derived")
+            logged = (
+                isinstance(event, dict)
+                and isinstance(target_metadata, dict)
+                and isinstance(derived, dict)
+                and self._find_event(room_dir, str(event.get("event_id", ""))) is not None
+            )
+            if logged:
+                for filename, value in derived.items():
+                    if filename not in {"state.json", "quiz.json", "quiz_answers.json"} or not isinstance(value, dict):
+                        raise LiveRoomError("Invalid pending room transaction")
+                    _atomic_json(room_dir / filename, value)
+                metadata = target_metadata
+                if pending.get("rebuild_mask"):
+                    self._rebuild_mask_caches_locked(room_dir, metadata)
+                _atomic_json(room_dir / "metadata.json", metadata)
+                self._invalidate_exports(room_dir)
+                self._event_id_cache.pop(str(metadata.get("room_id", "")), None)
+            pending_path.unlink(missing_ok=True)
+
         last_event = self._last_event(room_dir)
         latest_logged = int(last_event["seq"]) if last_event else 0
         latest_metadata = int(metadata.get("latest_seq", 0))
@@ -323,7 +377,50 @@ class LiveRoomStore:
         metadata["recent_event_ids"] = [event["event_id"] for event in events[-10_000:]]
         _atomic_json(room_dir / "state.json", state)
         _atomic_json(room_dir / "metadata.json", metadata)
+        self._event_id_cache.pop(str(metadata.get("room_id", "")), None)
         return metadata
+
+    @staticmethod
+    def _truncate_incomplete_event_tail(room_dir: Path) -> None:
+        """Discard only an unterminated final append before another writer continues."""
+        path = room_dir / "events.jsonl"
+        if not path.is_file() or path.stat().st_size == 0:
+            return
+        with path.open("r+b") as stream:
+            stream.seek(-1, os.SEEK_END)
+            if stream.read(1) == b"\n":
+                return
+            position = stream.tell() - 1
+            while position > 0:
+                size = min(64 * 1024, position)
+                position -= size
+                stream.seek(position)
+                chunk = stream.read(size)
+                newline = chunk.rfind(b"\n")
+                if newline >= 0:
+                    stream.truncate(position + newline + 1)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                    return
+            stream.truncate(0)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def _rebuild_mask_caches_locked(self, room_dir: Path, metadata: dict[str, Any]) -> None:
+        nvoxels = int(np.prod(metadata["dimensions"], dtype=np.int64))
+        writers = self._writer_map(room_dir, nvoxels)
+        writers[:] = 0
+        for event in self._iter_events(room_dir):
+            if event.get("type") != "mask.patch":
+                continue
+            for item in (event.get("payload") or {}).get("ranges", []):
+                start = int(item["start"])
+                writers[start : start + int(item["length"])] = int(event["seq"])
+        writers.flush()
+        del writers
+        metadata["mask_values_seq"] = -1
+        values = self._mask_value_map(room_dir, metadata)
+        del values
 
     @staticmethod
     def public_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -352,14 +449,33 @@ class LiveRoomStore:
         room_key: str,
         participant_id: str = "",
         resume_credential: str = "",
-    ) -> tuple[str, str | None]:
-        """Resume a server-issued identity or mint a new bounded room identity."""
+        host_claim: str = "",
+    ) -> tuple[str, str | None, bool]:
+        """Resume or mint an identity while retaining a host claim until ready is acknowledged."""
         with self._locked(room_id) as room_dir:
             metadata = self._load_metadata(room_dir)
             self._authorize_locked(metadata, room_key)
             identities = metadata.setdefault("participant_credentials", {})
             if not isinstance(identities, dict):
                 raise LiveRoomError("Participant credential store is invalid")
+            # Protocol 1 rooms created by the previous release used this exact
+            # field. Keep the fallback only for their 24-hour room lifetime and
+            # migrate it to the claim/identity model on the first valid hello.
+            claim_hash = metadata.get("quiz_host_claim_hash") or metadata.get("quiz_host_secret_hash")
+            claiming_host = bool(host_claim)
+            if claiming_host and (
+                metadata.get("mode") != "quiz"
+                or not claim_hash
+                or not hmac.compare_digest(hash_room_key(host_claim), str(claim_hash))
+            ):
+                error = RoomUnauthorized("Invalid or already-consumed quiz host claim")
+                error.code = "invalid_host_claim"
+                raise error
+            assigned_claim_id = metadata.get("quiz_host_claim_participant_id")
+            if not assigned_claim_id and claiming_host:
+                current_host = metadata.get("quiz_host_participant_id")
+                if current_host in identities:
+                    assigned_claim_id = current_host
             if participant_id or resume_credential:
                 if not participant_id or not resume_credential:
                     raise ParticipantUnauthorized("Participant ID and resume credential are both required")
@@ -373,17 +489,83 @@ class LiveRoomStore:
                     hash_room_key(resume_credential), expected_hash
                 ):
                     raise ParticipantUnauthorized("Participant resume credential is invalid")
-                return canonical, None
-            if len(identities) >= MAX_PARTICIPANT_IDENTITIES:
-                raise ParticipantLimit("Room has reached its participant identity limit")
-            canonical = str(uuid.uuid4())
-            credential = secrets.token_urlsafe(32)
-            identities[canonical] = {
-                "resume_hash": hash_room_key(credential),
-                "created_at": isoformat(self._now()),
-            }
+                credential = None
+            elif claiming_host and assigned_claim_id in identities:
+                canonical = str(assigned_claim_id)
+                credential = secrets.token_urlsafe(32)
+                identities[canonical]["resume_hash"] = hash_room_key(credential)
+            else:
+                identity_limit = MAX_PARTICIPANT_IDENTITIES
+                if metadata.get("mode") == "quiz" and not claiming_host and not metadata.get("quiz_host_participant_id"):
+                    identity_limit -= 1
+                if len(identities) >= identity_limit:
+                    raise ParticipantLimit("Room has reached its participant identity limit")
+                canonical = str(uuid.uuid4())
+                credential = secrets.token_urlsafe(32)
+                identities[canonical] = {
+                    "resume_hash": hash_room_key(credential),
+                    "created_at": isoformat(self._now()),
+                    "quiz_host": False,
+                }
+            record = identities[canonical]
+            if claiming_host:
+                claim_owner = metadata.get("quiz_host_claim_participant_id")
+                current_host = metadata.get("quiz_host_participant_id")
+                if claim_owner not in {None, canonical} or current_host not in {None, canonical}:
+                    error = RoomUnauthorized("The quiz host claim belongs to another participant")
+                    error.code = "invalid_host_claim"
+                    raise error
+                record["quiz_host"] = True
+                metadata["quiz_host_participant_id"] = canonical
+                metadata["quiz_host_claim_participant_id"] = canonical
+                metadata["quiz_host_claim_hash"] = str(claim_hash)
+                metadata.pop("quiz_host_secret_hash", None)
             _atomic_json(room_dir / "metadata.json", metadata)
-            return canonical, credential
+            is_host = bool(record.get("quiz_host")) and metadata.get("quiz_host_participant_id") == canonical
+            return canonical, credential, is_host
+
+    def acknowledge_quiz_host_claim(
+        self,
+        room_id: str,
+        room_key: str,
+        participant_id: str,
+        lease_id: str,
+    ) -> bool:
+        """Consume the creator claim only after its room.ready reached the active host."""
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            self._require_host(metadata, participant_id, lease_id)
+            claim_owner = metadata.get("quiz_host_claim_participant_id")
+            if claim_owner not in {None, participant_id}:
+                error = RoomUnauthorized("The quiz host claim belongs to another participant")
+                error.code = "invalid_host_claim"
+                raise error
+            changed = bool(
+                metadata.get("quiz_host_claim_hash")
+                or metadata.get("quiz_host_secret_hash")
+                or claim_owner
+            )
+            metadata["quiz_host_claim_hash"] = None
+            metadata.pop("quiz_host_secret_hash", None)
+            metadata.pop("quiz_host_claim_participant_id", None)
+            _atomic_json(room_dir / "metadata.json", metadata)
+            return changed
+
+    def quiz_host_identity(self, room_id: str, room_key: str) -> str | None:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            return metadata.get("quiz_host_participant_id")
+
+    def quiz_host_claim_pending(self, room_id: str, room_key: str) -> bool:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            return bool(
+                metadata.get("quiz_host_claim_hash")
+                or metadata.get("quiz_host_secret_hash")
+            )
 
     def _resolve_case(self, case_id: str, resolution: str) -> CaseFiles:
         if not re.fullmatch(r"\d+", str(case_id)):
@@ -461,7 +643,7 @@ class LiveRoomStore:
     ) -> tuple[dict[str, Any], str, str | None]:
         if mode not in {"review", "quiz"}:
             raise LiveRoomError("mode must be 'review' or 'quiz'")
-        host_secret: str | None = None
+        host_claim: str | None = None
         pack: dict[str, Any] | None = None
         if mode == "quiz":
             if bool(quiz_pack_id) == bool(quiz_playlist_id):
@@ -488,7 +670,7 @@ class LiveRoomStore:
                     raise LiveRoomError("Quiz pack does not match the requested case")
             case_id = str(pack["case_id"])
             quiz_pack_id = str(pack["pack_id"])
-            host_secret = secrets.token_urlsafe(32)
+            host_claim = secrets.token_urlsafe(32)
         case_files = self._resolve_case(str(case_id), resolution)
         room_id = str(uuid.uuid4())
         room_key = secrets.token_urlsafe(32)
@@ -518,8 +700,9 @@ class LiveRoomStore:
                 "quiz_pack_version": pack["version"] if pack else None,
                 "quiz_playlist_id": quiz_playlist_id,
                 "quiz_timer_seconds": quiz_timer_seconds,
-                "quiz_host_secret_hash": hash_room_key(host_secret or ""),
+                "quiz_host_claim_hash": hash_room_key(host_claim or ""),
                 "quiz_host_participant_id": None,
+                "quiz_host_lease_id": None,
             })
         state = {
             "measurements": {},
@@ -530,6 +713,7 @@ class LiveRoomStore:
         with self._locked(room_id, require_exists=False) as room_dir:
             _atomic_json(room_dir / "state.json", state)
             (room_dir / "events.jsonl").touch(mode=0o600)
+            (room_dir / "events.jsonl").chmod(0o600)
             if mode == "quiz":
                 if pack is None:  # pragma: no cover - resolved above
                     raise LiveRoomError("Quiz pack could not be resolved")
@@ -555,6 +739,7 @@ class LiveRoomStore:
                     "consistency_summary": {"consistent": 0, "inconsistent": 0, "incomplete": 0},
                     "round_completed": False,
                     "host_connected": False,
+                    "revision": 0,
                 }
                 _atomic_json(room_dir / "quiz.json", quiz)
                 answers_path = room_dir / "quiz_answers.json"
@@ -563,7 +748,7 @@ class LiveRoomStore:
             # Metadata is readiness marker. Requests cannot observe partially
             # initialized room if process stops during multi-file creation.
             _atomic_json(room_dir / "metadata.json", metadata)
-        return self.public_metadata(metadata), room_key, host_secret
+        return self.public_metadata(metadata), room_key, host_claim
 
     def create_room(self, case_id: str, resolution: str = "low") -> tuple[dict[str, Any], str]:
         metadata, room_key, _ = self._create_room(case_id, resolution, mode="review")
@@ -580,7 +765,7 @@ class LiveRoomStore:
         quiz_exclude_pack_ids: Iterable[str] = (),
         quiz_timer_seconds: int | None = 30,
     ) -> tuple[dict[str, Any], str, str]:
-        metadata, room_key, host_secret = self._create_room(
+        metadata, room_key, host_claim = self._create_room(
             case_id,
             resolution,
             mode="quiz",
@@ -590,9 +775,9 @@ class LiveRoomStore:
             quiz_exclude_pack_ids=quiz_exclude_pack_ids,
             quiz_timer_seconds=quiz_timer_seconds,
         )
-        if host_secret is None:  # pragma: no cover - guarded by mode above
-            raise LiveRoomError("Quiz host secret could not be created")
-        return metadata, room_key, host_secret
+        if host_claim is None:  # pragma: no cover - guarded by mode above
+            raise LiveRoomError("Quiz host claim could not be created")
+        return metadata, room_key, host_claim
 
     def verify_key(self, room_id: str, room_key: str, *, allow_expired: bool = False) -> dict[str, Any]:
         if not isinstance(room_key, str) or not room_key:
@@ -607,6 +792,7 @@ class LiveRoomStore:
     @staticmethod
     def _public_quiz_state(quiz: dict[str, Any]) -> dict[str, Any]:
         public = {
+            "revision": int(quiz.get("revision", 0)),
             "phase": quiz.get("phase", "lobby"),
             "question_index": int(quiz.get("question_index", -1)),
             "question_count": int(quiz.get("question_count", 0)),
@@ -631,6 +817,22 @@ class LiveRoomStore:
         else:
             public["current_question"] = None
         return public
+
+    def _load_quiz_locked(self, room_dir: Path) -> dict[str, Any]:
+        quiz = self._read_json(room_dir / "quiz.json")
+        if "revision" not in quiz:
+            # Rooms survive rolling deploys for 24 hours. Persist the baseline so
+            # all subsequent mutations use the same monotonic counter.
+            quiz["revision"] = 0
+            _atomic_json(room_dir / "quiz.json", quiz)
+        revision = quiz.get("revision")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise LiveRoomError("Quiz revision is invalid")
+        return quiz
+
+    @staticmethod
+    def _bump_quiz_revision(quiz: dict[str, Any]) -> None:
+        quiz["revision"] = int(quiz.get("revision", 0)) + 1
 
     def _pack_locked(self, room_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         path = room_dir / "quiz_pack.json"
@@ -661,15 +863,140 @@ class LiveRoomStore:
             raise LiveRoomError("This Live Room is not a quiz")
 
     @staticmethod
-    def _require_host(metadata: dict[str, Any], host_secret: str, participant_id: str) -> None:
+    def _require_host(metadata: dict[str, Any], participant_id: str, lease_id: str) -> None:
+        identities = metadata.get("participant_credentials") or {}
+        record = identities.get(participant_id) if isinstance(identities, dict) else None
         if (
-            not host_secret
-            or not hmac.compare_digest(hash_room_key(host_secret), metadata.get("quiz_host_secret_hash", ""))
+            not lease_id
             or metadata.get("quiz_host_participant_id") != participant_id
+            or metadata.get("quiz_host_lease_id") != lease_id
+            or not isinstance(record, dict)
+            or not record.get("quiz_host")
         ):
-            error = RoomUnauthorized("Invalid or expired quiz host credential")
-            error.code = "invalid_host_secret"
+            error = RoomUnauthorized("This connection is not the active quiz host")
+            error.code = "invalid_host_lease"
             raise error
+
+    def _event_ids_locked(self, room_dir: Path, metadata: dict[str, Any]) -> set[str]:
+        room_id = str(metadata["room_id"])
+        latest_seq = int(metadata.get("latest_seq", 0))
+        cached = self._event_id_cache.get(room_id)
+        if cached and cached[0] == latest_seq:
+            return cached[1]
+        event_ids = {
+            str(event["event_id"])
+            for event in self._iter_events(room_dir)
+            if isinstance(event.get("event_id"), str)
+        }
+        self._event_id_cache[room_id] = (latest_seq, event_ids)
+        return event_ids
+
+    def _new_event_id_locked(self, room_dir: Path, metadata: dict[str, Any]) -> str:
+        event_ids = self._event_ids_locked(room_dir, metadata)
+        while True:
+            event_id = str(uuid.uuid4())
+            if event_id not in event_ids:
+                return event_id
+
+    @staticmethod
+    def _room_file_bytes(room_dir: Path) -> int:
+        return sum(path.stat().st_size for path in room_dir.iterdir() if path.is_file())
+
+    def _ensure_event_capacity_locked(
+        self,
+        room_dir: Path,
+        metadata: dict[str, Any],
+        serialized_bytes: int = 0,
+        *,
+        additional_room_bytes: int = 0,
+        lifecycle: bool = False,
+    ) -> None:
+        event_path = room_dir / "events.jsonl"
+        event_bytes = event_path.stat().st_size
+        event_limit = MAX_EVENTS if lifecycle else max(0, MAX_EVENTS - LIFECYCLE_EVENT_RESERVE)
+        event_byte_limit = (
+            MAX_EVENT_LOG_BYTES
+            if lifecycle
+            else max(0, MAX_EVENT_LOG_BYTES - LIFECYCLE_EVENT_BYTE_RESERVE)
+        )
+        room_byte_limit = (
+            MAX_ROOM_BYTES
+            if lifecycle
+            else max(0, MAX_ROOM_BYTES - LIFECYCLE_EVENT_BYTE_RESERVE)
+        )
+        if (
+            int(metadata.get("latest_seq", 0)) >= event_limit
+            or event_bytes + serialized_bytes + 1 > event_byte_limit
+            or self._room_file_bytes(room_dir) + serialized_bytes + additional_room_bytes + 1 > room_byte_limit
+        ):
+            raise RoomFull("Room event log is full; export remains available")
+
+    def _append_event_locked(
+        self,
+        room_dir: Path,
+        metadata: dict[str, Any],
+        event: dict[str, Any],
+        *,
+        derived: dict[str, dict[str, Any]],
+        lifecycle: bool = False,
+        rebuild_mask: bool = False,
+        after_append: Callable[[], None] | None = None,
+    ) -> None:
+        event_id = str(event.get("event_id", ""))
+        event_ids = self._event_ids_locked(room_dir, metadata)
+        if not event_id or event_id in event_ids:
+            raise LiveRoomError("event_id must be unique for the lifetime of the room")
+        serialized = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        serialized_bytes = len(serialized.encode("utf-8"))
+        final_metadata = copy.deepcopy(metadata)
+        final_metadata["latest_seq"] = int(event["seq"])
+        recent = list(final_metadata.get("recent_event_ids", [])) + [event_id]
+        final_metadata["recent_event_ids"] = recent[-10_000:]
+        pending = {
+            "event": event,
+            "metadata": final_metadata,
+            "derived": derived,
+            "rebuild_mask": rebuild_mask,
+        }
+        pending_bytes = len(json.dumps(pending, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        derived_growth = sum(
+            max(
+                0,
+                len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                - ((room_dir / filename).stat().st_size if (room_dir / filename).exists() else 0),
+            )
+            for filename, value in derived.items()
+        )
+        self._ensure_event_capacity_locked(
+            room_dir,
+            metadata,
+            serialized_bytes,
+            additional_room_bytes=pending_bytes + derived_growth,
+            lifecycle=lifecycle,
+        )
+        _atomic_json(room_dir / ".pending_event.json", pending)
+        event_path = room_dir / "events.jsonl"
+        with event_path.open("a", encoding="utf-8") as stream:
+            os.chmod(event_path, 0o600)
+            stream.write(serialized + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        for filename, value in derived.items():
+            _atomic_json(room_dir / filename, value)
+        if after_append:
+            after_append()
+        _atomic_json(room_dir / "metadata.json", final_metadata)
+        (room_dir / ".pending_event.json").unlink(missing_ok=True)
+        directory_fd = os.open(room_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        metadata.clear()
+        metadata.update(final_metadata)
+        event_ids.add(event_id)
+        self._event_id_cache[str(metadata["room_id"])] = (int(event["seq"]), event_ids)
+        self._invalidate_exports(room_dir)
 
     def _append_quiz_event_locked(
         self,
@@ -677,29 +1004,52 @@ class LiveRoomStore:
         metadata: dict[str, Any],
         quiz: dict[str, Any],
         event_type: str,
+        *,
+        additional_derived: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if event_type not in QUIZ_EVENT_TYPES:
             raise LiveRoomError("Unsupported quiz event type")
-        _atomic_json(room_dir / "quiz.json", quiz)
+        self._bump_quiz_revision(quiz)
         seq = int(metadata.get("latest_seq", 0)) + 1
         event = {
             "seq": seq,
-            "event_id": str(uuid.uuid4()),
+            "event_id": self._new_event_id_locked(room_dir, metadata),
             "type": event_type,
             "participant_id": "server",
             "name": "Quiz server",
             "created_at": isoformat(self._now()),
             "payload": {"quiz": self._public_quiz_state(quiz)},
         }
-        with (room_dir / "events.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        metadata["latest_seq"] = seq
-        metadata["recent_event_ids"] = (list(metadata.get("recent_event_ids", [])) + [event["event_id"]])[-10_000:]
-        _atomic_json(room_dir / "metadata.json", metadata)
-        self._invalidate_exports(room_dir)
+        derived = {"quiz.json": quiz, **(additional_derived or {})}
+        self._append_event_locked(
+            room_dir,
+            metadata,
+            event,
+            derived=derived,
+            lifecycle=event_type in {
+                "quiz.host_paused",
+                "quiz.host_resumed",
+                "quiz.host_promoted",
+            },
+        )
         return event
+
+    def _reconcile_quiz_response_count_locked(
+        self,
+        room_dir: Path,
+        quiz: dict[str, Any],
+        answers: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        question_id = (quiz.get("current_question") or {}).get("id")
+        if not question_id:
+            return answers or {"submissions": {}}
+        answers = answers or self._read_json(room_dir / "quiz_answers.json")
+        response_count = len((answers.get("submissions") or {}).get(question_id, {}))
+        if int(quiz.get("response_count", 0)) != response_count:
+            quiz["response_count"] = response_count
+            self._bump_quiz_revision(quiz)
+            _atomic_json(room_dir / "quiz.json", quiz)
+        return answers
 
     def quiz_context(
         self,
@@ -712,8 +1062,9 @@ class LiveRoomStore:
             self._authorize_locked(metadata, room_key)
             if metadata.get("mode", "review") != "quiz":
                 return None
-            quiz = self._read_json(room_dir / "quiz.json")
+            quiz = self._load_quiz_locked(room_dir)
             answers = self._read_json(room_dir / "quiz_answers.json")
+            self._reconcile_quiz_response_count_locked(room_dir, quiz, answers)
             own = {}
             if participant_id:
                 for question_id, submissions in (answers.get("submissions") or {}).items():
@@ -728,32 +1079,158 @@ class LiveRoomStore:
                 "eligible": eligible,
             }
 
+    def quiz_host_assigned(self, room_id: str, room_key: str) -> bool:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            return bool(metadata.get("quiz_host_participant_id"))
+
     def connect_quiz_host(
         self,
         room_id: str,
         room_key: str,
-        host_secret: str,
         participant_id: str,
+        lease_id: str,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         with self._locked(room_id) as room_dir:
             metadata = self._load_metadata(room_dir)
             self._authorize_locked(metadata, room_key)
             self._require_quiz(metadata)
-            if not host_secret or not hmac.compare_digest(
-                hash_room_key(host_secret), metadata.get("quiz_host_secret_hash", "")
+            identities = metadata.get("participant_credentials") or {}
+            record = identities.get(participant_id) if isinstance(identities, dict) else None
+            if (
+                metadata.get("quiz_host_participant_id") != participant_id
+                or not isinstance(record, dict)
+                or not record.get("quiz_host")
+                or not lease_id
             ):
-                error = RoomUnauthorized("Invalid or expired quiz host credential")
-                error.code = "invalid_host_secret"
+                error = RoomUnauthorized("Participant does not own quiz host authority")
+                error.code = "invalid_host_lease"
                 raise error
-            current = metadata.get("quiz_host_participant_id")
-            if current not in {None, participant_id}:
-                error = RoomUnauthorized("Quiz host credential belongs to another participant")
-                error.code = "invalid_host_secret"
-                raise error
-            metadata["quiz_host_participant_id"] = participant_id
-            quiz = self._read_json(room_dir / "quiz.json")
+            metadata["quiz_host_lease_id"] = lease_id
+            quiz = self._load_quiz_locked(room_dir)
             event = None
-            was_disconnected = not quiz.get("host_connected", False)
+            was_connected = bool(quiz.get("host_connected"))
+            quiz["host_connected"] = True
+            resumed_timer = quiz.get("phase") == "question_open" and quiz.get("timer_paused")
+            if resumed_timer:
+                now = self._now()
+                remaining = quiz.get("remaining_seconds")
+                quiz["timer_paused"] = False
+                quiz["resumed_at"] = isoformat(now)
+                quiz["deadline_at"] = (
+                    isoformat(now + timedelta(seconds=float(remaining)))
+                    if remaining is not None else None
+                )
+                try:
+                    event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.host_resumed")
+                except RoomFull:
+                    _atomic_json(room_dir / "quiz.json", quiz)
+                    _atomic_json(room_dir / "metadata.json", metadata)
+                    logger.warning("Resumed host without event because room is full room=%s", room_id)
+            if event is None:
+                if not was_connected and not resumed_timer:
+                    self._bump_quiz_revision(quiz)
+                _atomic_json(room_dir / "quiz.json", quiz)
+                _atomic_json(room_dir / "metadata.json", metadata)
+            return self._public_quiz_state(quiz), event
+
+    def disconnect_quiz_host(
+        self,
+        room_id: str,
+        participant_id: str,
+        lease_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            if (
+                metadata.get("mode", "review") != "quiz"
+                or metadata.get("quiz_host_participant_id") != participant_id
+                or metadata.get("quiz_host_lease_id") != lease_id
+            ):
+                return None
+            quiz = self._load_quiz_locked(room_dir)
+            quiz["host_connected"] = False
+            metadata["quiz_host_lease_id"] = None
+            if quiz.get("phase") == "question_open" and not quiz.get("timer_paused"):
+                now = self._now()
+                quiz["elapsed_ms"] = self._quiz_elapsed_ms(quiz, now)
+                deadline = quiz.get("deadline_at")
+                quiz["remaining_seconds"] = (
+                    max(0.0, (parse_time(deadline) - now).total_seconds()) if deadline else None
+                )
+                quiz["timer_paused"] = True
+                quiz["deadline_at"] = None
+                quiz["resumed_at"] = None
+            try:
+                event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.host_paused")
+            except RoomFull:
+                event = None
+                _atomic_json(room_dir / "quiz.json", quiz)
+                _atomic_json(room_dir / "metadata.json", metadata)
+                logger.warning("Paused host without event because room is full room=%s", room_id)
+            return self._public_quiz_state(quiz), event
+
+    def reconcile_stale_host_leases(self) -> int:
+        """Pause quiz hosts left connected by a previous websocket process."""
+        reconciled = 0
+        for child in list(self.root.iterdir()):
+            if not child.is_dir():
+                continue
+            try:
+                room_id = self.validate_room_id(child.name)
+                with self._locked(room_id) as room_dir:
+                    metadata = self._load_metadata(room_dir)
+                    if metadata.get("mode") != "quiz":
+                        continue
+                    quiz = self._load_quiz_locked(room_dir)
+                    if not metadata.get("quiz_host_lease_id") and not quiz.get("host_connected"):
+                        continue
+                    metadata["quiz_host_lease_id"] = None
+                    quiz["host_connected"] = False
+                    if quiz.get("phase") == "question_open" and not quiz.get("timer_paused"):
+                        now = self._now()
+                        quiz["elapsed_ms"] = self._quiz_elapsed_ms(quiz, now)
+                        deadline = quiz.get("deadline_at")
+                        quiz["remaining_seconds"] = (
+                            max(0.0, (parse_time(deadline) - now).total_seconds()) if deadline else None
+                        )
+                        quiz["timer_paused"] = True
+                        quiz["deadline_at"] = None
+                        quiz["resumed_at"] = None
+                    try:
+                        self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.host_paused")
+                    except RoomFull:
+                        _atomic_json(room_dir / "quiz.json", quiz)
+                        _atomic_json(room_dir / "metadata.json", metadata)
+                        logger.warning("Cleared stale host lease without event because room is full room=%s", room_id)
+                    reconciled += 1
+            except (LiveRoomError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                logger.warning("Could not reconcile stale Live Room host room=%s error=%s", child.name, exc)
+        return reconciled
+
+    def promote_quiz_host(
+        self,
+        room_id: str,
+        participant_id: str,
+        lease_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None, str | None]:
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._require_quiz(metadata)
+            quiz = self._load_quiz_locked(room_dir)
+            if quiz.get("host_connected"):
+                raise LiveRoomError("Quiz host is already connected")
+            identities = metadata.get("participant_credentials") or {}
+            candidate = identities.get(participant_id) if isinstance(identities, dict) else None
+            if not isinstance(candidate, dict) or not lease_id:
+                raise ParticipantUnauthorized("Promotion candidate identity is invalid")
+            previous_host = metadata.get("quiz_host_participant_id")
+            if previous_host and isinstance(identities.get(previous_host), dict):
+                identities[previous_host]["quiz_host"] = False
+            candidate["quiz_host"] = True
+            metadata["quiz_host_participant_id"] = participant_id
+            metadata["quiz_host_lease_id"] = lease_id
             quiz["host_connected"] = True
             if quiz.get("phase") == "question_open" and quiz.get("timer_paused"):
                 now = self._now()
@@ -764,18 +1241,41 @@ class LiveRoomStore:
                     isoformat(now + timedelta(seconds=float(remaining)))
                     if remaining is not None else None
                 )
-                event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.host_resumed")
-            elif was_disconnected:
+            try:
+                event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.host_promoted")
+            except RoomFull:
+                # Authority must remain recoverable even after all reserved log
+                # capacity is exhausted. Persist the identity/lease transition;
+                # clients also receive presence and quiz-state broadcasts.
+                event = None
                 _atomic_json(room_dir / "quiz.json", quiz)
                 _atomic_json(room_dir / "metadata.json", metadata)
-            return self._public_quiz_state(quiz), event
+                logger.warning("Promoted host without event because room is full room=%s", room_id)
+            return self._public_quiz_state(quiz), event, previous_host
 
-    def disconnect_quiz_host(self, room_id: str, participant_id: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    def rollback_quiz_host_promotion(
+        self,
+        room_id: str,
+        participant_id: str,
+        lease_id: str,
+        previous_host: str | None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
+        """Rollback only the exact undelivered promotion lease."""
         with self._locked(room_id) as room_dir:
             metadata = self._load_metadata(room_dir)
-            if metadata.get("mode", "review") != "quiz" or metadata.get("quiz_host_participant_id") != participant_id:
+            if (
+                metadata.get("quiz_host_participant_id") != participant_id
+                or metadata.get("quiz_host_lease_id") != lease_id
+            ):
                 return None
-            quiz = self._read_json(room_dir / "quiz.json")
+            identities = metadata.get("participant_credentials") or {}
+            if isinstance(identities.get(participant_id), dict):
+                identities[participant_id]["quiz_host"] = False
+            if previous_host and isinstance(identities.get(previous_host), dict):
+                identities[previous_host]["quiz_host"] = True
+            metadata["quiz_host_participant_id"] = previous_host
+            metadata["quiz_host_lease_id"] = None
+            quiz = self._load_quiz_locked(room_dir)
             quiz["host_connected"] = False
             if quiz.get("phase") == "question_open" and not quiz.get("timer_paused"):
                 now = self._now()
@@ -787,35 +1287,14 @@ class LiveRoomStore:
                 quiz["timer_paused"] = True
                 quiz["deadline_at"] = None
                 quiz["resumed_at"] = None
-            event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.host_paused")
+            try:
+                event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.host_paused")
+            except RoomFull:
+                event = None
+                _atomic_json(room_dir / "quiz.json", quiz)
+                _atomic_json(room_dir / "metadata.json", metadata)
+                logger.warning("Rolled back host promotion without event because room is full room=%s", room_id)
             return self._public_quiz_state(quiz), event
-
-    def promote_quiz_host(
-        self,
-        room_id: str,
-        participant_id: str,
-    ) -> tuple[str, dict[str, Any], dict[str, Any]]:
-        with self._locked(room_id) as room_dir:
-            metadata = self._load_metadata(room_dir)
-            self._require_quiz(metadata)
-            quiz = self._read_json(room_dir / "quiz.json")
-            if quiz.get("host_connected"):
-                raise LiveRoomError("Quiz host is already connected")
-            secret = secrets.token_urlsafe(32)
-            metadata["quiz_host_secret_hash"] = hash_room_key(secret)
-            metadata["quiz_host_participant_id"] = participant_id
-            quiz["host_connected"] = True
-            if quiz.get("phase") == "question_open" and quiz.get("timer_paused"):
-                now = self._now()
-                remaining = quiz.get("remaining_seconds")
-                quiz["timer_paused"] = False
-                quiz["resumed_at"] = isoformat(now)
-                quiz["deadline_at"] = (
-                    isoformat(now + timedelta(seconds=float(remaining)))
-                    if remaining is not None else None
-                )
-            event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.host_promoted")
-            return secret, self._public_quiz_state(quiz), event
 
     def _open_question_locked(
         self,
@@ -857,16 +1336,16 @@ class LiveRoomStore:
         self,
         room_id: str,
         room_key: str,
-        host_secret: str,
         participant_id: str,
+        lease_id: str,
         participants: list[dict[str, str]],
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         with self._locked(room_id) as room_dir:
             metadata = self._load_metadata(room_dir)
             self._authorize_locked(metadata, room_key)
             self._require_quiz(metadata)
-            self._require_host(metadata, host_secret, participant_id)
-            quiz = self._read_json(room_dir / "quiz.json")
+            self._require_host(metadata, participant_id, lease_id)
+            quiz = self._load_quiz_locked(room_dir)
             if quiz.get("phase") != "lobby" or quiz.get("round_completed"):
                 raise LiveRoomError("This quiz round has already started")
             self._open_question_locked(room_dir, metadata, quiz, 0, participants)
@@ -916,7 +1395,7 @@ class LiveRoomStore:
             metadata = self._load_metadata(room_dir)
             self._authorize_locked(metadata, room_key)
             self._require_quiz(metadata)
-            quiz = self._read_json(room_dir / "quiz.json")
+            quiz = self._load_quiz_locked(room_dir)
             if quiz.get("phase") != "question_open" or quiz.get("timer_paused"):
                 raise LiveRoomError("This question is not accepting answers")
             now = self._now()
@@ -943,14 +1422,23 @@ class LiveRoomStore:
                 "name": _clean_text(name, MAX_NAME),
             }
             submissions[participant_id] = submission
-            _atomic_json(room_dir / "quiz_answers.json", answers)
             quiz["response_count"] = len(submissions)
             active_eligible = eligible_ids & set(connected_participant_ids)
             event = None
             if active_eligible <= set(submissions):
                 self._close_question_locked(room_dir, metadata, quiz)
-                event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.closed")
+                # The final answer and automatic close are one retryable commit.
+                # Quota is checked before either derived file becomes visible.
+                event = self._append_quiz_event_locked(
+                    room_dir,
+                    metadata,
+                    quiz,
+                    "quiz.closed",
+                    additional_derived={"quiz_answers.json": answers},
+                )
             else:
+                self._bump_quiz_revision(quiz)
+                _atomic_json(room_dir / "quiz_answers.json", answers)
                 _atomic_json(room_dir / "quiz.json", quiz)
             return self._public_quiz_state(quiz), submission, event
 
@@ -958,14 +1446,15 @@ class LiveRoomStore:
         self,
         room_id: str,
         room_key: str,
-        host_secret: str,
         participant_id: str,
+        lease_id: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         with self._locked(room_id) as room_dir:
             metadata = self._load_metadata(room_dir)
             self._authorize_locked(metadata, room_key)
-            self._require_host(metadata, host_secret, participant_id)
-            quiz = self._read_json(room_dir / "quiz.json")
+            self._require_host(metadata, participant_id, lease_id)
+            quiz = self._load_quiz_locked(room_dir)
+            self._reconcile_quiz_response_count_locked(room_dir, quiz)
             self._close_question_locked(room_dir, metadata, quiz)
             event = self._append_quiz_event_locked(room_dir, metadata, quiz, "quiz.closed")
             return self._public_quiz_state(quiz), event
@@ -975,7 +1464,8 @@ class LiveRoomStore:
             metadata = self._load_metadata(room_dir)
             if metadata.get("mode") != "quiz":
                 return None
-            quiz = self._read_json(room_dir / "quiz.json")
+            quiz = self._load_quiz_locked(room_dir)
+            self._reconcile_quiz_response_count_locked(room_dir, quiz)
             deadline = quiz.get("deadline_at")
             if quiz.get("phase") != "question_open" or quiz.get("timer_paused") or not deadline:
                 return None
@@ -994,7 +1484,8 @@ class LiveRoomStore:
             metadata = self._load_metadata(room_dir)
             if metadata.get("mode") != "quiz":
                 return None
-            quiz = self._read_json(room_dir / "quiz.json")
+            quiz = self._load_quiz_locked(room_dir)
+            self._reconcile_quiz_response_count_locked(room_dir, quiz)
             if quiz.get("phase") != "question_open":
                 return None
             pack = self._pack_locked(room_dir, metadata)
@@ -1058,14 +1549,15 @@ class LiveRoomStore:
         self,
         room_id: str,
         room_key: str,
-        host_secret: str,
         participant_id: str,
+        lease_id: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         with self._locked(room_id) as room_dir:
             metadata = self._load_metadata(room_dir)
             self._authorize_locked(metadata, room_key)
-            self._require_host(metadata, host_secret, participant_id)
-            quiz = self._read_json(room_dir / "quiz.json")
+            self._require_host(metadata, participant_id, lease_id)
+            quiz = self._load_quiz_locked(room_dir)
+            self._reconcile_quiz_response_count_locked(room_dir, quiz)
             if quiz.get("phase") != "question_closed":
                 raise LiveRoomError("Close the question before revealing it")
             question_index = int(quiz["question_index"])
@@ -1094,15 +1586,15 @@ class LiveRoomStore:
         self,
         room_id: str,
         room_key: str,
-        host_secret: str,
         participant_id: str,
+        lease_id: str,
         participants: list[dict[str, str]],
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         with self._locked(room_id) as room_dir:
             metadata = self._load_metadata(room_dir)
             self._authorize_locked(metadata, room_key)
-            self._require_host(metadata, host_secret, participant_id)
-            quiz = self._read_json(room_dir / "quiz.json")
+            self._require_host(metadata, participant_id, lease_id)
+            quiz = self._load_quiz_locked(room_dir)
             pack = self._pack_locked(room_dir, metadata)
             if quiz.get("phase") != "question_revealed":
                 raise LiveRoomError("Reveal the result before advancing")
@@ -1137,15 +1629,58 @@ class LiveRoomStore:
                 "state": state,
             }
             if metadata.get("mode") == "quiz":
-                snapshot["quiz"] = self._public_quiz_state(self._read_json(room_dir / "quiz.json"))
+                snapshot["quiz"] = self._public_quiz_state(self._load_quiz_locked(room_dir))
             return snapshot
 
     def events_after(self, room_id: str, room_key: str, sequence: int) -> list[dict[str, Any]]:
+        events, resync_required = self.replay_after(room_id, room_key, sequence)
+        if resync_required:
+            raise LiveRoomError("Requested event replay exceeds the replay budget")
+        return events
+
+    def replay_after(
+        self,
+        room_id: str,
+        room_key: str,
+        sequence: int,
+        *,
+        budget: int = MAX_REPLAY_EVENTS,
+        byte_budget: int = MAX_REPLAY_BYTES,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+            error = LiveRoomError("last_seq must be a non-negative integer")
+            error.code = "invalid_last_seq"
+            raise error
         with self._locked(room_id) as room_dir:
             metadata = self._load_metadata(room_dir)
             if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
                 raise RoomUnauthorized("Invalid room key")
-            return [event for event in self._iter_events(room_dir) if int(event["seq"]) > int(sequence)]
+            latest = int(metadata.get("latest_seq", 0))
+            if sequence > latest:
+                error = LiveRoomError("last_seq is ahead of the room sequence")
+                error.code = "invalid_last_seq"
+                raise error
+            if latest - sequence > budget:
+                return [], True
+            events: list[dict[str, Any]] = []
+            replay_bytes = 0
+            path = room_dir / "events.jsonl"
+            if not path.exists():
+                return events, False
+            with path.open("rb") as stream:
+                event_index = 0
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    event_index += 1
+                    if event_index <= sequence:
+                        continue
+                    replay_bytes += len(line)
+                    if replay_bytes > byte_budget:
+                        return [], True
+                    event = json.loads(line)
+                    events.append(event)
+            return events, False
 
     @staticmethod
     def _iter_events(room_dir: Path) -> Iterator[dict[str, Any]]:
@@ -1281,6 +1816,7 @@ class LiveRoomStore:
             output.flush()
             del output
             os.replace(temporary, path)
+            path.chmod(0o600)
             metadata["mask_values_seq"] = latest_seq
         return np.memmap(path, dtype=np.uint8, mode="r+", shape=(nvoxels,))
 
@@ -1365,6 +1901,7 @@ class LiveRoomStore:
         if not path.exists() or path.stat().st_size != expected32:
             with path.open("wb") as stream:
                 stream.truncate(expected32)
+            path.chmod(0o600)
         return np.memmap(path, dtype=np.uint32, mode="r+", shape=(nvoxels,))
 
     def _apply_event(
@@ -1466,21 +2003,16 @@ class LiveRoomStore:
             if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
                 raise RoomUnauthorized("Invalid room key")
             if metadata.get("mode") == "quiz":
-                quiz = self._read_json(room_dir / "quiz.json")
+                quiz = self._load_quiz_locked(room_dir)
                 if quiz.get("phase") in {"question_open", "question_closed"}:
                     raise LiveRoomError("Collaboration is locked until the question is revealed")
-            if event_id in metadata.get("recent_event_ids", []):
+            if event_id in self._event_ids_locked(room_dir, metadata):
                 existing = self._find_event(room_dir, event_id)
                 if existing:
+                    if existing.get("type") != event_type or existing.get("participant_id") != participant_id:
+                        raise LiveRoomError("event_id was already used for a different event")
                     return existing, True
-            event_path = room_dir / "events.jsonl"
-            room_bytes = sum(path.stat().st_size for path in room_dir.iterdir() if path.is_file())
-            if (
-                metadata["latest_seq"] >= MAX_EVENTS
-                or event_path.stat().st_size >= MAX_EVENT_LOG_BYTES
-                or room_bytes >= MAX_ROOM_BYTES
-            ):
-                raise RoomFull("Room event log is full; export remains available")
+            self._ensure_event_capacity_locked(room_dir, metadata)
             state = self._read_json(room_dir / "state.json")
             seq = int(metadata["latest_seq"]) + 1
             normalized_payload, before = self._apply_event(
@@ -1497,23 +2029,22 @@ class LiveRoomStore:
             }
             if before is not None:
                 event["before"] = before
-            serialized = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
-            if event_path.stat().st_size + len(serialized.encode("utf-8")) + 1 > MAX_EVENT_LOG_BYTES:
-                raise RoomFull("Room event log is full; export remains available")
-            with event_path.open("a", encoding="utf-8") as stream:
-                stream.write(serialized + "\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            if event_type == "mask.patch" and normalized_payload["ranges"]:
-                self._apply_mask_caches(room_dir, metadata, normalized_payload, seq)
+            after_append = None
+            rebuild_mask = event_type == "mask.patch" and bool(normalized_payload["ranges"])
+            if rebuild_mask:
                 metadata["mask_events_since_snapshot"] += 1
-            metadata["latest_seq"] = seq
-            recent = list(metadata.get("recent_event_ids", []))
-            recent.append(event_id)
-            metadata["recent_event_ids"] = recent[-10_000:]
-            _atomic_json(room_dir / "state.json", state)
-            _atomic_json(room_dir / "metadata.json", metadata)
-            self._invalidate_exports(room_dir)
+                metadata["mask_values_seq"] = seq
+                after_append = lambda: self._apply_mask_caches(
+                    room_dir, metadata, normalized_payload, seq
+                )
+            self._append_event_locked(
+                room_dir,
+                metadata,
+                event,
+                derived={"state.json": state},
+                rebuild_mask=rebuild_mask,
+                after_append=after_append,
+            )
             if event_type == "mask.patch" and self._snapshot_due(metadata):
                 self._materialize_mask_locked(room_dir, metadata)
             return event, False
@@ -1573,6 +2104,7 @@ class LiveRoomStore:
         temp_path = room_dir / ".mask_snapshot.tmp.nii.gz"
         nib.save(output, str(temp_path))
         os.replace(temp_path, snapshot_path)
+        snapshot_path.chmod(0o600)
         metadata["mask_snapshot_seq"] = latest_applied
         metadata["mask_events_since_snapshot"] = 0
         metadata["last_snapshot_at"] = isoformat(self._now())
@@ -1604,6 +2136,7 @@ class LiveRoomStore:
         temporary = room_dir / f".{path.name}.tmp.nii.gz"
         nib.save(output, str(temporary))
         os.replace(temporary, path)
+        path.chmod(0o600)
         return path
 
     def get_mask_snapshot(self, room_id: str, room_key: str) -> tuple[Path, int]:
@@ -1623,7 +2156,7 @@ class LiveRoomStore:
             metadata = self._load_metadata(room_dir)
             self._authorize_locked(metadata, room_key)
             self._require_quiz(metadata)
-            quiz = self._read_json(room_dir / "quiz.json")
+            quiz = self._load_quiz_locked(room_dir)
             pack = self._pack_locked(room_dir, metadata)
             final_revealed = (
                 int(quiz.get("question_index", -1)) == len(pack["questions"]) - 1
@@ -1666,6 +2199,11 @@ class LiveRoomStore:
             metadata = self._load_metadata(room_dir)
             if not hmac.compare_digest(hash_room_key(room_key), metadata.get("key_hash", "")):
                 raise RoomUnauthorized("Invalid room key")
+            if metadata.get("mode") == "quiz":
+                quiz = self._load_quiz_locked(room_dir)
+                if quiz.get("phase") in {"question_open", "question_closed"}:
+                    raise LiveRoomError("Collaboration is locked until the question is revealed")
+            self._ensure_event_capacity_locked(room_dir, metadata)
             state = self._read_json(room_dir / "state.json")
             undone = set(state.get("undone_event_ids", []))
             all_events = list(self._iter_events(room_dir))
@@ -1812,7 +2350,7 @@ class LiveRoomStore:
 
             inverse = {
                 "seq": seq,
-                "event_id": str(uuid.uuid4()),
+                "event_id": self._new_event_id_locked(room_dir, metadata),
                 "type": inverse_type,
                 "participant_id": participant_id,
                 "name": _clean_text(name, MAX_NAME),
@@ -1820,20 +2358,25 @@ class LiveRoomStore:
                 "payload": inverse_payload,
                 "undo_of": target["event_id"],
             }
-            with (room_dir / "events.jsonl").open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(inverse, ensure_ascii=False, separators=(",", ":")) + "\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            if inverse_type == "mask.patch":
-                self._apply_mask_caches(room_dir, metadata, inverse_payload, seq)
-                metadata["mask_events_since_snapshot"] += 1
             state["undone_event_ids"].append(target["event_id"])
-            metadata["latest_seq"] = seq
-            recent = list(metadata.get("recent_event_ids", [])) + [inverse["event_id"]]
-            metadata["recent_event_ids"] = recent[-10_000:]
-            _atomic_json(room_dir / "state.json", state)
-            _atomic_json(room_dir / "metadata.json", metadata)
-            self._invalidate_exports(room_dir)
+            rebuild_mask = inverse_type == "mask.patch"
+            after_append = None
+            if rebuild_mask:
+                metadata["mask_events_since_snapshot"] += 1
+                metadata["mask_values_seq"] = seq
+                after_append = lambda: self._apply_mask_caches(
+                    room_dir, metadata, inverse_payload, seq
+                )
+            self._append_event_locked(
+                room_dir,
+                metadata,
+                inverse,
+                derived={"state.json": state},
+                rebuild_mask=rebuild_mask,
+                after_append=after_append,
+            )
+            if inverse_type == "mask.patch" and self._snapshot_due(metadata):
+                self._materialize_mask_locked(room_dir, metadata)
             return {
                 "ok": True,
                 "partial": partial,
@@ -1885,6 +2428,7 @@ class LiveRoomStore:
 {quiz_html}
 <p><small>For research and education use only. Not for diagnostic use.</small></p></body></html>"""
         report_html.write_text(html_text, encoding="utf-8")
+        report_html.chmod(0o600)
 
         pdf = canvas.Canvas(str(report_pdf), pagesize=letter)
         width, height = letter
@@ -1933,12 +2477,13 @@ class LiveRoomStore:
         pdf.setFont("Helvetica-Oblique", 9)
         pdf.drawString(54, 36, "For research and education use only. Not for diagnostic use.")
         pdf.save()
+        report_pdf.chmod(0o600)
         return report_html, report_pdf
 
     def _quiz_export_summary_locked(self, room_dir: Path, metadata: dict[str, Any]) -> dict[str, Any] | None:
         if metadata.get("mode", "review") != "quiz":
             return None
-        quiz = self._read_json(room_dir / "quiz.json")
+        quiz = self._load_quiz_locked(room_dir)
         pack = self._pack_locked(room_dir, metadata)
         return {
             "pack_id": pack["pack_id"],
@@ -1959,7 +2504,7 @@ class LiveRoomStore:
     def _require_quiz_export_ready_locked(self, room_dir: Path, metadata: dict[str, Any]) -> None:
         if metadata.get("mode", "review") != "quiz":
             return
-        quiz = self._read_json(room_dir / "quiz.json")
+        quiz = self._load_quiz_locked(room_dir)
         pack = self._pack_locked(room_dir, metadata)
         final_revealed = (
             int(quiz.get("question_index", -1)) == len(pack["questions"]) - 1
@@ -1992,7 +2537,7 @@ class LiveRoomStore:
             events = list(self._iter_events(room_dir))
             export_state = {**state, "chat": self._chat_from_events(events)}
             if metadata.get("mode") == "quiz":
-                quiz = self._read_json(room_dir / "quiz.json")
+                quiz = self._load_quiz_locked(room_dir)
                 pack = self._pack_locked(room_dir, metadata)
                 final_revealed = (
                     int(quiz.get("question_index", -1)) == len(pack["questions"]) - 1
@@ -2011,7 +2556,10 @@ class LiveRoomStore:
                 extrasaction="ignore",
             )
             writer.writeheader()
-            writer.writerows(measurements)
+            writer.writerows(
+                {key: _csv_safe(value) for key, value in measurement.items()}
+                for measurement in measurements
+            )
             manifest = {
                 **self.public_metadata(metadata),
                 "exported_at": isoformat(self._now()),
@@ -2048,6 +2596,7 @@ class LiveRoomStore:
                 temp_path.unlink(missing_ok=True)
                 raise RoomFull("Room export exceeds the 4 GiB artifact limit")
             os.replace(temp_path, export_path)
+            export_path.chmod(0o600)
             return export_path
 
     def get_report(self, room_id: str, room_key: str) -> Path:
@@ -2062,6 +2611,21 @@ class LiveRoomStore:
             _, report_pdf = self._build_report(room_dir, metadata, report_state)
             return report_pdf
 
+    def open_artifact(self, room_id: str, room_key: str, path: Path):
+        """Open a previously authorized artifact while the room lock prevents replacement."""
+        with self._locked(room_id) as room_dir:
+            metadata = self._load_metadata(room_dir)
+            self._authorize_locked(metadata, room_key)
+            resolved = path.resolve(strict=True)
+            room_resolved = room_dir.resolve()
+            allowed_external = {Path(metadata["base_mask_path"]).resolve()}
+            if resolved.parent != room_resolved and resolved not in allowed_external:
+                raise RoomUnauthorized("Artifact does not belong to this room")
+            if path.is_symlink() or not resolved.is_file():
+                raise LiveRoomError("Room artifact is not a regular file")
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            return os.fdopen(os.open(resolved, flags), "rb")
+
     def cleanup_expired(self) -> list[str]:
         removed: list[str] = []
         for child in list(self.root.iterdir()):
@@ -2075,6 +2639,7 @@ class LiveRoomStore:
                         continue
                 shutil.rmtree(child, ignore_errors=True)
                 removed.append(room_id)
-            except (LiveRoomError, OSError, ValueError, KeyError):
+            except (LiveRoomError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                logger.warning("Skipped corrupt Live Room during cleanup room=%s error=%s", child.name, exc)
                 continue
         return removed

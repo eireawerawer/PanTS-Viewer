@@ -1,10 +1,11 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import LiveRoomCreateDialog from "./LiveRoomCreateDialog";
 
 function LocationProbe() {
-	return <output aria-label="Current route">{useLocation().pathname}</output>;
+	const location = useLocation();
+	return <output aria-label="Current route">{JSON.stringify({ pathname: location.pathname, hash: location.hash, state: location.state })}</output>;
 }
 
 function renderDialog(caseId = "35") {
@@ -17,6 +18,11 @@ function renderDialog(caseId = "35") {
 }
 
 describe("Live Room mode menu", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		sessionStorage.clear();
+	});
+
 	it("offers the curated Case 35 solo challenge and Individual Race", () => {
 		renderDialog();
 
@@ -48,5 +54,53 @@ describe("Live Room mode menu", () => {
 
 		expect(screen.getByRole("heading", { name: "Start a Live Room" })).toBeInTheDocument();
 		expect(screen.getByLabelText("Display name")).toBeInTheDocument();
+	});
+
+	it("passes a quiz host claim only through navigation state", async () => {
+		vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+			if (!init?.method) return Promise.resolve(new Response(JSON.stringify({ playlists: [] }), { status: 200 }));
+			return Promise.resolve(new Response(JSON.stringify({
+				room_id: "room-35",
+				case_id: "35",
+				room_key: "room/key",
+				quiz_host_claim: "one-time-claim",
+				quiz_host_secret: "legacy-alias",
+			}), { status: 201, headers: { "Content-Type": "application/json" } }));
+		}));
+		renderDialog();
+		fireEvent.click(screen.getByRole("button", { name: /Individual Race/i }));
+		fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Creator" } });
+		fireEvent.click(screen.getByRole("button", { name: "Create Race Room" }));
+
+		await waitFor(() => expect(screen.getByLabelText("Current route")).toHaveTextContent("/live/room-35"));
+		const route = screen.getByLabelText("Current route").textContent || "";
+		expect(route).toContain('"hash":"#room%2Fkey"');
+		expect(route).toContain('"quizHostCredential":{"mode":"modern","value":"one-time-claim"}');
+		expect(route).not.toContain("legacy-alias");
+		const storedValues = Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.getItem(sessionStorage.key(index) || ""));
+		expect(storedValues).not.toContain("one-time-claim");
+	});
+
+	it("falls back to the old REST host secret without treating it as a modern claim", async () => {
+		vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+			if (!init?.method) return Promise.resolve(new Response(JSON.stringify({ playlists: [] }), { status: 200 }));
+			return Promise.resolve(new Response(JSON.stringify({
+				room_id: "legacy-room",
+				case_id: "35",
+				room_key: "legacy/key",
+				quiz_host_secret: "legacy-secret",
+			}), { status: 201, headers: { "Content-Type": "application/json" } }));
+		}));
+		renderDialog();
+		fireEvent.click(screen.getByRole("button", { name: /Individual Race/i }));
+		fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Legacy Creator" } });
+		fireEvent.click(screen.getByRole("button", { name: "Create Race Room" }));
+
+		await waitFor(() => expect(screen.getByLabelText("Current route")).toHaveTextContent("/live/legacy-room"));
+		const route = screen.getByLabelText("Current route").textContent || "";
+		expect(route).toContain('"quizHostCredential":{"mode":"legacy","value":"legacy-secret"}');
+		expect(route).not.toContain("quizHostClaim");
+		const storedValues = Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.getItem(sessionStorage.key(index) || ""));
+		expect(storedValues).not.toContain("legacy-secret");
 	});
 });

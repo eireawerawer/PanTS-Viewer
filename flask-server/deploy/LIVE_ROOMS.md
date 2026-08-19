@@ -13,6 +13,8 @@ cd /home/visitor/PanTS-Viewer/flask-server
 
 `PANTS_PATH` and `SESSIONS_DIR_PATH` come from existing `flask-server/.env`. WebSocket service loads same file. Service user needs read access to dataset tree and write access to session directory.
 
+Set `LIVE_ROOMS_ALLOWED_ORIGINS` to an exact comma-separated list of browser origins. Production defaults to `https://bodymaps.wse.jhu.edu`; wildcards are rejected. A deployment override can be placed in `/etc/bodymaps/live-rooms.env`.
+
 ## Enable services
 
 ```bash
@@ -50,5 +52,6 @@ Vite proxies `/api` to Flask and `/ws` to `VITE_WS_BASE` (default `ws://127.0.0.
 - Logs: `journalctl -u bodymaps-live-rooms.service`
 - Cleanup logs: `journalctl -u bodymaps-live-rooms-cleanup.service`
 - Room key exists only in URL fragment and `X-Room-Key`; never add fragment or key to analytics/logs.
+- Quiz creation returns `quiz_host_claim` plus the temporary protocol 1 alias `quiz_host_secret` for the 24-hour rolling room window. New clients send `quiz_host_claim` in `hello`, then send `host.claim_ack` after receiving and storing `room.ready`; until that acknowledgement, retrying the claim reissues a usable resume credential for the same host identity.
 - Room access is bearer-link collaboration, not privacy-grade authorization.
 - Canonical `image_only` and `mask_only` stay read-only. Exports materialize under session directory only.

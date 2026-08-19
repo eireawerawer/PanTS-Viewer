@@ -14,24 +14,56 @@ import type {
 export const LIVE_ROOM_PROTOCOL = 1;
 export const LIVE_ROOM_FRAME_BYTES = 512 * 1024;
 export const MAX_LIVE_ROOM_CHAT_MESSAGES = 500;
+export const MAX_LIVE_ROOM_REPLAY_EVENTS = 500;
+export const MAX_LIVE_ROOM_BUFFERED_EVENTS = 256;
+export const LIVE_ROOM_SEQUENCE_GAP_MS = 1_500;
+export const LIVE_ROOM_SEQUENCE_GAP_CLOSE_CODE = 4012;
 
-export function liveRoomCreatorAutoJoinKey(roomId: string): string {
-	return `bodymaps.live-room.${roomId}.creator-auto-join`;
+export type LiveRoomParticipantCredential = {
+	participantId: string;
+	resumeCredential: string;
+};
+
+export function liveRoomParticipantStorageKey(roomId: string): string {
+	return `bodymaps.live-room.${roomId}.participant-credential`;
 }
 
-export function liveQuizHostSecretKey(roomId: string): string {
-	return `bodymaps.live-room.${roomId}.quiz-host-secret`;
+export function getLiveRoomParticipantCredential(roomId: string): LiveRoomParticipantCredential | null {
+	try {
+		const value = JSON.parse(sessionStorage.getItem(liveRoomParticipantStorageKey(roomId)) || "null") as Partial<LiveRoomParticipantCredential> | null;
+		if (
+			value
+			&& typeof value.participantId === "string" && value.participantId.length > 0 && value.participantId.length <= 256
+			&& typeof value.resumeCredential === "string" && value.resumeCredential.length > 0 && value.resumeCredential.length <= 256
+		) {
+			return { participantId: value.participantId, resumeCredential: value.resumeCredential };
+		}
+	} catch {
+		// A malformed tab-local identity is treated as absent.
+	}
+	return null;
 }
 
-export function consumeCreatorAutoJoinName(
+function normalizedBasename(basename: string): string {
+	const clean = basename.trim().replace(/^\/+|\/+$/g, "");
+	return clean ? `/${clean}` : "";
+}
+
+export function liveRoomRoute(roomId: string, roomKey: string): string {
+	return `/live/${encodeURIComponent(roomId)}#${encodeURIComponent(roomKey)}`;
+}
+
+export function appRootRelativeUrl(path: string, basename = import.meta.env.VITE_BASENAME || ""): string {
+	return `${normalizedBasename(basename)}/${path.replace(/^\/+/, "")}`;
+}
+
+export function liveRoomShareUrl(
 	roomId: string,
-	storedName: string,
-	storage: Storage = window.sessionStorage
-): string | null {
-	const key = liveRoomCreatorAutoJoinKey(roomId);
-	if (!storedName || storage.getItem(key) !== "1") return null;
-	storage.removeItem(key);
-	return storedName;
+	roomKey: string,
+	origin = window.location.origin,
+	basename = import.meta.env.VITE_BASENAME || ""
+): string {
+	return `${origin}${appRootRelativeUrl(liveRoomRoute(roomId, roomKey), basename)}`;
 }
 
 export function roomKeyFromFragment(fragment = window.location.hash): string {
@@ -51,6 +83,82 @@ export function liveRoomWebSocketUrl(roomId: string): string {
 
 export function liveRoomApiUrl(roomId: string, suffix = ""): string {
 	return `${API_BASE}/api/live-rooms/${encodeURIComponent(roomId)}${suffix}`;
+}
+
+function finiteVector(value: unknown, length: number): number[] | null {
+	if (!Array.isArray(value) || value.length !== length) return null;
+	return value.every((item) => typeof item === "number" && Number.isFinite(item)) ? value : null;
+}
+
+function shortString(value: unknown): string | null {
+	return typeof value === "string" ? value.slice(0, 64) : null;
+}
+
+export function sanitizeLiveRoomPresence(payload: Record<string, unknown>): Record<string, unknown> {
+	const clean: Record<string, unknown> = {};
+	if (payload.cursor === null) clean.cursor = null;
+	else if (payload.cursor && typeof payload.cursor === "object") {
+		const cursor = payload.cursor as Record<string, unknown>;
+		const pane = shortString(cursor.pane);
+		const x = cursor.x;
+		const y = cursor.y;
+		if (pane && typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y)) {
+			clean.cursor = { pane, x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
+		}
+	}
+	if (payload.crosshair === null) clean.crosshair = null;
+	else {
+		const crosshair = finiteVector(payload.crosshair, 3);
+		if (crosshair) clean.crosshair = crosshair;
+	}
+	for (const key of ["active_tool", "target_organ", "plane"] as const) {
+		if (payload[key] === null) clean[key] = null;
+		else {
+			const value = shortString(payload[key]);
+			if (value !== null) clean[key] = value;
+		}
+	}
+	if (payload.following === null) clean.following = null;
+	else {
+		const following = shortString(payload.following);
+		if (following) clean.following = following;
+	}
+	return clean;
+}
+
+export function sanitizeLiveRoomView(payload: Record<string, unknown>): Record<string, unknown> {
+	const rawView = payload.view;
+	if (!rawView || typeof rawView !== "object") return {};
+	const source = rawView as Record<string, unknown>;
+	const view: Record<string, unknown> = {};
+	if (source.crosshair === null) view.crosshair = null;
+	else {
+		const crosshair = finiteVector(source.crosshair, 3);
+		if (crosshair) view.crosshair = crosshair;
+	}
+	if (source.cameras && typeof source.cameras === "object") {
+		const cameras: Record<string, unknown> = {};
+		for (const pane of ["axial", "sagittal", "coronal"] as const) {
+			const rawCamera = (source.cameras as Record<string, unknown>)[pane];
+			if (!rawCamera || typeof rawCamera !== "object") continue;
+			const cameraSource = rawCamera as Record<string, unknown>;
+			const camera: Record<string, unknown> = {};
+			for (const key of ["focalPoint", "position", "viewUp", "viewPlaneNormal"] as const) {
+				const vector = finiteVector(cameraSource[key], 3);
+				if (vector) camera[key] = vector;
+			}
+			if (typeof cameraSource.parallelScale === "number" && Number.isFinite(cameraSource.parallelScale)) camera.parallelScale = cameraSource.parallelScale;
+			if (typeof cameraSource.flipHorizontal === "boolean") camera.flipHorizontal = cameraSource.flipHorizontal;
+			if (typeof cameraSource.flipVertical === "boolean") camera.flipVertical = cameraSource.flipVertical;
+			if (Object.keys(camera).length) cameras[pane] = camera;
+		}
+		if (Object.keys(cameras).length) view.cameras = cameras;
+	}
+	for (const key of ["windowWidth", "windowCenter", "opacity"] as const) {
+		if (typeof source[key] === "number" && Number.isFinite(source[key])) view[key] = source[key];
+	}
+	if (Array.isArray(source.visibleOrgans)) view.visibleOrgans = source.visibleOrgans.slice(0, 256).map(Boolean);
+	return Object.keys(view).length ? { view } : {};
 }
 
 export function emptyDurableState(): LiveRoomDurableState {
@@ -116,22 +224,26 @@ export async function bootstrapLiveRoom(roomId: string, roomKey: string): Promis
 	metadata: LiveRoomMetadata;
 	state: LiveRoomDurableState;
 	maskUrl: string;
-	maskSequence: number;
+	snapshotSequence: number;
 	quiz: LiveQuizState | null;
 }> {
 	const headers = { "X-Room-Key": roomKey };
-	const metadataResponse = await fetch(liveRoomApiUrl(roomId), { headers });
-	const metadataBody = await metadataResponse.json().catch(() => ({}));
-	if (!metadataResponse.ok) throw new Error(metadataBody.error || `Room lookup failed (${metadataResponse.status})`);
+	const snapshotResponse = await fetch(liveRoomApiUrl(roomId, "/snapshot"), { headers });
+	const snapshot = await snapshotResponse.json().catch(() => ({}));
+	if (!snapshotResponse.ok) throw new Error(snapshot.error || `Room snapshot failed (${snapshotResponse.status})`);
+	const snapshotSequence = Number(snapshot.latest_seq);
+	if (!Number.isSafeInteger(snapshotSequence) || snapshotSequence < 0) {
+		throw new Error("Room snapshot has an invalid sequence");
+	}
 
-	// Materialize mask first.  WebSocket resumes after this exact sequence so mask
-	// edits committed while bootstrap continues arrive as normal events.
+	// State is authoritative through snapshotSequence. The mask can lag that sequence
+	// when intervening durable events do not edit voxels, so it cannot be the replay
+	// baseline. Mask edits committed after the state snapshot arrive over WebSocket.
 	const maskResponse = await fetch(`${liveRoomApiUrl(roomId, "/snapshot")}?format=mask`, { headers });
 	if (!maskResponse.ok) {
 		const body = await maskResponse.json().catch(() => ({}));
 		throw new Error(body.error || `Room mask failed (${maskResponse.status})`);
 	}
-	const maskSequence = Number(maskResponse.headers.get("X-Live-Room-Sequence") || 0);
 	// Cornerstone decides gzip handling from URL suffix. Blob URLs don't end in
 	// `.gz`, so expose decompressed NIfTI bytes instead of compressed bytes under a
 	// suffix-less blob URL.
@@ -140,19 +252,13 @@ export async function bootstrapLiveRoom(roomId: string, roomKey: string): Promis
 		type: "application/octet-stream",
 	}));
 
-	const snapshotResponse = await fetch(liveRoomApiUrl(roomId, "/snapshot"), { headers });
-	const snapshot = await snapshotResponse.json().catch(() => ({}));
-	if (!snapshotResponse.ok) {
-		URL.revokeObjectURL(maskUrl);
-		throw new Error(snapshot.error || `Room snapshot failed (${snapshotResponse.status})`);
-	}
-	const metadata = metadataBody as LiveRoomMetadata;
+	const metadata = { ...(snapshot.room as LiveRoomMetadata) };
 	metadata.mode ??= "review";
 	return {
 		metadata,
 		state: (snapshot.state ?? emptyDurableState()) as LiveRoomDurableState,
 		maskUrl,
-		maskSequence,
+		snapshotSequence,
 		quiz: (snapshot.quiz ?? null) as LiveQuizState | null,
 	};
 }
