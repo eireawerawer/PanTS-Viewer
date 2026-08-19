@@ -415,7 +415,8 @@ def test_room_freezes_pack_and_solo_uses_identical_scoring_and_reveal(tmp_path: 
     })
     registry = QuizPackRegistry({"catalog_id": "freeze-v1", "catalog_version": 1, "packs": [base]})
     room_store = LiveRoomStore(tmp_path / "sessions", pants, quiz_registry=registry)
-    metadata, key, host_secret = room_store.create_quiz_room("35")
+    metadata, key, host_claim = room_store.create_quiz_room("35")
+    assert host_claim
     with pytest.raises(LiveRoomError, match="case_id must be numeric"):
         room_store.create_quiz_room("not-a-case")
     frozen_path = room_store.root / metadata["room_id"] / "quiz_pack.json"
@@ -496,16 +497,21 @@ def test_v2_pack_completes_identically_in_solo_and_race(
     assert solo["max_score"] == expected_count
 
     rooms = LiveRoomStore(tmp_path / "sessions", pants, quiz_registry=registry)
-    metadata, room_key, host_secret = rooms.create_quiz_room(
+    metadata, room_key, host_claim = rooms.create_quiz_room(
         "100", quiz_pack_id=pack["pack_id"], quiz_timer_seconds=None
     )
     room_id = metadata["room_id"]
-    rooms.connect_quiz_host(room_id, room_key, host_secret, "host")
+    host_id, _, is_host = rooms.resolve_participant_identity(
+        room_id, room_key, host_claim=host_claim
+    )
+    assert is_host is True
+    host_lease = "host-lease"
+    rooms.connect_quiz_host(room_id, room_key, host_id, host_lease)
     state, _ = rooms.start_quiz(
         room_id,
         room_key,
-        host_secret,
-        "host",
+        host_id,
+        host_lease,
         [{"participant_id": "student", "name": "Student"}],
     )
     race_reveals = []
@@ -525,13 +531,13 @@ def test_v2_pack_completes_identically_in_solo_and_race(
             {"student"},
         )
         assert closed is not None and state["phase"] == "question_closed"
-        state, _ = rooms.reveal_quiz_question(room_id, room_key, host_secret, "host")
+        state, _ = rooms.reveal_quiz_question(room_id, room_key, host_id, host_lease)
         race_reveals.append(state["reveal"])
         state, _ = rooms.advance_quiz(
             room_id,
             room_key,
-            host_secret,
-            "host",
+            host_id,
+            host_lease,
             [{"participant_id": "student", "name": "Student"}],
         )
     assert state["phase"] == "completed"

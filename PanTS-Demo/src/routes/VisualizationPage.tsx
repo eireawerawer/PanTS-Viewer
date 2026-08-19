@@ -151,7 +151,6 @@ import {
     type MeasurementSummary,
     type PrimaryMouseToolName,
     type SharedMeasurement,
-    type SharedMprView,
     type SliceInfo,
 	worldToVisiblePaneCanvas,
 	setActiveEditSegment,
@@ -196,6 +195,7 @@ import { filenameToName } from "../helpers/utils.name";
 import { decodeViewerState, encodeViewerState } from "../helpers/viewerShareState";
 import { LiveRoomDock, LiveRoomHeader } from "../liveRooms/LiveRoomChrome";
 import LiveRoomCreateDialog from "../liveRooms/LiveRoomCreateDialog";
+import { appRootRelativeUrl } from "../liveRooms/protocol";
 import type { LiveRoomController, LiveRoomMaskPatch } from "../liveRooms/types";
 import { type CheckBoxData } from "../types";
 import "./VisualizationPage.css";
@@ -591,6 +591,10 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		let cancelled = false;
 		const resolveSources = async () => {
 			if (isLocal) return; // local files, not URLs — the setup effect handles them
+			// A case/reveal replacement must first invalidate the currently displayed
+			// sources so no interaction can continue against the previous medical data.
+			setCtUrl(null);
+			setSegUrl(null);
 			if (sessionId) {
 				setCtUrl(`${API_BASE}/api/session-ct/${sessionId}`);
 				setSegUrl(`${API_BASE}/api/session-segmentation/${sessionId}`);
@@ -803,6 +807,15 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const stageRef = useRef<HTMLDivElement>(null);
 	const [showOrganDetails, setShowOrganDetails] = useState(false);
 	const [loading, setLoading] = useState(true);
+	const [viewerReady, setViewerReady] = useState(false);
+	const [acceptedViewerVolumeId, setAcceptedViewerVolumeId] = useState<string | null>(null);
+	const viewerReadyRef = useRef(false);
+	useEffect(() => {
+		viewerReadyRef.current = false;
+		setViewerReady(false);
+		setAcceptedViewerVolumeId(null);
+		setLoading(true);
+	}, [caseId, liveRoomMaskUrl, quizPracticeMaskUrl, soloChallengeMaskUrl]);
 	const [crosshairMm, setCrosshairMm] = useState<[number, number, number] | null>(null);
 	const [labelColorMap, setLabelColorMap] = useState<{ [key: number]: Color }>(
 		segmentation_category_colors
@@ -847,7 +860,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 	
 	const handleToolbarToolChange = (tool: PrimaryEditTool) => {
-		if (tool && !hasActiveTarget) return; // no target picked — refuse to activate anything
+		if (!viewerReady || (tool && !hasActiveTarget)) return;
 		setActiveToolbarTool(tool);
 		setEditMode(tool ? TOOLBAR_TO_EDIT_MODE[tool] ?? null : null);
 		// setMaskBrushSize's very first call (from the slider) is the only
@@ -1407,8 +1420,10 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const [liveRoomDockOpen, setLiveRoomDockOpen] = useState(Boolean(liveRoom));
 	const [openPinnedNote, setOpenPinnedNote] = useState<{ noteId: string; pane: CinePane } | null>(null);
 	const segmentationShadowRef = useRef<Uint8Array | null>(null);
-	const initialLiveMeasurementsAppliedRef = useRef(false);
-	const initialChallengeMeasurementAppliedRef = useRef(false);
+	const authoritativeMeasurementsRef = useRef(liveRoom?.state.measurements);
+	authoritativeMeasurementsRef.current = liveRoom?.state.measurements;
+	const initialLiveMeasurementsAppliedRef = useRef<string | null>(null);
+	const initialChallengeMeasurementAppliedRef = useRef<string | null>(null);
 	const challengeTimedOutRef = useRef(false);
 	const challengeLengthMeasurement = useMemo(
 		() => [...challengeMeasurements].reverse().find((measurement) => measurement.tool === LENGTH_TOOL) ?? null,
@@ -1671,11 +1686,16 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				setSoloChallengeMeasurement?.(latestLength ? serializeMeasurement(latestLength.uid) : null);
 			}
 			if (liveRoomConnected && sendLiveRoomDurable) {
+				const recoverAuthoritativeMeasurement = () => {
+					const authoritative = authoritativeMeasurementsRef.current?.[m.uid];
+					if (authoritative) applyRemoteMeasurement(authoritative as SharedMeasurement);
+					else removeRemoteMeasurement(m.uid);
+				};
 				if (kind === "removed") {
-					sendLiveRoomDurable("measurement.delete", { id: m.uid });
+					void sendLiveRoomDurable("measurement.delete", { id: m.uid }, undefined, { onRejected: recoverAuthoritativeMeasurement });
 				} else {
 					const measurement = serializeMeasurement(m.uid);
-					if (measurement) sendLiveRoomDurable("measurement.upsert", { measurement });
+					if (measurement) void sendLiveRoomDurable("measurement.upsert", { measurement }, undefined, { onRejected: recoverAuthoritativeMeasurement });
 				}
 			}
 			if (kind === "completed") {
@@ -1701,7 +1721,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	}, [soloChallenge, soloChallenge?.remainingSeconds, soloChallenge?.result, serializedChallengeMeasurement]);
 
 	useEffect(() => {
-		if (!isSoloChallenge || loading || checkBoxData.length === 0) return;
+		if (!isSoloChallenge || !viewerReady || checkBoxData.length === 0) return;
 		const visible = [true, ...checkBoxData.map(() => false)];
 		const revealedLabel = soloChallenge?.result?.ground_truth.segmentation_label;
 		const meshOrganId = soloChallenge?.result?.ground_truth.mesh_organ_id;
@@ -1731,12 +1751,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				setCrosshairMm(center);
 			}
 		}
-	}, [isSoloChallenge, soloChallenge?.result, loading, checkBoxData]);
+	}, [isSoloChallenge, soloChallenge?.result, viewerReady, checkBoxData]);
 
 	// Quiz questions share only the server-authored viewer cue. Student navigation
 	// remains local; masks and measurements stay hidden until the final reveal.
 	useEffect(() => {
-		if (!liveRoom || liveRoom.metadata.mode !== "quiz" || loading || !liveRoom.quiz) return;
+		if (!liveRoom || liveRoom.metadata.mode !== "quiz" || !viewerReady || !liveRoom.quiz) return;
 		const quiz = liveRoom.quiz;
 		if (quiz.phase === "question_open") {
 			clearMeasurements();
@@ -1785,12 +1805,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		liveRoom?.metadata.case_id,
 		liveRoom?.metadata.quiz_pack_id,
 		liveRoom?.maskUrl,
-		loading,
+		viewerReady,
 		checkBoxData,
 	]);
 
 	useEffect(() => {
-		if (!quizPractice || loading) return;
+		if (!quizPractice || !viewerReady) return;
 		const question = quizPractice.pack.questions[quizPractice.questionIndex];
 		if (!quizPractice.result) {
 			clearMeasurements();
@@ -1841,15 +1861,21 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		quizPractice?.questionIndex,
 		quizPractice?.result,
 		quizPractice?.maskUrl,
-		loading,
+		viewerReady,
 		checkBoxData,
 	]);
 
 	// A solo attempt is tab-scoped and survives refresh. Once Cornerstone is ready,
 	// restore its saved marker and portable length annotation into the new viewports.
 	useEffect(() => {
-		if (!isSoloChallenge || loading || initialChallengeMeasurementAppliedRef.current) return;
-		initialChallengeMeasurementAppliedRef.current = true;
+		if (
+			!isSoloChallenge ||
+			!acceptedViewerVolumeId ||
+			initialChallengeMeasurementAppliedRef.current === acceptedViewerVolumeId
+		) return;
+		initialChallengeMeasurementAppliedRef.current = acceptedViewerVolumeId;
+		clearMeasurements();
+		setChallengeMeasurements([]);
 		if (restoredChallengeMarker) {
 			moveCornerstoneCrosshairToMm(restoredChallengeMarker);
 			setCrosshairMm([...restoredChallengeMarker]);
@@ -1858,20 +1884,25 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			applyRemoteMeasurement(restoredChallengeMeasurement);
 			setChallengeMeasurements(getMeasurementSummaries());
 		}
-	}, [isSoloChallenge, loading, restoredChallengeAttemptId, restoredChallengeMarker, restoredChallengeMeasurement]);
+	}, [isSoloChallenge, acceptedViewerVolumeId, restoredChallengeAttemptId, restoredChallengeMarker, restoredChallengeMeasurement]);
 
 	// Live Room durable state is loaded before Cornerstone.  Hydrate shared measurements
 	// once the viewports exist, then apply later committed events incrementally.
 	useEffect(() => {
-		if (!liveRoom || loading || initialLiveMeasurementsAppliedRef.current) return;
-		initialLiveMeasurementsAppliedRef.current = true;
+		if (
+			!liveRoom ||
+			!acceptedViewerVolumeId ||
+			initialLiveMeasurementsAppliedRef.current === acceptedViewerVolumeId
+		) return;
+		initialLiveMeasurementsAppliedRef.current = acceptedViewerVolumeId;
+		if (liveRoom.metadata.mode !== "quiz") clearMeasurements();
 		for (const measurement of Object.values(liveRoom.state.measurements)) {
 			applyRemoteMeasurement(measurement as SharedMeasurement);
 		}
-	}, [liveRoom?.state.measurements, loading]);
+	}, [liveRoom?.metadata.mode, liveRoom?.state.measurements, acceptedViewerVolumeId]);
 
 	useEffect(() => {
-		if (!liveRoom?.pendingEvents.length || loading) return;
+		if (!liveRoom?.pendingEvents.length || !viewerReady) return;
 		let appliedThrough = 0;
 		for (const { event, replayed } of liveRoom.pendingEvents) {
 			appliedThrough = Math.max(appliedThrough, event.seq);
@@ -1889,12 +1920,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			}
 		}
 		liveRoom.acknowledgeEvents(appliedThrough);
-	}, [liveRoom?.pendingEvents, liveRoom?.participantId, liveRoom?.acknowledgeEvents, loading]);
+	}, [liveRoom?.pendingEvents, liveRoom?.participantId, liveRoom?.acknowledgeEvents, viewerReady]);
 
 	// Client shadow + modified-slice RLE keeps brush traffic proportional to changed
 	// voxels instead of serializing a full labelmap after every stroke.
 	useEffect(() => {
-		if (!liveRoom || loading || liveRoom.collaborationLocked) return;
+		if (!liveRoom || !viewerReady || liveRoom.collaborationLocked) return;
 		segmentationShadowRef.current = createSegmentationShadow();
 		const unsubscribe = subscribeToSegmentationEdits((detail) => {
 			const shadow = segmentationShadowRef.current;
@@ -1909,7 +1940,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				resolution: liveRoom.metadata.resolution,
 				segment_label: segmentLabel,
 				ranges,
-			}, operationId);
+			}, operationId, { onRejected: () => window.location.reload() });
 		});
 		return unsubscribe;
 	}, [
@@ -1918,15 +1949,19 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		liveRoom?.metadata.geometry_hash,
 		liveRoom?.metadata.resolution,
 		liveRoom?.collaborationLocked,
-		loading,
+		viewerReady,
 	]);
 
 	// Publish camera/navigation state at the hook's 20 Hz cap.  Following suppresses
 	// outbound view echoes; applying a leader's camera therefore stays one-way.
 	useEffect(() => {
-		if (!liveRoom || liveRoom.metadata.mode === "quiz" || loading || !renderingEngine) return;
-		const publish = (view: SharedMprView) => {
+		if (!liveRoom || liveRoom.metadata.mode === "quiz" || !viewerReady || !renderingEngine) return;
+		const publish = () => {
 			if (liveRoom.followingId) return;
+			// The server replaces each participant's view frame, so publish a fresh
+			// complete MPR snapshot rather than the pane that raised the camera event.
+			const view = getSharedMprView();
+			if (!view) return;
 			liveRoom.sendView({
 				view: {
 					...view,
@@ -1938,13 +1973,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			});
 		};
 		const unsubscribe = subscribeToMprViewChanges(publish);
-		const current = getSharedMprView();
-		if (current) publish(current);
+		publish();
 		return unsubscribe;
-	}, [liveRoom?.followingId, liveRoom?.sendView, loading, renderingEngine, windowWidth, windowCenter, opacityValue, checkState]);
+	}, [liveRoom?.followingId, liveRoom?.sendView, viewerReady, renderingEngine, windowWidth, windowCenter, opacityValue, checkState]);
 
 	useEffect(() => {
-		if (!liveRoom?.followingId || liveRoom.metadata.mode === "quiz" || loading) return;
+		if (!liveRoom?.followingId || liveRoom.metadata.mode === "quiz" || !viewerReady) return;
 		const leader = liveRoom.participants.find((item) => item.participant_id === liveRoom.followingId);
 		if (!leader?.view) return;
 		applySharedMprView(leader.view);
@@ -1957,7 +1991,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		}
 		if (leader.view.visibleOrgans) setCheckState(leader.view.visibleOrgans);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [liveRoom?.followingId, liveRoom?.participants, loading]);
+	}, [liveRoom?.followingId, liveRoom?.participants, viewerReady]);
 
 	useEffect(() => {
 		if (!liveRoom) return;
@@ -1998,6 +2032,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// call startCine/stopCine twice per click (this app runs in StrictMode; see the similar
 	// double-run workarounds in dicomLocal.ts).
 	const toggleCine = useCallback(() => {
+		if (!viewerReady) return;
 		const pane = focusedPane.getFocusedPane();
 		if (cinePlaying) {
 			stopCine();
@@ -2012,7 +2047,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		} else {
 			console.warn(`Cine playback failed to start for pane "${pane}"`);
 		}
-	}, [cinePlaying, focusedPane.getFocusedPane, cineFps]);
+	}, [cinePlaying, focusedPane.getFocusedPane, cineFps, viewerReady]);
 
 	useKeyboardShortcuts({
 		takeSnapshot,
@@ -2068,7 +2103,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// ---- Progressive resolution: background full-res stream + in-place swap --------
 
 	const runEnhance = async () => {
-		if (!pantsCase || enhanceStartedRef.current) return;
+		if (!pantsCase || !viewerReady || enhanceStartedRef.current) return;
 		enhanceStartedRef.current = true;
 		setEnhance({ state: "streaming", pct: 0 });
 		// The HD stream is the only download in flight, so any progress event is ours.
@@ -2079,6 +2114,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		});
 		try {
 			const newVolumeId = await upgradeCtVolume(`${API_BASE}/api/get-main-nifti/${pantsCase}.nii.gz`);
+			if (!viewerReadyRef.current) return;
 			if (!newVolumeId) {
 				setEnhance({ state: "failed", pct: null });
 				return;
@@ -2104,19 +2140,19 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// Only when the local files exist (server disk — fast); the HuggingFace fallback
 	// is already full-res, and ?hd=1 loads full-res up front.
 	useEffect(() => {
-		if (isSoloChallenge || isQuizPractice || liveRoom?.metadata.mode === "quiz" || loading || !localAvailable || isHd || isLocal || !pantsCase) return;
+		if (isSoloChallenge || isQuizPractice || liveRoom?.metadata.mode === "quiz" || !viewerReady || !localAvailable || isHd || isLocal || !pantsCase) return;
 		if (enhanceStartedRef.current) return;
 		// Ref is flipped inside the timer (not here) so StrictMode's double-run —
 		// which clears the first timer — still ends up scheduling exactly one stream.
 		const timer = window.setTimeout(() => { void runEnhance(); }, 1500);
 		return () => window.clearTimeout(timer);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [isQuizPractice, isSoloChallenge, liveRoom?.metadata.mode, loading, localAvailable, isHd, isLocal, pantsCase]);
+	}, [isQuizPractice, isSoloChallenge, liveRoom?.metadata.mode, viewerReady, localAvailable, isHd, isLocal, pantsCase]);
 
 	// ---- Shaded 3D volume rendering (Volume mode in the 3D pane) -------------------
 
 	useEffect(() => {
-		if (loading || threeDMode !== "volume" || !renderingEngine) return;
+		if (!viewerReady || threeDMode !== "volume" || !renderingEngine) return;
 		const element = volume3DRef.current;
 		if (!element) return;
 		let disposed = false;
@@ -2132,7 +2168,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		// volumePreset intentionally omitted — preset changes are applied in place below,
 		// without tearing the viewport down.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [threeDMode, loading, renderingEngine]);
+	}, [threeDMode, viewerReady, renderingEngine]);
 
 	useEffect(() => {
 		if (threeDMode === "volume") applyVolume3DPreset(volumePreset);
@@ -2169,6 +2205,34 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		// mid-load (e.g. HD toggle or navigation), the first renderVisualization can
 		// resolve after the second and clobber state with the wrong case's result.
 		let cancelled = false;
+		const controller = new AbortController();
+		let disposeLoaded: (() => void) | undefined;
+		viewerReadyRef.current = false;
+		setViewerReady(false);
+		setAcceptedViewerVolumeId(null);
+		initialLiveMeasurementsAppliedRef.current = null;
+		initialChallengeMeasurementAppliedRef.current = null;
+		setLoading(true);
+		enhanceStartedRef.current = false;
+		setEnhance({ state: "idle", pct: null });
+		setRenderingEngine(null);
+		setViewportIds([]);
+		setVolumeId(null);
+		const acceptLoadedViewer = (result: Awaited<ReturnType<typeof renderVisualization>>) => {
+			if (cancelled) {
+				result.dispose();
+				return false;
+			}
+			disposeLoaded = result.dispose;
+			setRenderingEngine(result.renderingEngine);
+			setViewportIds(result.viewportIds);
+			setVolumeId(result.volumeId);
+			setAcceptedViewerVolumeId(result.volumeId);
+			viewerReadyRef.current = true;
+			setViewerReady(true);
+			setLoading(false);
+			return true;
+		};
 		const setup = async () => {
 			// Local DICOM/NIfTI have no server-side segmentation — don't seed the static
 			// 32-organ catalog for them; checkBoxData should only ever contain segments
@@ -2208,6 +2272,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				}
 				try {
 					const { imageIds } = await loadLocalDicomSeries(files);
+					if (cancelled) return;
 					const result = await renderVisualization(
 						axial_ref.current,
 						sagittal_ref.current,
@@ -2216,9 +2281,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 						"",
 						undefined,
 						setLoading,
-						{ ctImageIds: imageIds }
+						{ ctImageIds: imageIds, resourceKey: "local-dicom", signal: controller.signal }
 					);
-					setLoading(false);
+					if (cancelled) return void result.dispose();
 					// Non-CT DICOM (MR/PET/…) needs its own window, not the CT presets —
 					// seed the sliders from the scan's VOI so the initial-window effect
 					// applies the right level instead of clipping the image flat.
@@ -2233,10 +2298,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 						setVolume3DPresets(VOLUME_3D_PRESETS_MR);
 						setVolumePreset(VOLUME_3D_PRESETS_MR[0].name);
 					}
-					setRenderingEngine(result.renderingEngine);
-					setViewportIds(result.viewportIds);
-					setVolumeId(result.volumeId);
+					acceptLoadedViewer(result);
 				} catch (e) {
+					if (cancelled || (e instanceof DOMException && e.name === "AbortError")) return;
 					console.error(e);
 					setDicomError(e instanceof Error ? e.message : "Failed to load the DICOM series.");
 					setLoading(false);
@@ -2268,14 +2332,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 						cmap,
 						rawUrl,
 						undefined,
-						setLoading
+						setLoading,
+						{ resourceKey: "local-nifti", signal: controller.signal }
 					);
-					if (cancelled) return;
-					setLoading(false);
-					setRenderingEngine(result.renderingEngine);
-					setViewportIds(result.viewportIds);
-					setVolumeId(result.volumeId);
+					acceptLoadedViewer(result);
 				} catch (e) {
+					if (cancelled || (e instanceof DOMException && e.name === "AbortError")) return;
 					console.error(e);
 					setDicomError(e instanceof Error ? e.message : "Failed to load the NIfTI file.");
 					setLoading(false);
@@ -2297,28 +2359,25 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				return;
 			}
 
-			const result = await renderVisualization(
-				axial_ref.current,
-				sagittal_ref.current,
-				coronal_ref.current,
-				cmap,
-				ctUrl,
-				segUrl ?? undefined,
-				setLoading
-			);
+			try {
+				const result = await renderVisualization(
+					axial_ref.current,
+					sagittal_ref.current,
+					coronal_ref.current,
+					cmap,
+					ctUrl,
+					segUrl ?? undefined,
+					setLoading,
+					{ resourceKey: ctUrl, signal: controller.signal }
+				);
 
-			if (cancelled) return; // a newer load started; drop this stale result
-
-			setLoading(false);
-			const {
-				renderingEngine,
-				viewportIds,
-				volumeId,
-			} = result;
-
-			setRenderingEngine(renderingEngine);
-			setViewportIds(viewportIds);
-			setVolumeId(volumeId);
+				acceptLoadedViewer(result);
+			} catch (e) {
+				if (cancelled || (e instanceof DOMException && e.name === "AbortError")) return;
+				console.error(e);
+				setDicomError(e instanceof Error ? e.message : "Failed to load the viewer.");
+				setLoading(false);
+			}
 
 			// const { nv, cmapCopy } = await create3DVolume(
 			// 	render_ref,
@@ -2339,6 +2398,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 		return () => {
 			cancelled = true;
+			viewerReadyRef.current = false;
+			controller.abort();
+			disposeLoaded?.();
 		};
 		// refs have stable identity, so they aren't real deps; the loads key off
 		// ctUrl/segUrl/labelColorMap.
@@ -2470,7 +2532,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// opacity, hidden organs, crosshair). Runs a single time — after that the URL is just a
 	// snapshot and the user is free to change things.
 	useEffect(() => {
-		if (shareStateAppliedRef.current || loading) return;
+		if (shareStateAppliedRef.current || !viewerReady) return;
 		if (!renderingEngine || !viewportIds.length || !volumeId) return;
 		shareStateAppliedRef.current = true;
 
@@ -2495,7 +2557,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			requestAnimationFrame(() => moveCornerstoneCrosshairToMm(shared.crosshair!));
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [loading, renderingEngine, viewportIds, volumeId]);
+	}, [viewerReady, renderingEngine, viewportIds, volumeId]);
 
 	// Build a shareable URL that reproduces the current view, and copy it to the clipboard.
 	const handleShare = async () => {
@@ -2534,7 +2596,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// still visually reflects its contents' state without having to be open.
 	const viewGroupActive = hoverIdentifyEnabled || referenceLinesOn;
 	const panelsGroupActive = showOrganDetails || showStats || showMetadata || showMeasurePanel;
-	const collaborationDisabled = Boolean(liveRoom && (
+	const collaborationDisabled = !viewerReady || Boolean(liveRoom && (
 		liveRoom.connectionState !== "connected" || liveRoom.collaborationLocked
 	));
 
@@ -2837,7 +2899,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 	// Update segmentation visibility when state changes
 	useEffect(() => {
-		if (checkState) {
+		if (viewerReady && checkState) {
 			const checkStateArr = [
 				true, // ID=0 background 永远可见
 				...checkBoxData.map((item) => !!checkState[item.id]),
@@ -2856,6 +2918,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	}, [
 		checkState,
 		checkBoxData,
+		viewerReady,
 	]);
 
 	const handleOpacityOnSliderChange = (
@@ -3201,7 +3264,7 @@ const aiAvailableOrgans = useMemo(() => {
 
 	const navBack = () => {
 		window.location.href = liveRoom
-			? `/case/${liveRoom.metadata.case_id}`
+			? appRootRelativeUrl(`/case/${liveRoom.metadata.case_id}`)
 			: soloChallenge
 				? `/case/${soloChallenge.challenge.case_id}`
 				: "/dashboard";

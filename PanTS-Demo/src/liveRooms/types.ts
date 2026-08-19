@@ -54,6 +54,7 @@ export type LiveQuizReveal = {
 	};
 };
 export type LiveQuizState = {
+	revision?: number;
 	phase: LiveQuizPhase;
 	question_index: number;
 	question_count: number;
@@ -69,6 +70,9 @@ export type LiveQuizState = {
 	round_completed: boolean;
 	host_connected: boolean;
 };
+export type LiveQuizHostCredential =
+	| { mode: "modern"; value: string }
+	| { mode: "legacy"; value: string };
 export type LiveQuizSubmission = {
 	choice_id: string;
 	answered_at: string;
@@ -135,18 +139,22 @@ export type LiveRoomParticipant = {
 	name: string;
 	color: string;
 	role: "reviewer" | "host" | "student";
-	cursor?: { pane: string; x: number; y: number };
-	crosshair?: [number, number, number];
-	active_tool?: string;
-	target_organ?: string;
-	plane?: string;
+	cursor?: { pane: string; x: number; y: number } | null;
+	crosshair?: [number, number, number] | null;
+	active_tool?: string | null;
+	target_organ?: string | null;
+	plane?: string | null;
 	following?: string | null;
-	view?: SharedMprView & {
+	view?: (SharedMprView & {
 		windowWidth?: number;
 		windowCenter?: number;
 		opacity?: number;
 		visibleOrgans?: boolean[];
-	};
+	}) | null;
+};
+
+export type LiveRoomDurableCallbacks = {
+	onRejected?: () => void;
 };
 
 export type LiveRoomConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected" | "expired" | "error";
@@ -170,7 +178,12 @@ export type LiveRoomController = {
 	quizEligible: boolean;
 	isHost: boolean;
 	collaborationLocked: boolean;
-	sendDurable: (type: LiveRoomEvent["type"], payload: Record<string, unknown>, eventId?: string) => Promise<boolean>;
+	sendDurable: (
+		type: LiveRoomEvent["type"],
+		payload: Record<string, unknown>,
+		eventId?: string,
+		callbacks?: LiveRoomDurableCallbacks
+	) => Promise<boolean>;
 	sendPresence: (payload: Record<string, unknown>) => void;
 	sendView: (payload: Record<string, unknown>) => void;
 	sendChat: (text: string) => Promise<boolean>;

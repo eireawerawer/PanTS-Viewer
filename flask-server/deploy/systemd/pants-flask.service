@@ -8,6 +8,7 @@ Type=simple
 User=visitor
 Group=visitor
 WorkingDirectory=/home/visitor/PanTS-Viewer/flask-server
+UMask=0077
 
 # Single process with threads so in-memory inference_jobs dict is shared
 ExecStart=/usr/bin/gunicorn \
