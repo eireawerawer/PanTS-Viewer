@@ -473,7 +473,7 @@ function CloseLoopHint({ nearClose, anchor }: { nearClose: boolean; anchor: [num
 				left: anchor[0] + 14,
 				top: anchor[1],
 				transform: "translateY(-130%)",
-				background: "rgba(15, 23, 42, 0.55)",
+				background: "rgba(0, 45, 114, 0.55)",
 				border: "1px solid rgba(104, 172, 229, 0.55)",
 				borderRadius: 6,
 				color: "rgba(255, 255, 255, 0.9)",
@@ -3785,8 +3785,8 @@ const aiAvailableOrgans = useMemo(() => {
 						>
 							<polygon
 								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
-								fill="rgba(15, 23, 42, 0.22)"
-								stroke="#0F172A"
+								fill="rgba(0, 45, 114, 0.22)"
+								stroke="#002d72"
 								strokeWidth={2}
 							/>
 						</svg>
@@ -3868,8 +3868,8 @@ const aiAvailableOrgans = useMemo(() => {
 						>
 							<polygon
 								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
-								fill="rgba(15, 23, 42, 0.22)"
-								stroke="#0F172A"
+								fill="rgba(0, 45, 114, 0.22)"
+								stroke="#002d72"
 								strokeWidth={2}
 							/>
 						</svg>
@@ -3955,8 +3955,8 @@ const aiAvailableOrgans = useMemo(() => {
 						>
 							<polygon
 								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
-								fill="rgba(15, 23, 42, 0.22)"
-								stroke="#0F172A"
+								fill="rgba(0, 45, 114, 0.22)"
+								stroke="#002d72"
 								strokeWidth={2}
 							/>
 						</svg>
