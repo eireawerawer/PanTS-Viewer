@@ -82,20 +82,23 @@ export const segmentation_category_colors: { [key: number]: Color } = {
 	33: [255, 140, 0, 254],   // Liver lesion (dark orange)
 	34: [255, 215, 0, 254],   // Kidney lesion (gold)
 	35: [220, 20, 60, 254],   // Colon lesion (crimson)
-	36: [205, 133, 63, 254],  // Esophagus (peru)
-	37: [233, 150, 122, 254], // Rectum (dark salmon, reads with the colon)
-	38: [160, 82, 45, 254],   // Hepatic vessel (sienna)
-	39: [95, 158, 160, 254],  // Portal + splenic vein (cadet blue)
-	// Couinaud segments: a warm-to-cool ramp so all eight stay tellable apart
-	// side by side, which is the whole point of showing them.
-	40: [220, 90, 60, 254],   // Liver segment 1
-	41: [230, 130, 70, 254],  // Liver segment 2
-	42: [240, 175, 85, 254],  // Liver segment 3
-	43: [215, 200, 95, 254],  // Liver segment 4
-	44: [170, 200, 110, 254], // Liver segment 5
-	45: [120, 190, 140, 254], // Liver segment 6
-	46: [90, 170, 175, 254],  // Liver segment 7
-	47: [80, 140, 195, 254],  // Liver segment 8
+	36: [196, 120, 196, 254],  // Esophagus
+	37: [150, 70, 120, 254],  // Rectum
+	38: [96, 40, 28, 254],  // Hepatic vessel (dark: reads as structure inside the liver)
+	39: [52, 74, 110, 254],  // Portal + splenic vein (dark, clear of the segment ramp)
+	// Couinaud segments: a warm-to-teal ramp. It stops short of the blue end on
+	// purpose, because lungs, veins and postcava already live there and the
+	// segments were colliding with them (segment 8 sat 4.7 dE from renal vein).
+	// Verified against every existing organ colour in CIELAB; worst remaining
+	// pair is segment 3 vs intestine, which do not abut in practice.
+	40: [214, 84, 58, 254],  // Liver segment 1
+	41: [232, 132, 70, 254],  // Liver segment 2
+	42: [242, 178, 88, 254],  // Liver segment 3
+	43: [214, 202, 96, 254],  // Liver segment 4
+	44: [163, 203, 112, 254],  // Liver segment 5
+	45: [104, 193, 146, 254],  // Liver segment 6
+	46: [62, 170, 166, 254],  // Liver segment 7
+	47: [118, 214, 214, 254],  // Liver segment 8
 };
 
 // Rotating palette of colours to hand out to new classes.
