@@ -345,6 +345,10 @@ _ATLASNET_ORGANS_TO_VIEWER = {
 # a lesion sits in.
 #
 # Every target already exists in the viewer; this model needs no new slots.
+#
+# Verified against real output on an A100 (MSI job 16369107): every emitted
+# value was in this map and none of 4, 5, 11, 12 or 13 appeared, confirming the
+# sparse set rather than assuming it.
 _ATLASNET_TUMORS_TO_VIEWER = {
     1:  _VIEWER_LABELS["kidney_right"],
     2:  _VIEWER_LABELS["kidney_left"],

@@ -144,3 +144,6 @@ gaps, that is correct. For Organs, gaps would mean something is wrong. Worth kee
 because it is the opposite conclusion from the same observation.
 
 It is also lighter than Organs (ResEnc-M rather than ResEnc-L), so if Organs fits, this will.
+Measured on the same A100 and scan: **227 s** and **5.1 GB** peak GPU, against 91 s and 10.7 GB
+for Organs. Slower but roughly half the memory; most of the extra time is the export, not the
+GPU pass.
