@@ -18,9 +18,9 @@
   --vp-text-dim: rgba(255, 255, 255, 0.5);
   --vp-text-faint: rgba(255, 255, 255, 0.36);
   --vp-hover: rgba(255, 255, 255, 0.1);
-  --vp-accent: var(--accent);
-  --vp-font: "IBM Plex Sans", system-ui, sans-serif;
-  --vp-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --vp-accent: #6ea8fe;
+  --vp-font: var(--font-sans);
+  --vp-mono: var(--font-mono);
 }
 
 .cmv__bar {
@@ -70,8 +70,8 @@
   cursor: pointer;
 }
 .cmv__gear:hover { background: rgba(255, 255, 255, 0.1); }
-/* Active = subtle accent tint (not a white fill) so the light icon stays visible. */
-.cmv__gear.is-active { background: rgba(231, 111, 81, 0.3); border-color: var(--accent); }
+/* Active = subtle blue tint (not a white fill) so the light icon stays visible. */
+.cmv__gear.is-active { background: rgba(37, 99, 235, 0.3); border-color: #2563eb; }
 
 /* Body = settings sidebar + the viewport grid. */
 .cmv__body { flex: 1; display: flex; min-height: 0; }
@@ -95,7 +95,7 @@
   cursor: pointer;
   user-select: none;
 }
-.cmv__toggle input { accent-color: var(--accent); width: 15px; height: 15px; }
+.cmv__toggle input { accent-color: #2563eb; width: 15px; height: 15px; }
 
 .cmv__msg { margin: auto; color: rgba(255, 255, 255, 0.55); font-size: 14px; }
 .cmv__msg code {
@@ -135,8 +135,8 @@
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 12px;
   font-weight: 600;
-  color: var(--ink);
-  background: rgba(231, 111, 81, 0.9);
+  color: #fff;
+  background: rgba(37, 99, 235, 0.8);
   padding: 3px 8px;
   border-radius: 6px;
   pointer-events: none;

@@ -1,6 +1,7 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 import "./App.css";
+import { warmCuratedCache } from "./helpers/curatedCache";
 import AnalyticsRouteTracker from "./components/AnalyticsRouteTracker";
 import AuthModal from "./components/AuthModal";
 import { AnnotationProvider } from "./contexts/annotationContexts";
@@ -67,6 +68,24 @@ function RouteFallback() {
 }
 
 function App() {
+  // Warm the Dataset landing grid shortly after boot (when the main thread is
+  // idle), so tab-switching to Dataset from any page renders from cache instead
+  // of fetching search + thumbnails on the click.
+  useEffect(() => {
+    const w = window as unknown as {
+      requestIdleCallback?: (cb: () => void) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const ric = w.requestIdleCallback;
+    const id = ric
+      ? ric(() => warmCuratedCache())
+      : window.setTimeout(warmCuratedCache, 1200);
+    return () => {
+      if (ric) w.cancelIdleCallback?.(id as number);
+      else window.clearTimeout(id as number);
+    };
+  }, []);
+
   return (
     <AuthProvider>
       <FileProvider>

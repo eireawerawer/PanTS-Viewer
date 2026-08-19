@@ -18,10 +18,11 @@ Two rules shape everything here:
    a list of features rather than a list of typos.
 """
 
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import case, distinct, func, select
+from sqlalchemy import case, delete, distinct, func, select
 
 from models.analytics_event import KIND_ACTION, KIND_PAGE_VIEW, KINDS, AnalyticsEvent
 from models.engine import session_scope
@@ -102,6 +103,14 @@ def _clean(event: dict, now) -> dict | None:
     if not anon_id or not session_id or len(anon_id) > 64 or len(session_id) > 64:
         return None
 
+    # The client's id, used as the primary key so a resent batch collapses onto
+    # the rows it already wrote. Falls back to a fresh one when it's missing or
+    # malformed: a tab running a cached older build sends no id at all, and its
+    # events are worth more than the dedup guarantee they can't participate in.
+    event_id = event.get("id")
+    if not isinstance(event_id, str) or not (0 < len(event_id) <= 36):
+        event_id = str(uuid.uuid4())
+
     duration = event.get("duration_ms")
     if isinstance(duration, bool) or not isinstance(duration, (int, float)):
         duration = None
@@ -119,6 +128,7 @@ def _clean(event: dict, now) -> dict | None:
             created_at = now
 
     return {
+        "id": event_id,
         "kind": kind,
         "name": name,
         "route": route,
@@ -135,6 +145,10 @@ def record_events(events: list, user_id: str | None = None) -> int:
     Anything unrecognised is dropped silently rather than failing the batch: one
     stale event name from a cached tab shouldn't cost the other 19 events in the
     request.
+
+    Events the client has already delivered are dropped the same way. The browser
+    flushes with ``keepalive`` on pagehide, and a request the browser retries
+    resends the identical body — without this, every retry would double-count.
     """
     if not isinstance(events, list) or not events:
         return 0
@@ -144,7 +158,23 @@ def record_events(events: list, user_id: str | None = None) -> int:
     if not cleaned:
         return 0
 
+    # Within the batch first, so a body that repeats an id doesn't fail the
+    # INSERT on itself.
+    seen = set()
+    cleaned = [c for c in cleaned if not (c["id"] in seen or seen.add(c["id"]))]
+
     with session_scope() as s:
+        # Then against what's stored. A primary-key lookup over at most MAX_BATCH
+        # ids, so this is one indexed query per batch.
+        already = set(s.execute(
+            select(AnalyticsEvent.id).where(
+                AnalyticsEvent.id.in_([c["id"] for c in cleaned])
+            )
+        ).scalars())
+        cleaned = [c for c in cleaned if c["id"] not in already]
+        if not cleaned:
+            return 0
+
         # Snapshot the account's plan/type once for the whole batch. Read from
         # the row, never from the request.
         plan = account_type = None
@@ -158,13 +188,51 @@ def record_events(events: list, user_id: str | None = None) -> int:
 
         for row in cleaned:
             s.add(AnalyticsEvent(
-                id=str(uuid.uuid4()),
                 user_id=user_id,
                 plan=plan,
                 account_type=account_type,
                 **row,
             ))
         return len(cleaned)
+
+
+# ---- retention -------------------------------------------------------------
+
+# How long an event is kept. Analytics rows are personal data once they carry a
+# user_id, and pseudonymous data even when they don't (anon_id is a stable
+# per-browser identifier), so "keep forever" isn't a defensible default. 400 days
+# is GA4's longest offered window — a full year of comparisons, plus slack.
+DEFAULT_RETENTION_DAYS = 400
+# A shorter window is a legitimate policy, so this floor is only here to catch a
+# value that can't have been meant — 0 or negative would delete the table on the
+# next boot. Anything at or above it is taken at face value.
+MIN_RETENTION_DAYS = 1
+
+
+def retention_days() -> int:
+    """The configured window, clamped. Read live so a restart is enough to
+    change it, matching how ANALYTICS_DASHBOARD is handled in the blueprint."""
+    raw = os.environ.get("ANALYTICS_RETENTION_DAYS")
+    if not raw:
+        return DEFAULT_RETENTION_DAYS
+    try:
+        days = int(raw)
+    except ValueError:
+        return DEFAULT_RETENTION_DAYS
+    return days if days >= MIN_RETENTION_DAYS else DEFAULT_RETENTION_DAYS
+
+
+def purge_old_events(days: int | None = None) -> int:
+    """Delete events past the retention window. Returns how many rows went.
+
+    Deleted outright rather than anonymised: the row's identifying parts ARE the
+    row (anon_id, session_id), so anonymising one leaves nothing worth keeping.
+    """
+    cutoff = utcnow() - timedelta(days=days if days is not None else retention_days())
+    with session_scope() as s:
+        return s.execute(
+            delete(AnalyticsEvent).where(AnalyticsEvent.created_at < cutoff)
+        ).rowcount or 0
 
 
 # ---- reading ---------------------------------------------------------------

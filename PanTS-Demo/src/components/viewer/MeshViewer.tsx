@@ -1,5 +1,6 @@
 import { Bounds, OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
+import { registerMeshRoot } from "../../helpers/viewer/meshCapture";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { APP_CONSTANTS } from "../../helpers/constants";
 import { cornerstoneLpsMmToThree, type Vec3 } from "../../helpers/utils";
@@ -82,6 +83,10 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
     return unsubscribe;
   }, []);
 
+  // Drop the renderer handle when this pane goes away, so a capture can never
+  // reach into a disposed WebGL context.
+  useEffect(() => () => registerMeshRoot(null), []);
+
   // Segment indices touched since the case loaded — includes edits to the STATIC
   // 32-organ catalog, not just brand-new custom classes.
   const editedSegments = useMemo(() => getEditedSegments(), [editVersion]);
@@ -122,13 +127,29 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
   return (
     <div style={{ display: "flex", width: "100%", height: "100%" }}>
       <main style={{ flex: 1, minWidth: 0 }}>
+        {/*
+          preserveDrawingBuffer is REQUIRED for the AI assistant's snapshots.
+          WebGL clears the drawing buffer as soon as the frame is composited, so
+          without it canvas.toDataURL() reads an already-cleared buffer and the
+          captured "3D view" is a black rectangle. data-bodymaps-3d marks the
+          canvas so the capture helper picks this one and never an unrelated
+          canvas that happens to sit in the same pane.
+
+          /cinematic's PNG-sequence capture needs the same readable buffer, and
+          additionally renders at 2x DPR for the high-res frames. It used to
+          switch preserveDrawingBuffer on only for capture (it costs a little
+          performance in normal viewing), but the assistant needs it always on,
+          so the flag is now unconditional and only dpr keys off `cinematic`.
+        */}
         <Canvas
           camera={{ position: [0, 250, 650], fov: 45, near: 0.1, far: 5000 }}
-          // preserveDrawingBuffer keeps the frame readable after compositing, so the
-          // canvas can be grabbed with toBlob() for a high-res PNG sequence. Only on
-          // for capture — it costs a little performance in normal viewing.
-          gl={cinematic ? { preserveDrawingBuffer: true } : undefined}
+          gl={{ preserveDrawingBuffer: true, antialias: true }}
           dpr={cinematic ? 2 : undefined}
+          frameloop="always"
+          onCreated={(state) => {
+            registerMeshRoot(state);
+            state.gl.domElement.setAttribute("data-bodymaps-3d", "1");
+          }}
         >
           <color attach="background" args={["#050505"]} />
           {/* Cinematic drops the fill so the rim light below actually reads. */}

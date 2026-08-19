@@ -93,7 +93,7 @@
 	width: 5px;
 	height: 5px;
 	border-radius: 50%;
-	background: var(--ink);
+	background: #002d72;
 }
 
 .upg-actions {
@@ -106,8 +106,8 @@
 	width: 100%;
 	padding: 11px;
 	border-radius: 10px;
-	background: var(--ink);
-	border: 1px solid var(--ink);
+	background: #002d72;
+	border: 1px solid #002d72;
 	color: #ffffff;
 	font-family: inherit;
 	font-size: 14px;
@@ -116,7 +116,7 @@
 	transition: background 0.15s;
 }
 .upg-primary:hover {
-	background: var(--ink-2);
+	background: #00399a;
 }
 .upg-secondary {
 	width: 100%;

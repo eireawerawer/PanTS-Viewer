@@ -50,6 +50,10 @@ export type TrackedAction =
 	| "admin_revoke_role";
 
 type TrackedEvent = {
+	// Generated here, not on the server, and used as the row's primary key. A
+	// keepalive flush that the browser retries resends the same body, so the ids
+	// come back identical and the server can drop the second copy.
+	id: string;
 	kind: "action" | "page_view";
 	name: string;
 	route: string | null;
@@ -176,7 +180,14 @@ const currentRoute = (): string | null => {
 export const track = (name: TrackedAction) => {
 	if (typeof window === "undefined") return;
 	try {
-		enqueue({ kind: "action", name, route: currentRoute(), ts: Date.now(), ...ids() });
+		enqueue({
+			id: randomId(),
+			kind: "action",
+			name,
+			route: currentRoute(),
+			ts: Date.now(),
+			...ids(),
+		});
 	} catch {
 		/* never let tracking break a click handler */
 	}
@@ -187,6 +198,7 @@ export const trackPageView = (route: string, durationMs: number) => {
 	if (typeof window === "undefined") return;
 	try {
 		enqueue({
+			id: randomId(),
 			kind: "page_view",
 			name: route,
 			route,

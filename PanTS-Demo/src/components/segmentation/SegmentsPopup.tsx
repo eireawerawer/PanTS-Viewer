@@ -105,6 +105,7 @@ interface ColorPickerPopoverProps {
 function ColorPickerPopover({ value, onChange, onClose, anchorRef }: ColorPickerPopoverProps) {
 	const [closing, setClosing] = useState(false);
 	const popRef = useRef<HTMLDivElement>(null);
+	const colorInputRef = useRef<HTMLInputElement>(null);
 	const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
 
 	const requestClose = () => {
@@ -146,6 +147,16 @@ function ColorPickerPopover({ value, onChange, onClose, anchorRef }: ColorPicker
 		const onDown = (e: MouseEvent) => {
 			if (popRef.current?.contains(e.target as Node)) return;
 			if (anchorRef.current?.contains(e.target as Node)) return;
+			// The native OS color picker (behind the "Custom…" <input
+			// type="color">) can fire a synthetic mousedown on `document`
+			// itself — outside both the input and this whole component tree —
+			// when the user drags/picks within the OS dialog, in some
+			// browsers. Without this guard that got misread as "clicked
+			// outside the popover" and closed it mid-pick, which is exactly
+			// why changing the color via the custom picker felt broken —
+			// every drag/selection risked closing before it registered. Skip
+			// closing while the color input itself still has focus.
+			if (document.activeElement === colorInputRef.current) return;
 			requestClose();
 		};
 		const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") requestClose(); };
@@ -163,6 +174,7 @@ function ColorPickerPopover({ value, onChange, onClose, anchorRef }: ColorPicker
 	return createPortal(
 		<div
 			ref={popRef}
+			data-color-popover-portal
 			className={`segpop__color-popover segpop__color-popover--portaled ${closing ? "is-closing" : "is-open"}`}
 			style={{ position: "fixed", top: pos.top, left: pos.left }}
 			onClick={(e) => e.stopPropagation()}
@@ -175,14 +187,34 @@ function ColorPickerPopover({ value, onChange, onClose, anchorRef }: ColorPicker
 						className={`segpop__color-popover-swatch ${value.toLowerCase() === hex.toLowerCase() ? "is-active" : ""}`}
 						style={{ background: hex }}
 						aria-label={hex}
+						// Stages the color (updates the draft the caller holds) but does
+						// NOT close the popover — picking a swatch used to auto-close
+						// immediately, which looked like "nothing happened" since the
+						// actual save is a separate action on the row below. Leaving it
+						// open lets the person see the live preview/hex below update
+						// and confirm with an explicit "Done" instead.
 						onClick={() => onChange(hex)}
 					/>
 				))}
 			</div>
 			<label className="segpop__color-popover-custom">
-				<input type="color" value={value} onChange={(e) => onChange(e.target.value)} />
+				<input ref={colorInputRef} type="color" value={value} onChange={(e) => onChange(e.target.value)} />
 				<span>Custom…</span>
 			</label>
+			{/* Explicit commit step for the popover itself — a live preview swatch
+			    plus the hex value, so it's visually obvious a selection has been
+			    made and staged, then "Done" closes the popover. This does NOT save
+			    the class — that's still the row's own Save/ApplyButton — it just
+			    makes clear the color choice registered before the popover goes
+			    away, instead of a swatch click silently vanishing the popover with
+			    no confirmation of what got picked. */}
+			<div className="segpop__color-popover-footer">
+				<span className="segpop__color-popover-preview" style={{ background: value }} aria-hidden="true" />
+				<span className="segpop__color-popover-hex">{value.toUpperCase()}</span>
+				<button type="button" className="segpop__color-popover-done" onClick={requestClose}>
+					Done
+				</button>
+			</div>
 		</div>,
 		document.body
 	);
@@ -268,6 +300,16 @@ function FormFlyout({ anchorEl, onClose, children }: FormFlyoutProps) {
 		const onDown = (e: MouseEvent) => {
 			if (panelRef.current?.contains(e.target as Node)) return;
 			if (anchorEl?.contains(e.target as Node)) return;
+			// The color swatch popover portals to document.body on its OWN,
+			// separate from this FormFlyout's portal — so a click on a preset
+			// swatch or the native color input isn't a descendant of either
+			// panelRef or anchorEl, and without this check got misread as
+			// "clicked outside the name/color editor," closing the whole
+			// editor instead of just the small color popover. The color
+			// popover already closes itself independently on its own outside
+			// click; this just stops THIS flyout from also reacting to a
+			// click that was actually still inside it, conceptually.
+			if ((e.target as Element | null)?.closest?.("[data-color-popover-portal]")) return;
 			requestClose();
 		};
 		const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") requestClose(); };

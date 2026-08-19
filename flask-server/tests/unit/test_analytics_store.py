@@ -157,6 +157,122 @@ def test_empty_and_malformed_batches_are_a_no_op(store):
     assert analytics_store.record_events(["not a dict"], user_id=user_id) == 0
 
 
+# ---- dedup -----------------------------------------------------------------
+#
+# The case these exist for: the browser flushes on pagehide with keepalive, the
+# request is retried, and the identical body arrives twice.
+
+def test_a_replayed_batch_is_stored_once(store):
+    analytics_store, _, user_id = store
+    batch = [
+        action("upload_start_inference", id="evt-1"),
+        page("/upload", 5000, id="evt-2"),
+    ]
+
+    assert analytics_store.record_events(batch, user_id=user_id) == 2
+    assert analytics_store.record_events(batch, user_id=user_id) == 0
+
+    assert analytics_store.overview(*wide_range())["totals"]["events"] == 2
+
+
+def test_a_partly_replayed_batch_stores_only_what_is_new(store):
+    """A retry that also carries events queued since the first attempt."""
+    analytics_store, _, user_id = store
+    analytics_store.record_events([action("viewer_open_case", id="evt-1")], user_id=user_id)
+
+    stored = analytics_store.record_events([
+        action("viewer_open_case", id="evt-1"),
+        action("viewer_measure", id="evt-2"),
+    ], user_id=user_id)
+
+    assert stored == 1
+    assert analytics_store.overview(*wide_range())["totals"]["events"] == 2
+
+
+def test_an_id_repeated_inside_one_batch_does_not_fail_the_batch(store):
+    analytics_store, _, user_id = store
+    stored = analytics_store.record_events([
+        action("viewer_open_case", id="same"),
+        action("viewer_measure", id="same"),
+        action("report_open", id="other"),
+    ], user_id=user_id)
+    assert stored == 2
+
+
+def test_events_without_an_id_are_still_stored(store):
+    """A tab running a cached older build sends no id; it must not be dropped,
+    and two of its events must not collapse into one."""
+    analytics_store, _, user_id = store
+    assert analytics_store.record_events(
+        [action("viewer_open_case"), action("viewer_open_case")], user_id=user_id
+    ) == 2
+
+
+def test_an_unusable_id_is_replaced_rather_than_refused(store):
+    analytics_store, _, user_id = store
+    stored = analytics_store.record_events([
+        action("viewer_open_case", id=""),
+        action("viewer_measure", id=12345),
+        action("report_open", id="x" * 200),
+    ], user_id=user_id)
+    assert stored == 3
+
+
+# ---- retention -------------------------------------------------------------
+
+def test_purge_drops_events_past_the_window_and_keeps_the_rest(store):
+    analytics_store, _, user_id = store
+    now = utcnow()
+    old = (now - timedelta(days=500)).timestamp() * 1000
+    recent = (now - timedelta(days=5)).timestamp() * 1000
+
+    # MAX_AGE clamps anything the client claims is older than 48h, so the aged
+    # row has to be written and then backdated in place.
+    analytics_store.record_events([
+        action("viewer_open_case", id="old", ts=old),
+        action("viewer_measure", id="recent", ts=recent),
+    ], user_id=user_id)
+    _backdate(analytics_store, "old", now - timedelta(days=500))
+
+    assert analytics_store.purge_old_events() == 1
+
+    remaining = analytics_store.overview(
+        now - timedelta(days=1000), now + timedelta(days=1)
+    )
+    assert [r["name"] for r in remaining["top_actions"]] == ["viewer_measure"]
+
+
+def test_purge_is_a_no_op_when_nothing_is_old_enough(store):
+    analytics_store, _, user_id = store
+    analytics_store.record_events([action("viewer_open_case")], user_id=user_id)
+    assert analytics_store.purge_old_events() == 0
+
+
+def test_retention_window_is_configurable_and_floored(store, monkeypatch):
+    analytics_store, _, _ = store
+    assert analytics_store.retention_days() == analytics_store.DEFAULT_RETENTION_DAYS
+
+    # A stricter window is a policy choice and is honoured as given.
+    monkeypatch.setenv("ANALYTICS_RETENTION_DAYS", "90")
+    assert analytics_store.retention_days() == 90
+    monkeypatch.setenv("ANALYTICS_RETENTION_DAYS", "7")
+    assert analytics_store.retention_days() == 7
+
+    # A value that can't have been meant falls back rather than emptying the
+    # table on the next boot.
+    for unusable in ("0", "-30", "soon", "30.5"):
+        monkeypatch.setenv("ANALYTICS_RETENTION_DAYS", unusable)
+        assert analytics_store.retention_days() == analytics_store.DEFAULT_RETENTION_DAYS
+
+
+def _backdate(analytics_store, event_id, when):
+    """Move a stored row's created_at, to age it past the retention window."""
+    from models.analytics_event import AnalyticsEvent
+    from models.engine import session_scope
+    with session_scope() as s:
+        s.get(AnalyticsEvent, event_id).created_at = when
+
+
 # ---- aggregates ------------------------------------------------------------
 
 def test_top_actions_are_ordered_by_how_often_they_happened(store):
