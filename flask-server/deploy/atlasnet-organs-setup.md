@@ -1,4 +1,4 @@
-# AtlasNet-Organs: server setup
+# AtlasNet: server setup
 
 What has to exist on the inference box before the `AtlasNet-Organs` option in the upload
 dropdown will do anything. Nothing here touches the website deploy; it only puts a model and an
@@ -113,7 +113,34 @@ alongside whatever else is resident.
 This is heavier than ePAI. If the box is tight, that is worth knowing before it goes live
 rather than after.
 
-## Not in scope here
+## The second checkpoint: AtlasNet-Tumors
 
-`AtlasNet-Tumors` from the same HuggingFace repo is a separate checkpoint (2.3 GB, region-based
-labels) and is deliberately not integrated yet.
+Same release, same procedure, different zip. Only needed if you are enabling the Tumors option
+as well; Organs works on its own.
+
+| Variable | Default |
+|---|---|
+| `ATLASNET_TUMORS_MODEL_PATH` | `/home/visitor/atlasnet_tumors/nnUnet_resencM_trained_lesion_3_organs` |
+| `CONDA_ENV_ATLASNET_TUMORS` | `atlasnet` (the same env works, nothing extra to install) |
+
+```bash
+mkdir -p /home/visitor/atlasnet_tumors && cd /home/visitor/atlasnet_tumors
+curl -L -O https://huggingface.co/AbdomenAtlas/AtlasNet/resolve/main/AbdomenAtlasNetTumors.zip
+unzip -q AbdomenAtlasNetTumors.zip && rm AbdomenAtlasNetTumors.zip
+```
+
+2.3 GB down. Note the trainer directory is named differently here
+(`nnUnet_resencM_trained_lesion_3_organs`), and the capitalisation is the release's own.
+
+**Its output looks different, and that is expected.** Tumors is region-based, so it emits a
+sparse label set rather than a dense range:
+
+```
+1, 2, 3, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
+```
+
+No 4, 5, 11, 12 or 13. If you run the verification step above against this checkpoint and see
+gaps, that is correct. For Organs, gaps would mean something is wrong. Worth keeping straight,
+because it is the opposite conclusion from the same observation.
+
+It is also lighter than Organs (ResEnc-M rather than ResEnc-L), so if Organs fits, this will.
