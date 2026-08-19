@@ -104,10 +104,14 @@ const DEFAULT_SEGMENTATION_CONFIG = {
 };
 
 
-const volumeId = "myVolume";
 const segmentationId = "mySegmentation";
-// const volumeId = `${volumeLoaderScheme}:${mainNiftiURL}`;
 // const segmentationId = `${volumeLoaderScheme}:${segmentationURL}`;
+
+export function ctVolumeIdForUrl(url: string) {
+    // Quiz playlists replace the case inside one SPA session. A fixed volume ID
+    // makes Cornerstone return the first cached scan for every later challenge.
+    return `myVolume:${url}`;
+}
 
 const viewportId1 = "CT_NIFTI_AXIAL";
 const viewportId2 = "CT_NIFTI_SAGITTAL";
@@ -416,10 +420,11 @@ export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivEle
     const segmentationImageIds = segmentationURL
     ? await createNiftiImageIdsAndCacheMetadata({ url: segmentationURL })
     : [];
-    // Dataset navigations are full page reloads, so the fixed volumeId never collides.
-    // Local DICOM opens happen within one SPA session (upload → view → back → open
-    // another folder), so each load needs a fresh id or the cache serves the old scan.
-    const ctVolumeId = opts?.ctImageIds ? `dicomVolume-${Date.now()}` : volumeId;
+    // Dataset cases can also change inside one SPA session (multi-case quiz rounds),
+    // so both URL-backed and local DICOM volumes need source-specific cache IDs.
+    const ctVolumeId = opts?.ctImageIds
+        ? `dicomVolume-${Date.now()}`
+        : ctVolumeIdForUrl(mainNiftiURL);
     _currentCtVolumeId = ctVolumeId;
     _lastColorLUT = convertedColorLUT;
 
