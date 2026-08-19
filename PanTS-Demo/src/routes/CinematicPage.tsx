@@ -5,7 +5,7 @@
 // "assemble" shot is driven here: one organ is held alone, then the rest fade in
 // one at a time.
 //
-//   /cinematic/17?start=liver&hold=1800&step=160&speed=0.6
+//   /cinematic/17?start=liver&hold=1800&step=320&speed=2.0
 //
 // Every knob is a query param so the shot can be retuned on the day without a
 // rebuild. Press R to replay the reveal without reloading.
@@ -55,8 +55,8 @@ export default function CinematicPage() {
 
   const start = params.get("start") ?? "liver";
   const holdMs = num(params, "hold", 1800);
-  const stepMs = num(params, "step", 160);
-  const speed = num(params, "speed", 0.6);
+  const stepMs = num(params, "step", 320);
+  const speed = num(params, "speed", 2.0);
   const opacity = num(params, "opacity", 100);
   const rotate = flag(params, "rotate", true);
   const reveal = flag(params, "reveal", true);
