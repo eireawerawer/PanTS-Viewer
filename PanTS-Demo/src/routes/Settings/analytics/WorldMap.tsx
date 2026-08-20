@@ -1,6 +1,7 @@
 import { geoNaturalEarth1, geoPath } from "d3-geo";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { feature } from "topojson-client";
+import type { Topology } from "topojson-specification";
 import type { Feature, FeatureCollection, Geometry } from "geojson";
 import { alpha2ForFeatureId } from "./isoCountries";
 import { count } from "./format";
@@ -72,10 +73,14 @@ const WorldMap: React.FC<Props> = ({ rows, selected, onSelect }) => {
 		import("world-atlas/countries-110m.json")
 			.then((mod) => {
 				if (!live) return;
-				const topology = (mod.default ?? mod) as Parameters<typeof feature>[0];
+				// Through `unknown`: TypeScript infers the imported JSON's literal
+				// shape, where `transform.scale` is number[] rather than the
+				// [number, number] tuple topojson's Topology declares. The two
+				// don't overlap enough for a direct cast, and the file really is
+				// a Topology — it is topojson's own published atlas.
+				const topology = (mod.default ?? mod) as unknown as Topology;
 				const collection = feature(
 					topology,
-					// @ts-expect-error — the topology's object keys aren't typed
 					topology.objects.countries,
 				) as FeatureCollection<Geometry>;
 				setLand(collection);

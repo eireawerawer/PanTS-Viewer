@@ -22,6 +22,26 @@ PANTS_PATH=/folder/where/PanTS
 USE_SSL=false
 ```
 
+Password reset emails (`/api/auth/forgot-password`) go out over SMTP:
+
+```
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=bodymaps.official@gmail.com
+SMTP_PASSWORD=<16-character Gmail App Password>
+PUBLIC_BASE_URL=https://bodymaps.wse.jhu.edu
+```
+
+**`SMTP_PASSWORD` must be a Gmail App Password, not the account password** —
+Google stopped accepting account passwords for SMTP, and the failure shows up as
+`SMTPAuthenticationError` when someone tries to reset. Generate one at Google
+Account > Security > 2-Step Verification > App passwords. `PUBLIC_BASE_URL` is
+what the emailed link points at, so it must be the address users actually visit.
+
+Leave `SMTP_USER`/`SMTP_PASSWORD` unset and the flow still works end to end: the
+message, reset link and all, is printed to the server log instead of being sent.
+That is the intended local-dev path — no mailbox needed.
+
 Optional dataset vars:
 ```
 # Writable dir for precomputed PanTS low-res volumes (make_lowres.py output)
@@ -59,6 +79,27 @@ Use `--resume` instead of `--overwrite` to reuse unchanged CT and thumbnail reco
 `--vision required` fails rather than silently producing an index without vision
 classification. If the manifest is unset or unavailable, ranking falls back to scan
 shape and voxel-spacing metadata.
+
+#### Install the visitor-location database
+
+The analytics page maps where visitors come from, using MaxMind's GeoLite2
+database on this server — no visitor IP is ever sent to a third party. The file
+is ~60MB and not redistributable, so it is not in the repo and each deploy
+fetches its own copy. Get a free licence key at
+https://www.maxmind.com/en/geolite2/signup (Account > Manage License Keys), then:
+
+```
+export MAXMIND_LICENSE_KEY=<your key>
+python scripts/download_geolite.py
+```
+
+It writes `flask-server/data/GeoLite2-City.mmdb` (override with `GEOIP_DB_PATH`).
+Re-run it every month or two — a stale database gets quietly less accurate
+rather than failing. Skip this entirely and the site works fine: locations
+simply aren't recorded and the map says so.
+
+Behind nginx, also set `TRUST_PROXY=true`. Without it every request looks like
+it came from the proxy, so every visitor geolocates to the server itself.
 
 Run backend:
 
@@ -124,6 +165,9 @@ Required whenever a PR adds an Alembic revision; a fast no-op otherwise. Skippin
 ```
 cd /home/visitor/PanTS-Viewer/flask-server && /home/visitor/.conda/envs/PanTS_backend/bin/alembic upgrade head
 ```
+This step is **mandatory** for the account-recovery release: it carries two
+revisions (`password_reset_token`, and the location/device columns on
+`analytics_event`). Without it, asking for a password reset returns a 500.
 
 #### 5. Restart the backend
 ```
@@ -156,6 +200,19 @@ curl -s http://127.0.0.1:8000/api/auth/oauth/providers
 curl -sS -i https://bodymaps.wse.jhu.edu/api/auth/oauth/google | grep -i "^location:" | tr '&' '\n' | grep redirect_uri
 ```
 Expect `{"github":true,"google":true}`, then a `redirect_uri` beginning `https%3A%2F%2Fbodymaps.wse.jhu.edu`. A `http://` scheme there means `PUBLIC_BASE_URL` is unset or stale, and every sign-in fails `redirect_uri_mismatch` — the provider matches that string exactly. Note `providers` only reports whether credentials are non-empty, so it still returns `true` for rotated-but-not-updated secrets; those surface as `invalid_client` at sign-in.
+
+Then check password reset can actually send. This asks for a link for an
+address with no account, so nothing is emailed to anyone — it answers 200 either
+way, and the point is what the log says next.
+```
+curl -s -X POST http://127.0.0.1:8000/api/auth/forgot-password \
+  -H 'Content-Type: application/json' -d '{"email":"nobody@example.com"}'
+grep -i "\[mail\]" /tmp/gunicorn.log | tail -5
+```
+Expect `{"ok":true}` and **no** `[mail]` lines. A line saying "SMTP is not
+configured" means `SMTP_USER`/`SMTP_PASSWORD` are unset and reset links are
+going to the log instead of to users. "SMTP rejected the credentials" means
+`SMTP_PASSWORD` is an account password rather than a Gmail App Password.
 
 Finally, load `https://bodymaps.wse.jhu.edu/upload` in a browser and confirm a signed-out visitor can still start a run.
 
