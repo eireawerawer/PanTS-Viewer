@@ -16,13 +16,21 @@ import "./AuthModal.css";
 //
 // Providers come first with the email form behind "Continue with email", which
 // keeps the default card short.
+//
+// "forgot" is the third mode, and it skips the provider screen: it is reached
+// from the sign-in form by someone who already knows the password isn't working,
+// so offering them the Google button again as the first thing is answering a
+// question they didn't ask. The one line about OAuth accounts covers the case
+// where the reason their password fails is that they never had one.
 const AuthModal: React.FC = () => {
 	const {
 		authPrompt, closeAuthPrompt, promptAuth, signIn, signUp,
-		signInWithProvider, oauthProviders, oauthError, clearOauthError,
+		requestPasswordReset, signInWithProvider, oauthProviders, oauthError,
+		clearOauthError,
 	} = useAuth();
 
 	const isSignup = authPrompt.mode === "signup";
+	const isForgot = authPrompt.mode === "forgot";
 
 	// "email mode" reveals the email/password form (World Labs' "Continue with email").
 	const [emailMode, setEmailMode] = useState(false);
@@ -30,19 +38,23 @@ const AuthModal: React.FC = () => {
 	const [password, setPassword] = useState("");
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
+	// The reset request has been accepted. A settled end state, not a banner over
+	// the form: there is nothing left to do on this card.
+	const [resetSent, setResetSent] = useState(false);
 
 	// Reset transient form state whenever the popup opens/closes.
 	useEffect(() => {
 		if (!authPrompt.open) {
 			setEmailMode(false);
 			setEmail(""); setPassword(""); setError(""); setBusy(false);
+			setResetSent(false);
 		}
 	}, [authPrompt.open]);
 
 	// Flipping between sign-in and sign-up clears the password and any error —
 	// a rejected sign-in shouldn't still be showing over the signup form.
 	useEffect(() => {
-		setPassword(""); setError("");
+		setPassword(""); setError(""); setResetSent(false);
 	}, [authPrompt.mode]);
 
 	// Surface an error the OAuth callback redirected back with.
@@ -69,9 +81,19 @@ const AuthModal: React.FC = () => {
 	const submitEmail = async (e: React.FormEvent) => {
 		e.preventDefault();
 		setError("");
-		if (!email.trim() || !password) { setError("Enter an email and password."); return; }
+		if (isForgot) {
+			if (!email.trim()) { setError("Enter your email address."); return; }
+		} else if (!email.trim() || !password) {
+			setError("Enter an email and password."); return;
+		}
 		setBusy(true);
 		try {
+			if (isForgot) {
+				await requestPasswordReset(email.trim());
+				track("auth_forgot_password_request");
+				setResetSent(true);
+				return;
+			}
 			if (isSignup) await signUp(email, password);
 			else await signIn(email, password);
 			// After the await: this counts successful sign-ins, not attempts.
@@ -92,15 +114,42 @@ const AuthModal: React.FC = () => {
 				className="authm-card"
 				role="dialog"
 				aria-modal="true"
-				aria-label={isSignup ? "Create your account" : "Sign in"}
+				aria-label={
+					isForgot ? "Reset your password" : isSignup ? "Create your account" : "Sign in"
+				}
 				onClick={(e) => e.stopPropagation()}
 			>
 				<button type="button" className="authm-close" aria-label="Close" onClick={dismiss}>×</button>
 
 				<img src="/bodymaps-logo.svg" alt="" className="authm-logo" />
-				<h2 className="authm-title">{isSignup ? "Create your account" : "Sign in"}</h2>
+				<h2 className="authm-title">
+					{isForgot ? "Reset your password" : isSignup ? "Create your account" : "Sign in"}
+				</h2>
 
-				{!emailMode ? (
+				{isForgot && resetSent ? (
+					<>
+						{/* Deliberately hedged. The server answers identically whether or
+						    not the address has an account, so that this card can't be used
+						    to find out which addresses are registered — which means the
+						    card genuinely does not know, and saying "sent" would be a
+						    claim it can't make. */}
+						<p className="authm-sent">
+							If an account exists for <strong>{email.trim()}</strong>, a reset
+							link is on its way. It works once and expires in an hour.
+						</p>
+						<p className="authm-fineprint">
+							Nothing arrived? Check your spam folder, or{" "}
+							<button
+								type="button"
+								className="authm-link"
+								onClick={() => { setResetSent(false); setError(""); }}
+							>
+								try another address
+							</button>
+							.
+						</p>
+					</>
+				) : !emailMode && !isForgot ? (
 					<>
 						{/* A provider with no server-side credentials stays disabled. */}
 						<button
@@ -135,28 +184,52 @@ const AuthModal: React.FC = () => {
 					</>
 				) : (
 					<form className="authm-form" onSubmit={submitEmail}>
+						{isForgot && (
+							<p className="authm-sub">
+								Enter your email and we'll send you a link to choose a new
+								password. If you normally sign in with Google or GitHub, use
+								that button instead — those accounts have no password here.
+							</p>
+						)}
 						<label className="authm-field">
 							<span className="authm-label">Email</span>
 							<input type="email" autoComplete="email" className="authm-input" value={email}
 								onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoFocus />
 						</label>
-						<label className="authm-field">
-							<span className="authm-label">Password</span>
-							<input
-								type="password"
-								autoComplete={isSignup ? "new-password" : "current-password"}
-								className="authm-input"
-								value={password}
-								onChange={(e) => setPassword(e.target.value)}
-								placeholder={isSignup ? "At least 8 characters" : "••••••••"}
-							/>
-						</label>
+						{!isForgot && (
+							<label className="authm-field">
+								<span className="authm-label">Password</span>
+								<input
+									type="password"
+									autoComplete={isSignup ? "new-password" : "current-password"}
+									className="authm-input"
+									value={password}
+									onChange={(e) => setPassword(e.target.value)}
+									placeholder={isSignup ? "At least 8 characters" : "••••••••"}
+								/>
+							</label>
+						)}
+						{/* Sign-in only. On the signup side there is no password to have
+						    forgotten, and offering a reset there just invites confusion. */}
+						{!isSignup && !isForgot && (
+							<button
+								type="button"
+								className="authm-link authm-forgot"
+								onClick={() => promptAuth("forgot")}
+							>
+								Forgot password?
+							</button>
+						)}
 						{error && <div className="authm-error">{error}</div>}
 						<button type="submit" className="authm-submit" disabled={busy}>
-							{busy ? "…" : isSignup ? "Create account" : "Sign in"}
+							{busy ? "…" : isForgot ? "Send reset link" : isSignup ? "Create account" : "Sign in"}
 						</button>
-						<button type="button" className="authm-back" onClick={() => setEmailMode(false)}>
-							← Other options
+						<button
+							type="button"
+							className="authm-back"
+							onClick={() => (isForgot ? promptAuth("signin") : setEmailMode(false))}
+						>
+							← {isForgot ? "Back to sign in" : "Other options"}
 						</button>
 					</form>
 				)}
@@ -172,7 +245,14 @@ const AuthModal: React.FC = () => {
 				)}
 
 				<div className="authm-toggle">
-					{isSignup ? (
+					{isForgot ? (
+						<>
+							Remembered it?{" "}
+							<button type="button" className="authm-link" onClick={() => promptAuth("signin")}>
+								Sign in
+							</button>
+						</>
+					) : isSignup ? (
 						<>
 							Already have an account?{" "}
 							<button type="button" className="authm-link" onClick={() => promptAuth("signin")}>

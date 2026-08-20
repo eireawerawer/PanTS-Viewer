@@ -48,3 +48,24 @@ export const dateInput = (daysAgo = 0): string => {
 	d.setDate(d.getDate() - daysAgo);
 	return d.toISOString().slice(0, 10);
 };
+
+/** A figure against the same figure last period.
+ *
+ *  Returns null when there is nothing honest to say: no previous period at all
+ *  (this is the first month the site has data for) reads as infinite growth,
+ *  and "+100%" off a base of one visit is noise dressed as a trend. Both are
+ *  better left blank than stated — the tile still shows the number itself.
+ */
+export const delta = (current: number, previous: number): {
+	pct: number; up: boolean; label: string;
+} | null => {
+	if (!previous) return null;
+	const change = ((current - previous) / previous) * 100;
+	if (Math.abs(change) < 1) return null;  // flat; a "+0%" badge is just clutter
+	const rounded = Math.round(change);
+	return {
+		pct: rounded,
+		up: rounded > 0,
+		label: `${rounded > 0 ? "+" : ""}${rounded}%`,
+	};
+};

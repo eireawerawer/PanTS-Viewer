@@ -19,3 +19,8 @@ flask-server/pants-dev.db-shm
 
 # Local Claude Code scratch config (launch profiles etc.)
 .claude/
+
+# MaxMind GeoLite2 database for the analytics visitor map. ~60MB and not
+# redistributable; each deploy fetches its own with
+# flask-server/scripts/download_geolite.py.
+flask-server/data/

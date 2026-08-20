@@ -15,6 +15,12 @@ import "./analytics/dashboard.css";
 // "annotator" currently grants nothing: it marks who *will* be able to edit
 // segmentation masks once that exists. Promising access this page can't yet
 // deliver is worse than saying it plainly.
+//
+// Every row's actions sit behind one Edit button, and every action behind a
+// confirmation. The toggles this replaced were a single click from making a
+// stranger an admin — which hands them every account's email address and the
+// ability to demote the person who clicked. A control that dangerous should not
+// be the same gesture as a checkbox, and it should have to say what it does.
 
 type Person = {
 	id: string;
@@ -23,13 +29,18 @@ type Person = {
 	plan: string;
 	account_type: string | null;
 	created_at: string | null;
+	/** Non-null once the account is scheduled for deletion. */
+	deletion_requested_at: string | null;
 	roles: string[];
 };
 
-const ROLE_BLURB: Record<string, string> = {
-	admin: "Sees usage and manages roles",
-	annotator: "Will be able to edit scans (not wired up yet)",
-};
+/** What an Edit menu item does, once confirmed. */
+type Action =
+	| { kind: "role"; role: string; held: boolean }
+	| { kind: "delete" }
+	| { kind: "restore" };
+
+const GRACE_DAYS = 30;
 
 const joined = (iso: string | null) => {
 	if (!iso) return "";
@@ -37,6 +48,62 @@ const joined = (iso: string | null) => {
 	return Number.isNaN(d.getTime())
 		? ""
 		: d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+};
+
+/** How long is left to change your mind about a deletion. */
+const daysLeft = (iso: string | null): number | null => {
+	if (!iso) return null;
+	const requested = new Date(iso).getTime();
+	if (Number.isNaN(requested)) return null;
+	const elapsed = (Date.now() - requested) / 86_400_000;
+	return Math.max(0, Math.ceil(GRACE_DAYS - elapsed));
+};
+
+/** The confirmation text for each action. Written out per case rather than
+ *  assembled from fragments: these are the sentences that have to stop someone,
+ *  and a template that reads "Remove admin from ... including yours" would be
+ *  worse than no warning at all. */
+const explain = (person: Person, action: Action): { title: string; body: string } => {
+	if (action.kind === "delete") {
+		return {
+			title: `Delete ${person.email}?`,
+			body:
+				"They'll be signed out everywhere and won't be able to sign in. The "
+				+ `account, its scans and its results can be restored for ${GRACE_DAYS} days — `
+				+ "after that they're deleted for good.",
+		};
+	}
+	if (action.kind === "restore") {
+		return {
+			title: `Restore ${person.email}?`,
+			body: "The account becomes usable again and they can sign in as before.",
+		};
+	}
+	if (action.role === "admin") {
+		return action.held
+			? {
+				title: `Remove admin from ${person.email}?`,
+				body: "They'll lose the usage dashboard and this page, and can no "
+					+ "longer grant or remove roles.",
+			}
+			: {
+				title: `Make ${person.email} an admin?`,
+				body: "Admins can see every account's email address and usage data, "
+					+ "and can grant or remove roles — including yours. Only do this "
+					+ "for someone you'd trust with the whole site.",
+			};
+	}
+	return action.held
+		? {
+			title: `Remove annotator from ${person.email}?`,
+			body: "Nothing currently reads this role, so nothing changes today.",
+		}
+		: {
+			title: `Make ${person.email} an annotator?`,
+			body: "This marks them as someone who will be able to edit segmentation "
+				+ "masks. Mask editing isn't built yet, so the role grants no access "
+				+ "today — it's a note for when it does.",
+		};
 };
 
 const PeopleSettings: React.FC = () => {
@@ -50,8 +117,14 @@ const PeopleSettings: React.FC = () => {
 	const [total, setTotal] = useState(0);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
-	// The row being changed, so only its toggles go dead rather than the page.
+	// The row being changed, so only its controls go dead rather than the page.
 	const [pending, setPending] = useState<string | null>(null);
+	// Which row's Edit menu is open, and what it has been asked to do.
+	const [menuFor, setMenuFor] = useState<string | null>(null);
+	const [confirming, setConfirming] = useState<{ person: Person; action: Action } | null>(null);
+	// Delete is the one action that has to be typed out, because it's the one
+	// aimed at somebody else's account rather than at a role.
+	const [typed, setTyped] = useState("");
 
 	const load = useCallback(async (q: string) => {
 		setLoading(true);
@@ -85,33 +158,50 @@ const PeopleSettings: React.FC = () => {
 		return () => clearTimeout(t);
 	}, [isAdmin, query, load]);
 
-	const toggle = async (person: Person, role: string, held: boolean) => {
+	// Esc closes whichever of the two is open, innermost first.
+	useEffect(() => {
+		if (!menuFor && !confirming) return;
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key !== "Escape") return;
+			if (confirming) { setConfirming(null); setTyped(""); }
+			else setMenuFor(null);
+		};
+		document.addEventListener("keydown", onKey);
+		return () => document.removeEventListener("keydown", onKey);
+	}, [menuFor, confirming]);
+
+	const start = (person: Person, action: Action) => {
+		setMenuFor(null);
+		setConfirming({ person, action });
+		setTyped("");
+	};
+
+	const apply = async () => {
+		if (!confirming) return;
+		const { person, action } = confirming;
 		setPending(person.id);
 		try {
-			const res = await fetch(
-				held
-					? `${API_BASE}/api/admin/people/${person.id}/roles/${role}`
-					: `${API_BASE}/api/admin/people/${person.id}/roles`,
-				{
-					method: held ? "DELETE" : "POST",
-					credentials: "include",
-					headers: held ? undefined : { "Content-Type": "application/json" },
-					body: held ? undefined : JSON.stringify({ role }),
-				},
-			);
+			const res = await fetch(requestUrl(person, action), {
+				method: requestMethod(action),
+				credentials: "include",
+				headers: requestBody(action) ? { "Content-Type": "application/json" } : undefined,
+				body: requestBody(action),
+			});
 			const body = await res.json().catch(() => ({}));
 			if (!res.ok) throw new Error(body.error || "That didn't work.");
 
-			// Trust the server's list rather than assuming the toggle took: it
-			// refuses some revokes, and this is the row that has to show it.
-			setPeople((current) =>
-				current.map((p) => (p.id === person.id ? { ...p, roles: body.roles } : p)));
-			track(held ? "admin_revoke_role" : "admin_grant_role");
-			notify(
-				held
-					? `Removed ${role} from ${person.email}.`
-					: `${person.email} is now an ${role}.`,
-			);
+			setPeople((current) => current.map((p) => (p.id === person.id
+				? applyToRow(p, action, body)
+				: p)));
+			setConfirming(null);
+			setTyped("");
+			notify(outcome(person, action));
+			// Spelled out rather than routed through a helper: the server drops
+			// any name it doesn't know, and the test that keeps the two lists in
+			// step (test_analytics_vocabulary.py) can only see literals.
+			if (action.kind === "delete") track("admin_delete_account");
+			else if (action.kind === "restore") track("admin_restore_account");
+			else track(action.held ? "admin_revoke_role" : "admin_grant_role");
 		} catch (e) {
 			fail(e instanceof Error ? e.message : "That didn't work.");
 		} finally {
@@ -158,41 +248,95 @@ const PeopleSettings: React.FC = () => {
 				</p>
 			)}
 
-			{people.map((person) => (
-				<div className="set-row dash-person" key={person.id}>
-					<span className="set-row-label">
-						{person.email}
-						{person.id === user?.id && <span className="dash-you"> you</span>}
-						<span className="set-row-note">
-							{[person.name, titleCase(person.plan), joined(person.created_at)]
-								.filter(Boolean)
-								.join(" · ")}
-						</span>
-					</span>
-					<span className="dash-roles">
-						{roles.map((role) => {
-							const held = person.roles.includes(role);
-							return (
-								<button
-									key={role}
-									type="button"
-									className={`set-segmented-btn dash-role${held ? " set-segmented-btn--on" : ""}`}
-									aria-pressed={held}
-									// Without the email, every row's toggles are announced
-									// identically — a screen reader hears "admin" a dozen
-									// times with no way to tell whose it is.
-									aria-label={`${role} — ${person.email}`}
-									title={ROLE_BLURB[role]}
-									disabled={pending === person.id}
-									onClick={() => toggle(person, role, held)}
-								>
-									{role}
-								</button>
-							);
-						})}
-					</span>
-				</div>
-			))}
+			{people.map((person) => {
+				const isYou = person.id === user?.id;
+				const left = daysLeft(person.deletion_requested_at);
+				const menuOpen = menuFor === person.id;
+				const confirm = confirming?.person.id === person.id ? confirming : null;
+
+				return (
+					<div className="dash-person-block" key={person.id}>
+						<div className="set-row dash-person">
+							<span className="set-row-label">
+								{person.email}
+								{isYou && <span className="dash-you"> you</span>}
+								<span className="set-row-note">
+									{[
+										person.name,
+										titleCase(person.plan),
+										person.roles.length ? person.roles.join(" · ") : "No roles",
+										joined(person.created_at),
+									].filter(Boolean).join(" · ")}
+								</span>
+								{left !== null && (
+									<span className="dash-scheduled">
+										Scheduled for deletion · {left} {left === 1 ? "day" : "days"} left to restore
+									</span>
+								)}
+							</span>
+							<button
+								type="button"
+								className="set-btn"
+								// Without the email, every row's button is announced
+								// identically — a screen reader hears "Edit" a dozen times
+								// with no way to tell whose it is.
+								aria-label={`Edit ${person.email}`}
+								aria-expanded={menuOpen}
+								disabled={pending === person.id}
+								onClick={() => setMenuFor(menuOpen ? null : person.id)}
+							>
+								Edit
+							</button>
+						</div>
+
+						{menuOpen && (
+							<div className="dash-menu" role="group" aria-label={`Actions for ${person.email}`}>
+								{roles.map((role) => {
+									const held = person.roles.includes(role);
+									return (
+										<button
+											key={role}
+											type="button"
+											className="dash-menu-item"
+											onClick={() => start(person, { kind: "role", role, held })}
+										>
+											{held ? `Remove ${role}` : `Make ${role}`}
+										</button>
+									);
+								})}
+								<div className="dash-menu-rule" />
+								{person.deletion_requested_at ? (
+									<button
+										type="button"
+										className="dash-menu-item"
+										onClick={() => start(person, { kind: "restore" })}
+									>
+										Restore account
+									</button>
+								) : (
+									<button
+										type="button"
+										className="dash-menu-item dash-menu-item--danger"
+										onClick={() => start(person, { kind: "delete" })}
+									>
+										Delete account
+									</button>
+								)}
+							</div>
+						)}
+
+						{confirm && <ConfirmPanel
+							person={confirm.person}
+							action={confirm.action}
+							typed={typed}
+							setTyped={setTyped}
+							busy={pending === person.id}
+							onCancel={() => { setConfirming(null); setTyped(""); }}
+							onConfirm={apply}
+						/>}
+					</div>
+				);
+			})}
 
 			{total > people.length && (
 				<p className="dash-empty">
@@ -201,6 +345,109 @@ const PeopleSettings: React.FC = () => {
 			)}
 		</div>
 	);
+};
+
+// ---- the confirmation ------------------------------------------------------
+
+const ConfirmPanel: React.FC<{
+	person: Person;
+	action: Action;
+	typed: string;
+	setTyped: (v: string) => void;
+	busy: boolean;
+	onCancel: () => void;
+	onConfirm: () => void;
+}> = ({ person, action, typed, setTyped, busy, onCancel, onConfirm }) => {
+	const { title, body } = explain(person, action);
+	const needsTyping = action.kind === "delete";
+	const armed = !needsTyping || typed.trim().toLowerCase() === person.email.toLowerCase();
+	const danger = action.kind === "delete"
+		|| (action.kind === "role" && action.role === "admin" && !action.held);
+
+	return (
+		<div className="set-confirm dash-confirm" role="alertdialog" aria-label={title}>
+			<div className="set-confirm-text">
+				<strong>{title}</strong>
+				<br />
+				{body}
+				{needsTyping && (
+					<>
+						<br />
+						Type <strong>{person.email}</strong> to confirm.
+					</>
+				)}
+			</div>
+			<div className="set-confirm-actions">
+				{needsTyping && (
+					<input
+						className="set-input"
+						value={typed}
+						autoFocus
+						aria-label={`Type ${person.email} to confirm`}
+						onChange={(e) => setTyped(e.target.value)}
+					/>
+				)}
+				<button
+					type="button"
+					className={`set-btn${danger ? " set-btn--danger" : ""}`}
+					disabled={busy || !armed}
+					onClick={onConfirm}
+				>
+					{busy ? "Working…" : confirmLabel(action)}
+				</button>
+				<button type="button" className="set-btn" onClick={onCancel}>
+					Cancel
+				</button>
+			</div>
+		</div>
+	);
+};
+
+// ---- what each action sends, and what it means -----------------------------
+
+const requestUrl = (person: Person, action: Action) => {
+	const base = `${API_BASE}/api/admin/people/${person.id}`;
+	if (action.kind === "delete") return base;
+	if (action.kind === "restore") return `${base}/restore`;
+	return action.held ? `${base}/roles/${action.role}` : `${base}/roles`;
+};
+
+const requestMethod = (action: Action) => {
+	if (action.kind === "delete") return "DELETE";
+	if (action.kind === "restore") return "POST";
+	return action.held ? "DELETE" : "POST";
+};
+
+const requestBody = (action: Action) =>
+	action.kind === "role" && !action.held
+		? JSON.stringify({ role: action.role })
+		: undefined;
+
+/** Fold the server's answer into the row. Role changes trust the server's list
+ *  rather than assuming the change took — it refuses some revokes, and this is
+ *  the row that has to show it. */
+const applyToRow = (person: Person, action: Action, body: { roles?: string[] }): Person => {
+	if (action.kind === "role") return { ...person, roles: body.roles ?? person.roles };
+	return {
+		...person,
+		deletion_requested_at: action.kind === "delete" ? new Date().toISOString() : null,
+	};
+};
+
+const confirmLabel = (action: Action) => {
+	if (action.kind === "delete") return "Delete account";
+	if (action.kind === "restore") return "Restore account";
+	return action.held ? `Remove ${action.role}` : `Make ${action.role}`;
+};
+
+const outcome = (person: Person, action: Action) => {
+	if (action.kind === "delete") {
+		return `${person.email} is scheduled for deletion and has been signed out.`;
+	}
+	if (action.kind === "restore") return `${person.email} has been restored.`;
+	return action.held
+		? `Removed ${action.role} from ${person.email}.`
+		: `${person.email} is now an ${action.role}.`;
 };
 
 export default PeopleSettings;

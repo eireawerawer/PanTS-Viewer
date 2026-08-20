@@ -67,7 +67,9 @@ export type PlanUsage = {
 };
 
 export type AuthProvider2 = "google" | "github";
-export type AuthMode = "signin" | "signup";
+// "forgot" is the same card again, asking only for an email. It isn't reachable
+// from the header — you get there from the sign-in form, having failed at it.
+export type AuthMode = "signin" | "signup" | "forgot";
 
 type AuthContextValue = {
 	user: AuthUser | null;
@@ -79,6 +81,15 @@ type AuthContextValue = {
 	signUp: (email: string, password: string, name?: string) => Promise<AuthUser>;
 	/** Full-page redirect into the provider's consent screen. Never returns. */
 	signInWithProvider: (provider: AuthProvider2) => void;
+	/**
+	 * Ask for a reset link. Resolves whether or not an account exists — the
+	 * server answers the same way either way, so that nobody can use this to
+	 * discover which addresses are registered. The UI has to say "if an account
+	 * exists" rather than "sent", because it genuinely doesn't know.
+	 */
+	requestPasswordReset: (email: string) => Promise<void>;
+	/** Redeem a reset token. On success the user is signed in. */
+	resetPassword: (token: string, password: string) => Promise<AuthUser>;
 	/** Which providers the server has credentials for (null until loaded). */
 	oauthProviders: Record<AuthProvider2, boolean> | null;
 	signOut: () => Promise<void>;
@@ -290,6 +301,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		[authAction]
 	);
 
+	const requestPasswordReset = useCallback(async (email: string) => {
+		const res = await authFetch("/api/auth/forgot-password", {
+			method: "POST",
+			body: JSON.stringify({ email }),
+		});
+		// 200 whether or not the address has an account. The only failure worth
+		// surfacing is the rate limit, which is a thing the user can act on.
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({}));
+			throw new Error(data.error || "Couldn't send the link. Try again.");
+		}
+	}, []);
+
+	const resetPassword = useCallback(
+		async (token: string, password: string) => {
+			const res = await authFetch("/api/auth/reset-password", {
+				method: "POST",
+				body: JSON.stringify({ token, password }),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.error || "Couldn't reset your password.");
+			const mapped = mapApiUser(data.user);
+			setUser(mapped);
+			pingOtherTabs();
+			return mapped;
+		},
+		[]
+	);
+
 	// OAuth can't be a fetch: the provider's consent screen has to be a top-level
 	// navigation (and the backend needs to set the cookie on the way back), so we
 	// hand the whole browser over. On return, the mount-time /me call restores
@@ -428,6 +468,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			signIn,
 			signUp,
 			signInWithProvider,
+			requestPasswordReset,
+			resetPassword,
 			oauthProviders,
 			signOut,
 			updatePreferences,
@@ -445,7 +487,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			oauthError,
 			clearOauthError,
 		}),
-		[user, loading, signIn, signUp, signInWithProvider, oauthProviders, signOut,
+		[user, loading, signIn, signUp, signInWithProvider, requestPasswordReset,
+		 resetPassword, oauthProviders, signOut,
 		 updatePreferences, updateName, exportData, deleteScanHistory, deleteAccount,
 		 updateAccountProfile, setPlan, usage, refreshUsage, authPrompt, promptAuth,
 		 closeAuthPrompt, oauthError, clearOauthError]
