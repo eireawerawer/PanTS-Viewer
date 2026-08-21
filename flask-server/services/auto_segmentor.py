@@ -1101,17 +1101,14 @@ def _run_atlasnet_organs_inference(input_path: str, session_dir: str, atlasnet_o
     )
 
     selected_gpu = get_least_used_gpu()
-    conda_exe = shutil.which("conda")
-    if not conda_exe:
-        raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
+    predict = _env_command(atlasnet_organs_env_name, "nnUNetv2_predict_from_modelfolder")
 
     full_cmd = (
         f"nnUNet_raw={shlex.quote(nnunet_raw)} "
         f"nnUNet_preprocessed={shlex.quote(nnunet_preprocessed)} "
         f"nnUNet_results={shlex.quote(nnunet_results)} "
         f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
-        f"{shlex.quote(conda_exe)} run -n {shlex.quote(atlasnet_organs_env_name)} "
-        f"nnUNetv2_predict_from_modelfolder "
+        f"{predict} "
         f"-i {shlex.quote(input_dir)} "
         f"-o {shlex.quote(save_dir)} "
         f"-m {shlex.quote(model_path)} "
@@ -1184,17 +1181,14 @@ def _run_atlasnet_tumors_inference(input_path: str, session_dir: str, atlasnet_e
     )
 
     selected_gpu = get_least_used_gpu()
-    conda_exe = shutil.which("conda")
-    if not conda_exe:
-        raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
+    predict = _env_command(atlasnet_env_name, "nnUNetv2_predict_from_modelfolder")
 
     full_cmd = (
         f"nnUNet_raw={shlex.quote(nnunet_raw)} "
         f"nnUNet_preprocessed={shlex.quote(nnunet_preprocessed)} "
         f"nnUNet_results={shlex.quote(nnunet_results)} "
         f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
-        f"{shlex.quote(conda_exe)} run -n {shlex.quote(atlasnet_env_name)} "
-        f"nnUNetv2_predict_from_modelfolder "
+        f"{predict} "
         f"-i {shlex.quote(input_dir)} "
         f"-o {shlex.quote(save_dir)} "
         f"-m {shlex.quote(model_path)} "

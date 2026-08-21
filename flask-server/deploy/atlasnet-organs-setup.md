@@ -49,10 +49,18 @@ The zip also carries training logs and a `progress.png`; harmless, ignore them.
 
 ## 2. Conda env
 
+**On bdmap1 there is already an `atlasnet` env** (torch 2.11+cu130, nnunetv2) built for that
+box, which is GB10 / aarch64. Use it rather than making a new one. Both models point at it by
+default via `CONDA_ENV_ATLASNET_ORGANS` / `_TUMORS`.
+
+Only if you are setting this up somewhere else:
+
 ```bash
 conda create -y -n atlasnet python=3.11
 conda activate atlasnet
-pip install torch --index-url https://download.pytorch.org/whl/cu121   # match the box's CUDA
+# pick the wheel that matches the box. cu121 x86 wheels will NOT work on
+# aarch64 / Grace-Blackwell; that hardware needs a cu13x aarch64 build.
+pip install torch --index-url https://download.pytorch.org/whl/cu130
 pip install nnunetv2
 ```
 
