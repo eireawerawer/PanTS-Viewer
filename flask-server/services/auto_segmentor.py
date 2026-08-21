@@ -640,9 +640,8 @@ def _run_suprem_inference(input_path: str, session_dir: str) -> str:
         f"-W ignore {shlex.quote(os.path.join(suprem_src, 'inference.py'))} "
         f"--data_root_path {shlex.quote(inputs_dir)} "
         f"--save_dir {shlex.quote(output_dir)} "
-        f"--checkpoint {shlex.quote(checkpoint)} "
+        f"--resume {shlex.quote(checkpoint)} "
         f"--backbone unet "
-        f"--suprem "
         f"--store_result"
     )
 
