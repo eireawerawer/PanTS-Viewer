@@ -40,8 +40,29 @@ def create_app():
     # every visitor geolocates to the server itself and the whole site shares
     # one rate-limit bucket. Opt-in because these headers are client-spoofable
     # when nothing trusted is in front of the app.
+    #
+    # TRUST_PROXY_HOPS is how many proxies are in front of the app, and it must
+    # match the deployment exactly. ProxyFix counts from the RIGHT of
+    # X-Forwarded-For, so the value is "how many entries at the end of that
+    # header were written by infrastructure I control".
+    #
+    # Too low and you read a proxy's own address instead of the visitor's. Too
+    # high and you read whatever the client put there — anyone can send an
+    # X-Forwarded-For header, so an over-count is a spoofing hole, which is why
+    # this defaults to 1 rather than to something permissive.
+    #
+    # bodymaps.wse.jhu.edu sits behind two: a campus edge proxy and nginx, so it
+    # sets 2. Check yours rather than guessing — restart gunicorn with
+    #   --access-logformat "XFF=[%({X-Forwarded-For}i)s]"
+    # and count the entries on a request from OUTSIDE the network. Traffic from
+    # inside is NAT'd and shows a private address where the visitor's should be,
+    # which makes an internal test look like a broken one.
     if os.environ.get("TRUST_PROXY", "false").lower() == "true":
-        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+        try:
+            hops = max(1, int(os.environ.get("TRUST_PROXY_HOPS", "1")))
+        except ValueError:
+            hops = 1
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=hops, x_proto=1, x_host=1)
 
     app.register_blueprint(api_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(auth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
