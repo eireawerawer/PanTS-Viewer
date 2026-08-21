@@ -32,6 +32,12 @@ FLASK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE_WARM_ROOT="$(grep -m1 '^EPAI_WARM_ROOT=' "$FLASK_DIR/.env" 2>/dev/null | cut -d= -f2-)"
 EPAI_WARM_ROOT="${EPAI_WARM_ROOT:-${SESSIONS_DIR_PATH:-${ENV_FILE_WARM_ROOT:-$FLASK_DIR/sessions}}}"
 
+# TensorRT FP16 (validated n=1033, see epai_trt_fp16.py) -- opt-in, off unless
+# a built .plan is pointed at explicitly. Same .env fallback as EPAI_WARM_ROOT
+# so it's not lost on the next person's restart once it's actually enabled.
+ENV_FILE_TRT_PLAN="$(grep -m1 '^EPAI_TRT_PLAN_PATH=' "$FLASK_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+EPAI_TRT_PLAN_PATH="${EPAI_TRT_PLAN_PATH:-$ENV_FILE_TRT_PLAN}"
+
 if [ ! -x "$PYBIN" ]; then
   echo "ERROR: python not found at $PYBIN (set PYBIN or CONDA_ENV_EPAI)" >&2
   exit 1
@@ -50,12 +56,13 @@ if pgrep -f "epai_warm_server.py" >/dev/null; then
   sleep 2
 fi
 
-echo "[run_warm] starting: model=$MODEL port=$PORT step=$STEP_SIZE disable_tta=$DISABLE_TTA"
+echo "[run_warm] starting: model=$MODEL port=$PORT step=$STEP_SIZE disable_tta=$DISABLE_TTA trt_plan=${EPAI_TRT_PLAN_PATH:-<off>}"
 echo "[run_warm] permitted path root: $EPAI_WARM_ROOT"
 mkdir -p "$EPAI_WARM_ROOT"
 setsid env \
   EPAI_CKPT_PATH="$MODEL" PORT="$PORT" EPAI_STEP_SIZE="$STEP_SIZE" \
   EPAI_DISABLE_TTA="$DISABLE_TTA" EPAI_WARM_ROOT="$EPAI_WARM_ROOT" \
+  EPAI_TRT_PLAN_PATH="$EPAI_TRT_PLAN_PATH" \
   "$PYBIN" -u "$SCRIPT" > "$LOG" 2>&1 < /dev/null &
 
 for i in $(seq 1 180); do
