@@ -117,6 +117,41 @@ def get_least_used_gpu(default_gpu=None):
         return str(default_gpu)
 
 
+def _resolve_conda_exe():
+    """Locate the conda binary.
+
+    gunicorn on the server runs without a login shell, so it does not pick up
+    the PATH that conda's shell init exports. shutil.which("conda") therefore
+    returns nothing there even though conda is installed and working.
+
+    Half the runners in this file already worked around that with a hardcoded
+    fallback and half raised instead, which is why ePAI, Atlas-Net and
+    LesionSegmenter failed while OpenVAE and MedFormer kept working. Same box,
+    same conda, different error handling.
+
+    Override with CONDA_EXE_PATH if conda lives somewhere not listed here.
+    """
+    explicit = os.path.expanduser(os.getenv("CONDA_EXE_PATH", "").strip())
+    if explicit and os.path.exists(explicit):
+        return explicit
+
+    found = shutil.which("conda")
+    if found:
+        return found
+
+    for candidate in (
+        "/home/apps/anaconda3/condabin/conda",
+        "/home/visitor/miniconda3/condabin/conda",
+        "/home/visitor/anaconda3/condabin/conda",
+        "/opt/conda/condabin/conda",
+        "/opt/anaconda3/condabin/conda",
+        "/root/miniconda3/condabin/conda",
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    return ""
+
+
 def _resolve_conda_activate_path():
     candidates = [
         os.path.expanduser(os.getenv("CONDA_ACTIVATE_PATH", "").strip()),
@@ -466,7 +501,7 @@ def _run_epai_inference(input_path: str, session_dir: str, conda_path: str, epai
                 f"{run_payload}"
             )
         else:
-            conda_exe = shutil.which("conda")
+            conda_exe = _resolve_conda_exe()
             if not conda_exe:
                 raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
 
@@ -562,7 +597,7 @@ def _run_suprem_inference(input_path: str, session_dir: str) -> str:
         "/home/visitor/suprem_native/workspace/SuPreM/pretrained_checkpoints/supervised_suprem_unet_2100.pth",
     )
     conda_env = os.getenv("CONDA_ENV_SUPREM", "suprem")
-    conda_exe = shutil.which("conda") or "/home/apps/anaconda3/condabin/conda"
+    conda_exe = _resolve_conda_exe()
     selected_gpu = get_least_used_gpu()
     inputs_dir = os.path.join(suprem_workspace, "inputs")
 
@@ -614,7 +649,7 @@ def _run_openvae_inference(input_path: str, session_dir: str) -> str:
     checkpoint = os.getenv("OPENVAE_CHECKPOINT_PATH",
                            "/home/visitor/openvae/ckpt/OpenVAE-3D-4x-patch64-10K/autoencoder_best.pt")
     conda_env = os.getenv("CONDA_ENV_OPENVAE", "openvae")
-    conda_exe = shutil.which("conda") or "/home/apps/anaconda3/condabin/conda"
+    conda_exe = _resolve_conda_exe()
     selected_gpu = get_least_used_gpu()
 
     inference_script = os.path.join(openvae_src, "test", "test_3dvae.py")
@@ -704,7 +739,7 @@ def _run_medformer_inference(input_path: str, session_dir: str) -> str:
         "/home/visitor/rsuper/MedFormerPanTS/labels_pants.yaml",
     )
     conda_env = os.getenv("CONDA_ENV_MEDFORMER", "rsuper")
-    conda_exe = shutil.which("conda") or "/home/apps/anaconda3/condabin/conda"
+    conda_exe = _resolve_conda_exe()
     selected_gpu = get_least_used_gpu()
 
     # MedFormer needs the filename to contain ".nii.gz" to enter the NIfTI branch;
@@ -769,7 +804,7 @@ def _run_rsuper_inference(input_path: str, session_dir: str) -> str:
         "/home/visitor/rsuper/MedFormerPanTS/labels_pants.yaml",
     )
     conda_env = os.getenv("CONDA_ENV_MEDFORMER", "rsuper")
-    conda_exe = shutil.which("conda") or "/home/apps/anaconda3/condabin/conda"
+    conda_exe = _resolve_conda_exe()
     selected_gpu = get_least_used_gpu()
 
     bdmap_id = "BDMAP_00000001"
@@ -837,7 +872,7 @@ def _run_atlasnet_inference(input_path: str, session_dir: str, conda_path: str, 
     nnunet_results = os.getenv("ATLASNET_NNUNET_RESULTS", "/home/visitor/atlasnet/nnUNet/results")
 
     selected_gpu = get_least_used_gpu()
-    conda_exe = shutil.which("conda")
+    conda_exe = _resolve_conda_exe()
     if not conda_exe:
         raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
 
@@ -931,7 +966,7 @@ def _run_lesionsegmenter_inference(input_path: str, session_dir: str, conda_path
     if os.path.exists(direct_python):
         run_prefix = shlex.quote(direct_python)
     else:
-        conda_exe = shutil.which("conda")
+        conda_exe = _resolve_conda_exe()
         if not conda_exe:
             raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
         run_prefix = f"{shlex.quote(conda_exe)} run -n {shlex.quote(lesionseg_env_name)} python"
@@ -1125,7 +1160,7 @@ def _run_shapekit_inference(input_dir: str, session_dir: str) -> str:
 
     shapekit_src = os.getenv("SHAPEKIT_SRC_PATH", "/home/visitor/ShapeKit")
     conda_env    = os.getenv("CONDA_ENV_SHAPEKIT", "shapekit")
-    conda_exe    = shutil.which("conda") or "/home/apps/anaconda3/condabin/conda"
+    conda_exe    = _resolve_conda_exe()
     cpu_count    = os.getenv("SHAPEKIT_CPU_NUM", "16")
 
     if not os.path.isdir(shapekit_src):
