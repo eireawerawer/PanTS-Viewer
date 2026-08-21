@@ -410,6 +410,26 @@ def _remap_combined_labels(nii_path: str, label_map: dict) -> None:
     nib.save(nib.Nifti1Image(remapped, img.affine, img.header), nii_path)
 
 
+def _stage_nifti_gz(input_path: str, dest_path: str) -> None:
+    """Point dest_path (always *_0000.nii.gz or ct.nii.gz) at input_path.
+
+    input_path is usually already gzip-compressed, so a symlink is enough --
+    cheap, no copy of a multi-hundred-MB CT. But uploads that arrive as a
+    bare .nii (e.g. the local-NIfTI picker) are NOT gzipped; symlinking one
+    of those under a .gz-suffixed name promises gzip bytes that aren't
+    there, and every reader (nibabel, SimpleITK) fails with "not a gzip
+    file" the moment a model tries to load it. Detect that case and
+    actually convert instead of just renaming.
+    """
+    if os.path.lexists(dest_path):
+        os.remove(dest_path)
+    if input_path.endswith(".gz"):
+        os.symlink(os.path.abspath(input_path), dest_path)
+    else:
+        import nibabel as nib
+        nib.save(nib.load(input_path), dest_path)
+
+
 def _normalize_case_id(input_path_or_filename: str) -> str:
     normalized_input = os.path.normpath(input_path_or_filename or "")
     parent_dir = os.path.basename(os.path.dirname(normalized_input))
@@ -461,9 +481,7 @@ def _run_epai_inference(input_path: str, session_dir: str, conda_path: str, epai
     os.makedirs(save_dir, exist_ok=True)
 
     nnunet_input = os.path.join(input_dir, f"{case_id}_0000.nii.gz")
-    if os.path.lexists(nnunet_input):
-        os.remove(nnunet_input)
-    os.symlink(input_path, nnunet_input)
+    _stage_nifti_gz(input_path, nnunet_input)
 
     input_csv_path = os.path.join(epai_workspace, "input.csv")
     output_csv_path = os.path.join(epai_workspace, "output.csv")
@@ -620,9 +638,7 @@ def _run_suprem_inference(input_path: str, session_dir: str) -> str:
 
     # inference.py expects the file named ct.nii.gz inside a case subfolder
     ct_link = os.path.join(input_case_dir, "ct.nii.gz")
-    if os.path.lexists(ct_link):
-        os.remove(ct_link)
-    os.symlink(os.path.abspath(input_path), ct_link)
+    _stage_nifti_gz(input_path, ct_link)
 
     suprem_src = os.getenv("SUPREM_SRC_PATH", "/home/visitor/suprem_native/workspace/SuPreM")
     checkpoint = os.getenv(
@@ -891,9 +907,7 @@ def _run_atlasnet_inference(input_path: str, session_dir: str, conda_path: str, 
     os.makedirs(save_dir, exist_ok=True)
 
     nnunet_input = os.path.join(input_dir, f"{case_id}_0000.nii.gz")
-    if os.path.lexists(nnunet_input):
-        os.remove(nnunet_input)
-    os.symlink(input_path, nnunet_input)
+    _stage_nifti_gz(input_path, nnunet_input)
 
     ckpt_path = os.getenv(
         "ATLASNET_CKPT_PATH",
@@ -972,9 +986,7 @@ def _run_lesionsegmenter_inference(input_path: str, session_dir: str, conda_path
     os.makedirs(save_dir, exist_ok=True)
 
     nnunet_input = os.path.join(input_dir, f"{case_id}_0000.nii.gz")
-    if os.path.lexists(nnunet_input):
-        os.remove(nnunet_input)
-    os.symlink(input_path, nnunet_input)
+    _stage_nifti_gz(input_path, nnunet_input)
 
     ckpt_path = os.getenv(
         "LESIONSEG_CKPT_PATH",

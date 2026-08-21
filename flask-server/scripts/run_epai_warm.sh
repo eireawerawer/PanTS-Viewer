@@ -22,7 +22,15 @@ STEP_SIZE="${EPAI_STEP_SIZE:-0.5}"
 DISABLE_TTA="${EPAI_DISABLE_TTA:-1}"
 
 FLASK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-EPAI_WARM_ROOT="${EPAI_WARM_ROOT:-${SESSIONS_DIR_PATH:-$FLASK_DIR/sessions}}"
+# Falls back to .env's own EPAI_WARM_ROOT (not blanket-sourced -- this is the
+# one setting whose default silently defeats the warm predictor rather than
+# just failing loudly, so it gets its own safety net). Real requests land in
+# BOTH flask-server/sessions (session-based viewer flow) and PanTS-Viewer/tmp
+# (the /auto_segment and /run-inference quick-inference flow) -- scoping the
+# root to just "sessions" meant every quick-inference request silently fell
+# back to the slow cold path, which is exactly what happened here.
+ENV_FILE_WARM_ROOT="$(grep -m1 '^EPAI_WARM_ROOT=' "$FLASK_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+EPAI_WARM_ROOT="${EPAI_WARM_ROOT:-${SESSIONS_DIR_PATH:-${ENV_FILE_WARM_ROOT:-$FLASK_DIR/sessions}}}"
 
 if [ ! -x "$PYBIN" ]; then
   echo "ERROR: python not found at $PYBIN (set PYBIN or CONDA_ENV_EPAI)" >&2
