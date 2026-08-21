@@ -23,9 +23,9 @@ describe("brand identity", () => {
     expect(html).not.toMatch(/fonts\.(googleapis|gstatic)\.com/);
   });
 
-  it("the logo file is the adopted mark (two ink bars + orange band)", () => {
+  it("the logo file is the adopted mark (two ink bars + blue band)", () => {
     const svg = read("public/bodymaps-logo.svg");
-    expect(svg).toContain("#E76F51"); // agreement band
+    expect(svg).toContain("#68ACE5"); // agreement band (JHU Spirit Blue)
     expect(svg).toContain("#0F172A"); // ink bars
     expect(svg).not.toContain("#27379b"); // invented navy crosshair
   });

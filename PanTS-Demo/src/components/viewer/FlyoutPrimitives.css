@@ -340,7 +340,7 @@
 }
 
 .atb-menu-row__expand-chip.is-open {
-    background: rgba(15, 23, 42, 0.35);
+    background: rgba(0, 45, 114, 0.35);
     border-color: rgba(104, 172, 229, 0.5);
     color: #3499ff;
 }
@@ -371,7 +371,7 @@
     justify-content: center;
     width: 16px;
     height: 16px;
-    color: var(--accent, #3499ff);
+    color: #68ACE5;
     animation: atb-check-pop 0.15s ease-out;
 }
 

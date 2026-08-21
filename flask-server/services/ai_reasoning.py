@@ -484,7 +484,7 @@ def model_offline_reply(
             "I can't read the attached views right now — no vision model is "
             f"available on this server. Pulling one (`ollama pull {model}`) and "
             "restarting the backend will enable image reading. In the meantime "
-            "I can still answer from text, and the viewer controls in the left "
+            "I can still answer from text, and the viewer controls in the top "
             "panel all work.\n\n"
             "Would you like me to answer the anatomy question from the case "
             "measurements instead, while the model is set up?"
@@ -500,7 +500,7 @@ def model_offline_reply(
 
     return (
         "I couldn't get an answer just now — the local model didn't respond. "
-        "Please try again in a moment; the viewer controls in the left panel "
+        "Please try again in a moment; the viewer controls in the top panel "
         "still work.\n\n"
         "Would you like me to retry the same question?"
     )
