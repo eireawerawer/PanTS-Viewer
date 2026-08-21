@@ -19,9 +19,15 @@ SCRIPT="$(cd "$(dirname "$0")" && pwd)/epai_warm_server.py"
 # Settings must match what auto_segmentor.py requests, or the server answers
 # 409 and every request falls back to the slow cold path.
 STEP_SIZE="${EPAI_STEP_SIZE:-0.5}"
-DISABLE_TTA="${EPAI_DISABLE_TTA:-1}"
 
 FLASK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Same .env fallback as EPAI_WARM_ROOT below -- without it, a restart that
+# doesn't explicitly pass EPAI_DISABLE_TTA silently reverts to no-TTA even
+# when .env says otherwise (this actually happened deploying EPAI_TTA_AXES).
+ENV_FILE_DISABLE_TTA="$(grep -m1 '^EPAI_DISABLE_TTA=' "$FLASK_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+DISABLE_TTA="${EPAI_DISABLE_TTA:-${ENV_FILE_DISABLE_TTA:-1}}"
+
 # Falls back to .env's own EPAI_WARM_ROOT (not blanket-sourced -- this is the
 # one setting whose default silently defeats the warm predictor rather than
 # just failing loudly, so it gets its own safety net). Real requests land in
