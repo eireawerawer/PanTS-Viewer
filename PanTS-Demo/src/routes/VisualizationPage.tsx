@@ -45,6 +45,7 @@ import { track } from "../helpers/analytics";
 import { buildViewerActions } from "../components/AIAssistant/assistantActions";
 import MeasurementPanel from "../components/MeasurementPanel/MeasurementPanel";
 import { SegmentationMeshViewer } from "../components/viewer/MeshViewer";
+import { cache as reportDataCache } from '../components/ReportScreen/ReportScreen';
 import { captureMeshCanvas } from "../helpers/viewer/meshCapture";
 import OrganCheckbox from "../components/OrganCheckbox";
 import PercentileBar from "../components/PercentileBar";
@@ -412,6 +413,8 @@ function useToolbarFlyout() {
 		};
 	}, [open]);
 
+	
+
 	return { open, pos, groupRef, btnRef, menuRef, toggle, close };
 }
 
@@ -540,6 +543,21 @@ function VisualizationPage() {
 		typeof window !== "undefined" &&
 		new URLSearchParams(window.location.search).get("hd") === "1";
 	
+	useEffect(() => {
+		if (isDicom || !caseId || reportDataCache[caseId]) return;
+		// Deferred ~2s so this doesn't compete with the CT/segmentation load for
+		// server CPU and disk I/O right when the viewer first opens — the scan
+		// is what the user needs immediately; the report data just needs to be
+		// warm in the cache well before anyone would actually click "Report."
+		const t = setTimeout(() => {
+			fetch(`${API_BASE}/api/get-report-data/${caseId}`)
+				.then(r => r.json())
+				.then(j => { if (!j.error) reportDataCache[caseId] = j; })
+				.catch(() => {});
+		}, 2000);
+		return () => clearTimeout(t);
+	}, [caseId, isDicom]);
+
 	const [showAnnotationToolbar, setShowAnnotationToolbar] = useState(false);
 	const [isEditRendering, setIsEditRendering] = useState(false);
 	// Mirrors SegmentsPopup's "something is currently being deleted" state up
@@ -2439,7 +2457,16 @@ function VisualizationPage() {
 		// flow doesn't reflow the other three — their viewports stay valid, so switching back
 		// to MPR is instant (no resize/re-fit of the 2D views, no animation, correct sizes).
 		if (viewMode === "3d") {
-			return panel === "3d" ? { position: "absolute", inset: 0, zIndex: 20 } : {};
+			if (panel === "3d") return { position: "absolute", inset: 0, zIndex: 20 };
+			// Keep the pane mounted at its normal grid size (no display:none — that's
+			// what preserves the "instant, no resize" swap back to MPR described above),
+			// but strip it from paint and hit-testing entirely. Previously this branch
+			// left these panes fully visible/interactive and relied on the 3D pane's
+			// z-index to visually cover them — but the slice scrollbar/counter overlays
+			// (rendered by renderPaneOverlays, see below) carry their own z-index for
+			// sitting above the Cornerstone canvas, which could equal or exceed the 3D
+			// pane's z-index:20 and bleed through on top of it.
+			return { visibility: "hidden", pointerEvents: "none" };
 		}
 		// 2D single view: collapse the grid to one cell and hide the rest.
 		return viewMode === panel ? {} : { display: "none" };
@@ -2466,6 +2493,9 @@ function VisualizationPage() {
 	// and mixing React-rendered children into the same node risks the two fighting over
 	// the same DOM nodes.
 	const renderPaneOverlays = (pane: CinePane) => {
+		// Never show 2D slice-counter/W-L overlays while the 3D pane is fullscreen —
+		// these are the elements that were bleeding through on top of the 3D render.
+		if (viewMode === "3d") return null;
 		const info = sliceInfo[pane];
 		return (
 			<>
@@ -3575,14 +3605,18 @@ const aiAvailableOrgans = useMemo(() => {
 												</button>
 											)}
 											{!isLocal && (
-												<button
-													className="vp-tool"
-													onClick={() => { track("report_open"); setShowReportScreen(true); }}
-													aria-label="Open report"
-												>
-													<IconReport size={20} color="white" />
-													<span className="vp-tool__tip">Report</span>
-												</button>
+													<button
+															className="vp-tool"
+															onClick={() => {
+																	track("report_open");
+																	setViewMode("3d");
+																	setShowReportScreen(true);
+															}}
+															aria-label="Open report"
+													>
+															<IconReport size={20} color="white" />
+															<span className="vp-tool__tip">Report</span>
+													</button>
 											)}
 
 											{/* HD and AI stay inline: HD is a live status indicator (streaming %),
