@@ -100,3 +100,91 @@ def test_no_runner_calls_shutil_which_directly():
         f"lines {offenders} call shutil.which('conda') directly; "
         f"use _resolve_conda_exe() so the server fallback applies"
     )
+
+
+# ---------------------------------------------------------------------------
+# _env_command: the fix that actually matters.
+#
+# LesionSegmenter survived the outage because it invoked its env's python
+# binary directly and never needed conda on PATH. These pin that behaviour for
+# every runner.
+# ---------------------------------------------------------------------------
+
+from services.auto_segmentor import _env_command
+
+
+def test_prefers_the_env_binary_and_never_touches_conda(monkeypatch, tmp_path):
+    """The server case. conda is unreachable, but the env binary exists."""
+    envs = tmp_path / "envs"
+    binp = envs / "epai" / "bin"
+    binp.mkdir(parents=True)
+    (binp / "python").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("CONDA_ENVS_DIR", str(envs))
+
+    def explode(_):
+        raise AssertionError("must not need conda when the env binary exists")
+
+    monkeypatch.setattr(auto_segmentor, "_resolve_conda_exe", explode)
+    assert _env_command("epai") == str(binp / "python")
+
+
+def test_finds_console_scripts_not_just_python(monkeypatch, tmp_path):
+    """The AtlasNet runners call nnUNetv2_predict_from_modelfolder, not python."""
+    envs = tmp_path / "envs"
+    binp = envs / "atlasnet" / "bin"
+    binp.mkdir(parents=True)
+    (binp / "nnUNetv2_predict_from_modelfolder").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("CONDA_ENVS_DIR", str(envs))
+    got = _env_command("atlasnet", "nnUNetv2_predict_from_modelfolder")
+    assert got == str(binp / "nnUNetv2_predict_from_modelfolder")
+
+
+def test_falls_back_to_conda_run_when_env_binary_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONDA_ENVS_DIR", str(tmp_path / "nope"))
+    monkeypatch.setattr(auto_segmentor, "_resolve_conda_exe", lambda: "/usr/bin/conda")
+    got = _env_command("epai")
+    assert "run -n epai python" in got and "/usr/bin/conda" in got
+
+
+def test_error_names_both_things_it_looked_for(monkeypatch, tmp_path):
+    """A bare 'Could not find conda' is what made this outage hard to place."""
+    monkeypatch.setenv("CONDA_ENVS_DIR", str(tmp_path / "nope"))
+    monkeypatch.setattr(auto_segmentor, "_resolve_conda_exe", lambda: "")
+    with pytest.raises(RuntimeError) as e:
+        _env_command("epai")
+    msg = str(e.value)
+    assert "epai" in msg and "CONDA_ENVS_DIR" in msg and "CONDA_EXE_PATH" in msg
+
+
+def test_no_runner_builds_conda_run_by_hand():
+    """Runners must go through _env_command so the direct-binary path applies.
+
+    Two exemptions. _env_command itself has to build the fallback, and the ePAI
+    branch that runs a bash script cannot use an env binary, so `conda run` is
+    genuinely the only option there.
+    """
+    with open(MODULE_SRC, encoding="utf-8") as fh:
+        lines = fh.readlines()
+
+    current_fn = None
+    in_epai_script_branch = False
+    offenders = []
+    for i, line in enumerate(lines, 1):
+        if line.startswith("def "):
+            current_fn = line[4:].split("(")[0]
+            in_epai_script_branch = False
+        if "fallback_script_path and os.path.exists" in line:
+            in_epai_script_branch = True
+        elif line.strip() == "else:" and in_epai_script_branch:
+            in_epai_script_branch = False
+
+        if "run -n" not in line or "shlex.quote(conda_exe)" not in line:
+            continue
+        if current_fn == "_env_command" or in_epai_script_branch:
+            continue
+        offenders.append(i)
+
+    assert not offenders, (
+        f"lines {offenders} build `conda run` by hand; use _env_command() so the "
+        f"env-binary path is tried first"
+    )
