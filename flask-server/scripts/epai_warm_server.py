@@ -28,6 +28,12 @@ Inference settings mirror the validated configuration:
     against real ground truth. Do not change EPAI_STEP_SIZE's default without
     that validation first (same rigor as the TTA frontier: real GT, report
     detection rate and whole-lesion misses, not just mean dice).
+  - EPAI_TRT_PLAN_PATH -- TensorRT FP16 inference, validated n=1033
+    (epai_trt_scaleup.py), 0 errors, mean speedup 1.66x, argmax agreement vs
+    eager 99.99%+ (min 0.9997). Off by default (opt-in via the env var) so a
+    first prod rollout can be watched before it's the default for everyone --
+    same rollout discipline as the warm predictor itself. Set to the built
+    .plan (see epai_trt_fp16.py) to enable.
 
 A client requesting settings this server was not started with is REFUSED
 (HTTP 409), matching lesionseg_warm_server.py's reasoning: silently serving a
@@ -89,6 +95,7 @@ def _parse_axes(raw):
 
 
 TTA_AXES = _parse_axes(os.environ.get("EPAI_TTA_AXES"))
+TRT_PLAN_PATH = os.environ.get("EPAI_TRT_PLAN_PATH", "").strip()
 
 
 def _default_root():
@@ -143,6 +150,55 @@ def _apply_fork_fixes():
     )
 
 
+class TrtRunner:
+    """Loads the FP16 engine once; forward() matches the eager net's signature
+    so it can replace predictor.network.forward directly. Output buffer
+    allocated ONCE (the fix for the INT8-era per-patch-allocation stall) and
+    the engine runs on torch's current stream (no per-call host sync) -- see
+    epai_trt_fp16.py, where this exact class was validated.
+    """
+
+    def __init__(self, plan_path):
+        import tensorrt as trt
+
+        logger = trt.Logger(trt.Logger.WARNING)
+        runtime = trt.Runtime(logger)
+        with open(plan_path, "rb") as f:
+            self.engine = runtime.deserialize_cuda_engine(f.read())
+        self.context = self.engine.create_execution_context()
+        self.in_name = self.engine.get_tensor_name(0)
+        self.out_name = self.engine.get_tensor_name(1)
+        out_shape = tuple(self.context.get_tensor_shape(self.out_name))
+        self.out_buf = torch.empty(out_shape, dtype=torch.float16, device="cuda")
+        self.context.set_tensor_address(self.out_name, self.out_buf.data_ptr())
+
+    def forward(self, x):
+        x = x.half().contiguous()
+        self.context.set_input_shape(self.in_name, tuple(x.shape))
+        self.context.set_tensor_address(self.in_name, x.data_ptr())
+        s = torch.cuda.current_stream()
+        self.context.execute_async_v3(s.cuda_stream)
+        return self.out_buf.float()
+
+
+def _maybe_load_trt(net):
+    """Returns True if TRT is now serving net.forward, False on any problem
+    (missing plan, missing tensorrt package, bad engine) -- inference must
+    degrade to correct-but-slower eager, never fail to start over this."""
+    if not TRT_PLAN_PATH:
+        return False
+    if not os.path.isfile(TRT_PLAN_PATH):
+        print(f"[warm] EPAI_TRT_PLAN_PATH set but not found: {TRT_PLAN_PATH}; using eager", flush=True)
+        return False
+    try:
+        runner = TrtRunner(TRT_PLAN_PATH)
+        net.forward = lambda x: runner.forward(x)
+        return True
+    except Exception as e:
+        print(f"[warm] TRT engine load failed ({type(e).__name__}: {e}); using eager", flush=True)
+        return False
+
+
 if not torch.cuda.is_available():
     raise SystemExit("ERROR: CUDA not available -- refusing to start the warm predictor")
 
@@ -166,10 +222,11 @@ preprocessor = DefaultPreprocessor(verbose=False)
 # Must match the writer export_prediction_from_logits uses internally (see
 # module docstring, fix 2) -- this model's plans specify NibabelIOWithReorient.
 reader_writer = predictor.plans_manager.image_reader_writer_class()
+TRT_ACTIVE = _maybe_load_trt(predictor.network)
 
 _load_seconds = time.time() - _t0
 print(f"[warm] model loaded in {_load_seconds:.1f}s "
-      f"(step_size={STEP_SIZE}, disable_tta={DISABLE_TTA}, tta_axes={TTA_AXES}), "
+      f"(step_size={STEP_SIZE}, disable_tta={DISABLE_TTA}, tta_axes={TTA_AXES}, trt={TRT_ACTIVE}), "
       f"ready on 127.0.0.1:{PORT}",
       flush=True)
 
@@ -257,6 +314,7 @@ class Handler(BaseHTTPRequestHandler):
             "step_size": STEP_SIZE,
             "disable_tta": DISABLE_TTA,
             "tta_axes": list(TTA_AXES) if TTA_AXES is not None else None,
+            "trt_active": TRT_ACTIVE,
             "model_load_seconds": round(_load_seconds, 1),
             "busy": _lock.locked(),
             **_stats,
