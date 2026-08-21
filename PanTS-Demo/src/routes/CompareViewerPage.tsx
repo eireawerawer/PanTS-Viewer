@@ -239,8 +239,14 @@ export default function CompareViewerPage() {
 		// only when a load completes.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [status]);
-	// The viewport grid changes size when the view mode switches between MPR (3 planes) and a
-	// single plane — re-fit after the layout has painted (double rAF, like the single viewer).
+	// The viewport grid changes size whenever the view mode switches between MPR (3 planes)
+	// and a single plane, OR the Class Map panel opens/closes (it's a real docked 288px-wide
+	// sidebar — flex-basis + display:none/flex — not an overlay, so it genuinely narrows the
+	// stage, not just paints over it). Cornerstone's RenderingEngine doesn't know the DOM
+	// around it resized unless told to — without this, its canvases keep their stale
+	// pre-toggle dimensions, so anything relying on canvas-to-world math (centerCursor, zoom)
+	// looks subtly wrong until something else happens to trigger a resize. Re-fit after the
+	// layout has painted (double rAF, like the single viewer).
 	useEffect(() => {
 		if (status !== "ready") return;
 		let raf1 = 0;
@@ -252,7 +258,7 @@ export default function CompareViewerPage() {
 			cancelAnimationFrame(raf1);
 			cancelAnimationFrame(raf2);
 		};
-	}, [viewMode, status]);
+	}, [viewMode, status, showOrganDetails]);
 
 	const applyPreset = (preset: (typeof CT_PRESETS)[number]) => {
 		setActivePreset(preset.name);

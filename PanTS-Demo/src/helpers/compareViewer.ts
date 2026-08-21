@@ -311,33 +311,45 @@ function computeCentroids(segmentationId: string): Record<number, Vec3> | null {
 	};
 
 	// Cornerstone's per-image voxel manager (what a NIfTI volume built from per-slice
-	// imageIds gets) resolves both the fast path below AND the vm.forEach fallback via the
-	// SAME per-slice `cache.getImage(imageId)` lookup. If a slice's image genuinely isn't
-	// cached (seen in practice: the last few slices of a downsampled volume), the fast path
-	// throws partway through — but forEach hits that identical missing slice too, just once
-	// per VOXEL instead of once per slice, each miss logging its own console.warn. For a
-	// ~57k-pixel slice that's tens of thousands of warnings for one bad slice, freezing the
-	// tab. So only use the slow per-voxel fallback when there's no fast accessor at all;
-	// if the fast accessor exists but fails, the data gap is real and forEach can't recover
-	// it either — better to compute centroids from what we have than hang re-discovering it.
-	const hasCompleteArray = typeof vm.getCompleteScalarDataArray === "function";
-	let data: ArrayLike<number> | undefined;
-	if (hasCompleteArray) {
-		try { data = vm.getCompleteScalarDataArray!(); } catch { /* leave undefined */ }
-	}
-	if (data && data.length) {
-		for (let idx = 0; idx < data.length; idx++) {
-			const label = data[idx];
-			if (!label) continue;
-			const k = (idx / sliceSize) | 0;
-			const rem = idx - k * sliceSize;
-			const j = (rem / dimX) | 0;
-			add(label, rem - j * dimX, j, k);
+	// imageIds gets) resolves BOTH its fast getCompleteScalarDataArray() path AND its
+	// vm.forEach fallback via the SAME per-slice `cache.getImage(imageId)` lookup — and both
+	// have failure modes we've hit in practice: forEach logs one console.warn per VOXEL for
+	// every missing slice (tens of thousands of warnings for a single ~57k-pixel slice,
+	// freezing the tab), while getCompleteScalarDataArray() can be worse — if even ONE
+	// slice's image isn't cached it can return a totally EMPTY array instead of a partial
+	// one, silently discarding every centroid for the whole volume with no error or warning
+	// to explain why. So we bypass both: read each slice's image directly from `cache`
+	// ourselves. A missing slice just contributes nothing to that one slice — it can't wipe
+	// out the rest, and we don't call the library's warn-happy per-pixel lookup at all.
+	const imageIds = (volume as unknown as { imageIds?: string[] }).imageIds;
+	if (imageIds?.length) {
+		for (let k = 0; k < imageIds.length; k++) {
+			const image = cache.getImage(imageIds[k]) as unknown as
+				{ voxelManager?: { getScalarData?: () => ArrayLike<number> } } | undefined;
+			const sliceData = image?.voxelManager?.getScalarData?.();
+			if (!sliceData) continue; // this slice's image isn't cached — skip it, not the whole case
+			for (let idx = 0; idx < sliceData.length; idx++) {
+				const label = sliceData[idx];
+				if (!label) continue;
+				const j = (idx / dimX) | 0;
+				add(label, idx - j * dimX, j, k);
+			}
 		}
-	} else if (!hasCompleteArray) {
-		vm.forEach((voxel) =>
-			add(Number(voxel.value), voxel.pointIJK[0], voxel.pointIJK[1], voxel.pointIJK[2])
-		);
+	} else {
+		// No per-slice imageIds on the volume at all (shouldn't happen for a NIfTI-loaded
+		// volume) — fall back to the volume-level accessor, same all-or-nothing risk as above.
+		let data: ArrayLike<number> | undefined;
+		try { data = vm.getCompleteScalarDataArray?.(); } catch { /* leave undefined */ }
+		if (data && data.length) {
+			for (let idx = 0; idx < data.length; idx++) {
+				const label = data[idx];
+				if (!label) continue;
+				const k = (idx / sliceSize) | 0;
+				const rem = idx - k * sliceSize;
+				const j = (rem / dimX) | 0;
+				add(label, rem - j * dimX, j, k);
+			}
+		}
 	}
 
 	const out: Record<number, Vec3> = {};
@@ -540,6 +552,15 @@ async function loadCase(
 		if (!segIds.length) return;
 		const segVol = await volumeLoader.createAndCacheVolume(segmentationId, { imageIds: segIds });
 		await segVol.load();
+		// segVol.load() resolving only guarantees the volume's own combined scalar buffer is
+		// ready — NOT that every per-slice image is individually cached (cache.getImage(id)).
+		// That population can lag behind in the background; computeCentroids reading it right
+		// after loadCase returns is a race it can lose (seen in practice: the case loaded
+		// second, with less elapsed background time, had ZERO of its per-slice images ready).
+		// Force it explicitly so centroid computation never runs against a half-populated cache.
+		// loadAndCacheImages returns an ARRAY OF PROMISES, not Promise.all()'d — awaiting the
+		// array itself resolves immediately without waiting for any individual image to load.
+		await Promise.all(imageLoader.loadAndCacheImages(segIds));
 		tools.segmentation.segmentationStyle.setStyle(
 			{ type: SegmentationRepresentations.Labelmap, segmentationId },
 			SEG_CONFIG
@@ -626,13 +647,34 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 	const aToB = fitCaseMapping(landmarkPairsAB);
 	const bToA = fitCaseMapping(landmarkPairsAB.map(([a, b]) => [b, a] as [Vec3, Vec3]));
 
-	// --- Axial slice sync across the two cases. Prefers the landmark-fitted mapping (maps
-	// the source pane's current world-mm depth into the destination case's space, then
+	// Link Scroll's depth mapping deliberately uses the per-axis-independent fit, NOT the
+	// (possibly full-affine) aToB/bToA above — axial scrolling only ever changes the source
+	// pane's camera focal point along Z; X/Y stay wherever the crosshair last sat (often
+	// nowhere near the anatomy at the new depth, e.g. still centered on the pancreas while
+	// scrolling up to the lungs). A full affine's cross-axis coupling was fit on real
+	// anatomical points where X/Y/Z all move together — querying it at a "pancreas X/Y +
+	// lung Z" combination that never occurs in any real patient extrapolates wildly (measured
+	// ~90-100mm off on real case data). The per-axis fit treats each axis as independent, so
+	// a stale X/Y can't drag the Z answer off course; only its Z output is used below.
+	const zOnlyAtoB = fitPerAxisLinear(landmarkPairsAB);
+	const zOnlyBtoA = fitPerAxisLinear(landmarkPairsAB.map(([a, b]) => [b, a] as [Vec3, Vec3]));
+
+	// --- Axial slice sync across the two cases. Prefers the landmark-fitted depth mapping
+	// (maps the source pane's current world-mm depth into the destination case's space, then
 	// converts that to a slice index) — falling back to the old plain proportional-index
 	// fraction only when no reliable mapping could be fit. ---
 	let linked = true;
+	// Shared by Link Scroll AND Sync Cursor (and jumpToOrgan/jumpToMeasurement below) — NOT two
+	// independent flags. Moving the crosshair (setToolCenter) also repositions the axial
+	// camera as a side effect, firing CAMERA_MODIFIED same as a real scroll would; conversely,
+	// scrolling the axial camera can move the crosshair's depth. Each mechanism maps world-mm
+	// through a DIFFERENT fit (Z-only per-axis here vs full affine in Sync Cursor below), so if
+	// each only guarded against its own re-entrancy, one's programmatic update would trigger
+	// the other's listener, which nudges toward its own (slightly different) answer, which
+	// re-triggers the first — a visible flicker as the two fight. One shared flag means
+	// whichever mechanism is actively applying a change silences the other's reaction to it.
 	let syncing = false;
-	const mirror = (srcId: string, dstId: string, mapFn: ((p: Vec3) => Vec3) | null) => () => {
+	const mirror = (srcId: string, dstId: string, zMapFn: ((p: Vec3) => Vec3) | null) => () => {
 		if (!linked || syncing) return;
 		const s = engine.getViewport(srcId) as SliceViewport;
 		const d = engine.getViewport(dstId) as SliceViewport;
@@ -641,12 +683,14 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 		if (nD <= 1) return;
 
 		let target: number;
-		if (mapFn) {
+		if (zMapFn) {
 			const dstImageData = d.getImageData();
 			if (!dstImageData) return;
 			const srcWorld = s.getCamera().focalPoint as Vec3;
-			const dstWorld = mapFn(srcWorld);
-			const dstIdx = csUtils.transformWorldToIndexContinuous(dstImageData.imageData, dstWorld);
+			const dstZ = zMapFn(srcWorld)[2];
+			// X/Y here are throwaways — for the axis-aligned volumes these viewports use, the
+			// slice (k) index depends only on world Z, not X/Y, so any placeholder is fine.
+			const dstIdx = csUtils.transformWorldToIndexContinuous(dstImageData.imageData, [srcWorld[0], srcWorld[1], dstZ]);
 			target = Math.round(dstIdx[2]);
 		} else {
 			const nS = sliceCount(s);
@@ -660,8 +704,8 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 		d.scroll(delta);
 		setTimeout(() => { syncing = false; }, 0);
 	};
-	const onA = mirror(A.ax, B.ax, aToB);
-	const onB = mirror(B.ax, A.ax, bToA);
+	const onA = mirror(A.ax, B.ax, zOnlyAtoB);
+	const onB = mirror(B.ax, A.ax, zOnlyBtoA);
 	els.aAx.addEventListener(Enums.Events.CAMERA_MODIFIED, onA);
 	els.bAx.addEventListener(Enums.Events.CAMERA_MODIFIED, onB);
 
@@ -673,10 +717,9 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 		[B.tg]: [B.ax, B.sag, B.cor],
 	};
 	let syncCursor = false;
-	let applyingCursor = false;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const onCrosshair = (evt: any) => {
-		if (!syncCursor || applyingCursor) return;
+		if (!syncCursor || syncing) return;
 		const srcTg = evt?.detail?.toolGroupId as string;
 		const center = evt?.detail?.toolCenter as Vec3;
 		const route =
@@ -705,14 +748,17 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 				tools.CrosshairsTool.toolName
 			) as { setToolCenter?: (mm: number[], suppress?: boolean) => void } | undefined;
 			if (dstTool?.setToolCenter) {
-				applyingCursor = true;
-				dstTool.setToolCenter(world, true); // suppressEvents → no feedback loop
+				syncing = true;
+				dstTool.setToolCenter(world, true); // suppressEvents → no feedback loop on THIS event;
+				// repositioning still moves the axial camera as a side effect, which is exactly
+				// what the shared `syncing` flag (not just this event's own suppression) guards
+				// Link Scroll's mirror() against reacting to.
 				engine.renderViewports(caseViewports[route.dstTg]);
-				applyingCursor = false;
+				setTimeout(() => { syncing = false; }, 0);
 			}
 		} catch (e) {
 			console.warn("[compare] cursor sync failed:", e);
-			applyingCursor = false;
+			syncing = false;
 		}
 	};
 	eventTarget.addEventListener(tools.Enums.Events.CROSSHAIR_TOOL_CENTER_CHANGED, onCrosshair);
