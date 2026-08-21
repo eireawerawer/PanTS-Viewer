@@ -57,9 +57,9 @@
 .bdm-download-all {
 	padding: 8px 16px;
 	border-radius: 8px;
-	background: var(--ink);
+	background: #002d72;
 	color: #ffffff;
-	border: 1px solid var(--ink);
+	border: 1px solid #002d72;
 	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 12px;
 	font-weight: 600;
@@ -67,7 +67,7 @@
 	transition: background 0.15s;
 }
 .bdm-download-all:hover {
-	background: var(--ink-2);
+	background: #00399a;
 }
 .bdm-close {
 	display: flex;

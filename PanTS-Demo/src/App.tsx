@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 import "./App.css";
-import { prefetchCurated } from "./helpers/prefetchCurated";
+import { warmCuratedCache } from "./helpers/curatedCache";
 import AnalyticsRouteTracker from "./components/AnalyticsRouteTracker";
 import AuthModal from "./components/AuthModal";
 import { AnnotationProvider } from "./contexts/annotationContexts";
@@ -30,6 +30,7 @@ const AnalyticsSettings = lazy(() => import("./routes/Settings/AnalyticsSettings
 const PeopleSettings = lazy(() => import("./routes/Settings/PeopleSettings"));
 const SignupRedirect = lazy(() => import("./routes/SignupRedirect"));
 const LegalPage = lazy(() => import("./routes/LegalPage"));
+const SharePatientCard = lazy(() => import("./routes/SharePatientCard"));
 const RotatingHeartLoader = lazy(() => import("./components/Loading"));
 
 const BASENAME = import.meta.env.VITE_BASENAME;
@@ -72,8 +73,8 @@ function App() {
     };
     const ric = w.requestIdleCallback;
     const id = ric
-      ? ric(() => prefetchCurated())
-      : window.setTimeout(prefetchCurated, 1200);
+      ? ric(() => warmCuratedCache())
+      : window.setTimeout(warmCuratedCache, 1200);
     return () => {
       if (ric) w.cancelIdleCallback?.(id as number);
       else window.clearTimeout(id as number);
@@ -97,6 +98,7 @@ function App() {
                   />
                   <Route path="/dashboard" element={<Homepage />} />
                   <Route path="/case/:caseId" element={<VisualizationPage />} />
+                  <Route path="/share/:shareId" element={<SharePatientCard />} />
                   <Route
                     path="/session/:sessionId"
                     element={<VisualizationPage />}

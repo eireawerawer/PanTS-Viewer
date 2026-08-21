@@ -37,8 +37,8 @@
   outline: none;
 }
 .pillActive {
-  border-color: var(--ink);
-  background: var(--ink);
+  border-color: #002D72;
+  background: #002D72;
   color: #ffffff;
 }
 

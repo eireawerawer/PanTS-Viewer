@@ -20,6 +20,48 @@ class PlanLimitError extends Error {}
 // Also its own type, for the same no-pointless-retry reason.
 class AuthRequiredError extends Error {}
 
+// Turn a send failure into something the person reading it can act on.
+//
+// Both endpoints failing used to collapse into one sentence — "The assistant
+// service is unavailable right now" — which is true of a stopped backend, a
+// crashed request, and a vision model that was never pulled alike. That single
+// string sent people looking in the wrong place every time.
+function describeSendFailure(error: unknown, hadImages: boolean): string {
+  const raw = error instanceof Error ? error.message : String(error ?? "");
+
+  // fetch() rejects with a TypeError when it never reached a server at all.
+  if (error instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(raw)) {
+    return (
+      `I couldn't reach the BodyMaps backend at ${API_BASE}. Check that the ` +
+      "Flask server is running and that VITE_API_BASE points at it."
+    );
+  }
+
+  const status = /HTTP (\d{3})/.exec(raw)?.[1];
+
+  if (status === "413") {
+    return "The captured views were too large for the server to accept. Try attaching fewer panes.";
+  }
+
+  if (status && status.startsWith("5")) {
+    return (
+      `The backend returned an error (HTTP ${status}) while answering` +
+      (hadImages ? " a request with attached views" : "") +
+      ". The Flask terminal has the traceback."
+    );
+  }
+
+  if (hadImages) {
+    return (
+      "I couldn't complete the read of the attached views. If this keeps " +
+      "happening, check that a vision model is installed on the server " +
+      "(`ollama list`) — image messages need one."
+    );
+  }
+
+  return "The assistant didn't return an answer. Viewer controls still work from the top panel.";
+}
+
 // Bumped to v2 so a previously-stored reasoning model (e.g. qwen3) is reset —
 // the default now prefers a non-reasoning model that never leaks "thinking".
 const MODEL_STORAGE_KEY = "bodymaps-ai-model-v2";
@@ -349,6 +391,11 @@ export default function AISidebar({
   // Backend's vision model — shown as the active model whenever images are
   // attached, because the backend switches to it for those messages.
   const [visionModel, setVisionModel] = useState("");
+  // Whether the server actually has a vision-capable model pulled. The configured
+  // name is not proof: qwen3-vl needs Ollama 0.12.7+, and when it was never
+  // downloaded every image message failed with a generic "unavailable" error
+  // that gave no hint the cause was a missing model.
+  const [visionAvailable, setVisionAvailable] = useState(true);
   // The assistant is open to everyone — no sign-in required. promptAuth is
   // kept only to handle a 401 from an older backend that still gates it.
   const { promptAuth } = useAuth();
@@ -379,6 +426,9 @@ export default function AISidebar({
       const nextModels: AIModelInfo[] = Array.isArray(data.models) ? data.models : [];
       setModels(nextModels);
       setVisionModel(String(data.vision_model || ""));
+      // Older backends do not report this field; treat its absence as "assume
+      // yes" so this never invents a warning on a server that works fine.
+      setVisionAvailable(data.vision_available !== false);
 
       if (!data.available || nextModels.length === 0) {
         setSelectedModel("");
@@ -726,7 +776,15 @@ export default function AISidebar({
         const limit = await response.json().catch(() => ({}));
         throw new PlanLimitError(limit.message || "You've reached today's message limit.");
       }
-      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok || !response.body) {
+        // Carry the server's own words along with the status: a 500 from the
+        // assistant endpoint usually explains itself, and swallowing that text
+        // is what made every failure look identical from the chat panel.
+        const detail = await response.text().catch(() => "");
+        throw new Error(
+          `HTTP ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`
+        );
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -1007,12 +1065,13 @@ export default function AISidebar({
                 ...m, content: error.message, status: undefined,
               }));
             } else if (!isAbort(error)) {
-              console.error("[BodyMaps AI send error]", error);
+              // Log BOTH failures: the streaming error is the real cause, and
+              // the fallback error is usually just the same thing again.
+              console.error("[BodyMaps AI] streaming endpoint failed:", streamError);
+              console.error("[BodyMaps AI] fallback endpoint failed:", error);
               updateMessage(assistantId, (m) => ({
                 ...m,
-                content:
-                  m.content ||
-                  "The assistant service is unavailable right now. Viewer controls are still available from the left panel.",
+                content: m.content || describeSendFailure(streamError, images.length > 0),
                 status: undefined,
               }));
             }
@@ -1208,6 +1267,15 @@ export default function AISidebar({
       </div>
 
       <div className="ai-sidebar__composer-wrap">
+        {hasImageAttachments && !visionAvailable && (
+          // Say this BEFORE the message is sent. Discovering that no vision
+          // model exists only after the answer fails is the worst possible time.
+          <div className="ai-composer__warning" role="status">
+            No vision model is installed on the server, so these views can't be
+            read. Run <code>ollama pull qwen3-vl:4b</code> on the backend host
+            and restart it.
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="ai-composer__chips" aria-label="Attachments">
             {attachments.map((att) =>

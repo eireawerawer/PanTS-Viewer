@@ -117,6 +117,73 @@ def get_least_used_gpu(default_gpu=None):
         return str(default_gpu)
 
 
+def _resolve_conda_exe():
+    """Locate the conda binary.
+
+    gunicorn on the server runs without a login shell, so it does not pick up
+    the PATH that conda's shell init exports. shutil.which("conda") therefore
+    returns nothing there even though conda is installed and working.
+
+    Half the runners in this file already worked around that with a hardcoded
+    fallback and half raised instead, which is why ePAI, Atlas-Net and
+    LesionSegmenter failed while OpenVAE and MedFormer kept working. Same box,
+    same conda, different error handling.
+
+    Override with CONDA_EXE_PATH if conda lives somewhere not listed here.
+    """
+    explicit = os.path.expanduser(os.getenv("CONDA_EXE_PATH", "").strip())
+    if explicit and os.path.exists(explicit):
+        return explicit
+
+    found = shutil.which("conda")
+    if found:
+        return found
+
+    for candidate in (
+        "/home/apps/anaconda3/condabin/conda",
+        "/home/visitor/miniconda3/condabin/conda",
+        "/home/visitor/anaconda3/condabin/conda",
+        "/opt/conda/condabin/conda",
+        "/opt/anaconda3/condabin/conda",
+        "/root/miniconda3/condabin/conda",
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    return ""
+
+
+def _env_command(env_name, binary="python"):
+    """Shell-safe prefix that runs `binary` inside conda env `env_name`.
+
+    Prefers the env's own binary (~/.conda/envs/<env>/bin/<binary>). That needs
+    neither conda on PATH nor an env activation, and it is why LesionSegmenter
+    kept working on the server while every other model failed with "Could not
+    find conda": gunicorn runs without a login shell, so it never inherits the
+    PATH conda's init exports.
+
+    Falls back to `conda run -n <env> <binary>` when the binary is not where
+    conda conventionally puts it, so a differently-configured box degrades to
+    the old behaviour instead of breaking.
+
+    Set CONDA_ENVS_DIR if envs do not live under ~/.conda/envs.
+    """
+    envs_dir = os.path.expanduser(
+        os.getenv("CONDA_ENVS_DIR", "").strip() or "~/.conda/envs"
+    )
+    direct = os.path.join(envs_dir, env_name, "bin", binary)
+    if os.path.exists(direct):
+        return shlex.quote(direct)
+
+    conda_exe = _resolve_conda_exe()
+    if not conda_exe:
+        raise RuntimeError(
+            f"Could not run '{binary}' in conda env '{env_name}'. Looked for "
+            f"{direct} and could not find conda on PATH either. Set "
+            f"CONDA_ENVS_DIR or CONDA_EXE_PATH."
+        )
+    return f"{shlex.quote(conda_exe)} run -n {shlex.quote(env_name)} {shlex.quote(binary)}"
+
+
 def _resolve_conda_activate_path():
     candidates = [
         os.path.expanduser(os.getenv("CONDA_ACTIVATE_PATH", "").strip()),
@@ -343,6 +410,26 @@ def _remap_combined_labels(nii_path: str, label_map: dict) -> None:
     nib.save(nib.Nifti1Image(remapped, img.affine, img.header), nii_path)
 
 
+def _stage_nifti_gz(input_path: str, dest_path: str) -> None:
+    """Point dest_path (always *_0000.nii.gz or ct.nii.gz) at input_path.
+
+    input_path is usually already gzip-compressed, so a symlink is enough --
+    cheap, no copy of a multi-hundred-MB CT. But uploads that arrive as a
+    bare .nii (e.g. the local-NIfTI picker) are NOT gzipped; symlinking one
+    of those under a .gz-suffixed name promises gzip bytes that aren't
+    there, and every reader (nibabel, SimpleITK) fails with "not a gzip
+    file" the moment a model tries to load it. Detect that case and
+    actually convert instead of just renaming.
+    """
+    if os.path.lexists(dest_path):
+        os.remove(dest_path)
+    if input_path.endswith(".gz"):
+        os.symlink(os.path.abspath(input_path), dest_path)
+    else:
+        import nibabel as nib
+        nib.save(nib.load(input_path), dest_path)
+
+
 def _normalize_case_id(input_path_or_filename: str) -> str:
     normalized_input = os.path.normpath(input_path_or_filename or "")
     parent_dir = os.path.basename(os.path.dirname(normalized_input))
@@ -394,9 +481,7 @@ def _run_epai_inference(input_path: str, session_dir: str, conda_path: str, epai
     os.makedirs(save_dir, exist_ok=True)
 
     nnunet_input = os.path.join(input_dir, f"{case_id}_0000.nii.gz")
-    if os.path.lexists(nnunet_input):
-        os.remove(nnunet_input)
-    os.symlink(input_path, nnunet_input)
+    _stage_nifti_gz(input_path, nnunet_input)
 
     input_csv_path = os.path.join(epai_workspace, "input.csv")
     output_csv_path = os.path.join(epai_workspace, "output.csv")
@@ -466,11 +551,13 @@ def _run_epai_inference(input_path: str, session_dir: str, conda_path: str, epai
                 f"{run_payload}"
             )
         else:
-            conda_exe = shutil.which("conda")
-            if not conda_exe:
-                raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
-
             if fallback_script_path and os.path.exists(fallback_script_path):
+                conda_exe = _resolve_conda_exe()
+                if not conda_exe:
+                    raise RuntimeError(
+                        "Could not find conda, needed to run the ePAI fallback script. "
+                        "Set CONDA_EXE_PATH."
+                    )
                 script_cmd = [
                     "bash", fallback_script_path, session_dir, case_id,
                     input_dir, save_dir, input_csv_path, output_csv_path, ckpt_path,
@@ -487,8 +574,7 @@ def _run_epai_inference(input_path: str, session_dir: str, conda_path: str, epai
                     f"nnUNet_preprocessed={shlex.quote(nnunet_preprocessed)} "
                     f"nnUNet_results={shlex.quote(nnunet_results)} "
                     f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
-                    f"{shlex.quote(conda_exe)} run -n {shlex.quote(epai_env_name)} "
-                    f"nnUNetv2_predict_from_modelfolder "
+                    f"{_env_command(epai_env_name, 'nnUNetv2_predict_from_modelfolder')} "
                     f"-i {shlex.quote(input_dir)} "
                     f"-o {shlex.quote(save_dir)} "
                     f"-m {shlex.quote(ckpt_path)} "
@@ -552,9 +638,7 @@ def _run_suprem_inference(input_path: str, session_dir: str) -> str:
 
     # inference.py expects the file named ct.nii.gz inside a case subfolder
     ct_link = os.path.join(input_case_dir, "ct.nii.gz")
-    if os.path.lexists(ct_link):
-        os.remove(ct_link)
-    os.symlink(os.path.abspath(input_path), ct_link)
+    _stage_nifti_gz(input_path, ct_link)
 
     suprem_src = os.getenv("SUPREM_SRC_PATH", "/home/visitor/suprem_native/workspace/SuPreM")
     checkpoint = os.getenv(
@@ -562,19 +646,18 @@ def _run_suprem_inference(input_path: str, session_dir: str) -> str:
         "/home/visitor/suprem_native/workspace/SuPreM/pretrained_checkpoints/supervised_suprem_unet_2100.pth",
     )
     conda_env = os.getenv("CONDA_ENV_SUPREM", "suprem")
-    conda_exe = shutil.which("conda") or "/home/apps/anaconda3/condabin/conda"
+    conda_exe = _resolve_conda_exe()
     selected_gpu = get_least_used_gpu()
     inputs_dir = os.path.join(suprem_workspace, "inputs")
 
     full_cmd = (
         f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
-        f"{shlex.quote(conda_exe)} run -n {shlex.quote(conda_env)} "
-        f"python -W ignore {shlex.quote(os.path.join(suprem_src, 'inference.py'))} "
+        f"{_env_command(conda_env)} "
+        f"-W ignore {shlex.quote(os.path.join(suprem_src, 'inference.py'))} "
         f"--data_root_path {shlex.quote(inputs_dir)} "
         f"--save_dir {shlex.quote(output_dir)} "
-        f"--checkpoint {shlex.quote(checkpoint)} "
+        f"--resume {shlex.quote(checkpoint)} "
         f"--backbone unet "
-        f"--suprem "
         f"--store_result"
     )
 
@@ -614,7 +697,7 @@ def _run_openvae_inference(input_path: str, session_dir: str) -> str:
     checkpoint = os.getenv("OPENVAE_CHECKPOINT_PATH",
                            "/home/visitor/openvae/ckpt/OpenVAE-3D-4x-patch64-10K/autoencoder_best.pt")
     conda_env = os.getenv("CONDA_ENV_OPENVAE", "openvae")
-    conda_exe = shutil.which("conda") or "/home/apps/anaconda3/condabin/conda"
+    conda_exe = _resolve_conda_exe()
     selected_gpu = get_least_used_gpu()
 
     inference_script = os.path.join(openvae_src, "test", "test_3dvae.py")
@@ -631,8 +714,8 @@ def _run_openvae_inference(input_path: str, session_dir: str) -> str:
 
     full_cmd = (
         f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
-        f"{shlex.quote(conda_exe)} run -n {shlex.quote(conda_env)} "
-        f"python {shlex.quote(inference_script)} "
+        f"{_env_command(conda_env)} "
+        f"{shlex.quote(inference_script)} "
         f"--input {shlex.quote(os.path.abspath(input_path))} "
         f"{ckpt_arg} "
         f"--output {shlex.quote(output_path)} "
@@ -704,7 +787,7 @@ def _run_medformer_inference(input_path: str, session_dir: str) -> str:
         "/home/visitor/rsuper/MedFormerPanTS/labels_pants.yaml",
     )
     conda_env = os.getenv("CONDA_ENV_MEDFORMER", "rsuper")
-    conda_exe = shutil.which("conda") or "/home/apps/anaconda3/condabin/conda"
+    conda_exe = _resolve_conda_exe()
     selected_gpu = get_least_used_gpu()
 
     # MedFormer needs the filename to contain ".nii.gz" to enter the NIfTI branch;
@@ -722,8 +805,8 @@ def _run_medformer_inference(input_path: str, session_dir: str) -> str:
     inference_script = os.path.join(rsuper_src, "predict_abdomenatlas.py")
     full_cmd = (
         f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
-        f"{shlex.quote(conda_exe)} run -n {shlex.quote(conda_env)} "
-        f"python {shlex.quote(inference_script)} "
+        f"{_env_command(conda_env)} "
+        f"{shlex.quote(inference_script)} "
         f"--load {shlex.quote(checkpoint)} "
         f"--img_path {shlex.quote(os.path.join(output_dir, 'input'))} "
         f"--class_list {shlex.quote(class_list)} "
@@ -769,7 +852,7 @@ def _run_rsuper_inference(input_path: str, session_dir: str) -> str:
         "/home/visitor/rsuper/MedFormerPanTS/labels_pants.yaml",
     )
     conda_env = os.getenv("CONDA_ENV_MEDFORMER", "rsuper")
-    conda_exe = shutil.which("conda") or "/home/apps/anaconda3/condabin/conda"
+    conda_exe = _resolve_conda_exe()
     selected_gpu = get_least_used_gpu()
 
     bdmap_id = "BDMAP_00000001"
@@ -785,8 +868,8 @@ def _run_rsuper_inference(input_path: str, session_dir: str) -> str:
     inference_script = os.path.join(rsuper_src, "predict_abdomenatlas.py")
     full_cmd = (
         f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
-        f"{shlex.quote(conda_exe)} run -n {shlex.quote(conda_env)} "
-        f"python {shlex.quote(inference_script)} "
+        f"{_env_command(conda_env)} "
+        f"{shlex.quote(inference_script)} "
         f"--load {shlex.quote(checkpoint)} "
         f"--img_path {shlex.quote(staging_dir)} "
         f"--class_list {shlex.quote(class_list)} "
@@ -824,9 +907,7 @@ def _run_atlasnet_inference(input_path: str, session_dir: str, conda_path: str, 
     os.makedirs(save_dir, exist_ok=True)
 
     nnunet_input = os.path.join(input_dir, f"{case_id}_0000.nii.gz")
-    if os.path.lexists(nnunet_input):
-        os.remove(nnunet_input)
-    os.symlink(input_path, nnunet_input)
+    _stage_nifti_gz(input_path, nnunet_input)
 
     ckpt_path = os.getenv(
         "ATLASNET_CKPT_PATH",
@@ -837,7 +918,7 @@ def _run_atlasnet_inference(input_path: str, session_dir: str, conda_path: str, 
     nnunet_results = os.getenv("ATLASNET_NNUNET_RESULTS", "/home/visitor/atlasnet/nnUNet/results")
 
     selected_gpu = get_least_used_gpu()
-    conda_exe = shutil.which("conda")
+    conda_exe = _resolve_conda_exe()
     if not conda_exe:
         raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
 
@@ -846,8 +927,7 @@ def _run_atlasnet_inference(input_path: str, session_dir: str, conda_path: str, 
         f"nnUNet_preprocessed={shlex.quote(nnunet_preprocessed)} "
         f"nnUNet_results={shlex.quote(nnunet_results)} "
         f"CUDA_VISIBLE_DEVICES={shlex.quote(selected_gpu)} "
-        f"{shlex.quote(conda_exe)} run -n {shlex.quote(atlasnet_env_name)} "
-        f"nnUNetv2_predict_from_modelfolder "
+        f"{_env_command(atlasnet_env_name, 'nnUNetv2_predict_from_modelfolder')} "
         f"-i {shlex.quote(input_dir)} "
         f"-o {shlex.quote(save_dir)} "
         f"-m {shlex.quote(ckpt_path)} "
@@ -906,9 +986,7 @@ def _run_lesionsegmenter_inference(input_path: str, session_dir: str, conda_path
     os.makedirs(save_dir, exist_ok=True)
 
     nnunet_input = os.path.join(input_dir, f"{case_id}_0000.nii.gz")
-    if os.path.lexists(nnunet_input):
-        os.remove(nnunet_input)
-    os.symlink(input_path, nnunet_input)
+    _stage_nifti_gz(input_path, nnunet_input)
 
     ckpt_path = os.getenv(
         "LESIONSEG_CKPT_PATH",
@@ -927,14 +1005,7 @@ def _run_lesionsegmenter_inference(input_path: str, session_dir: str, conda_path
     # load, so it's worth skipping. Falls back to `conda run` if the env's binary isn't
     # where conda envs conventionally live (e.g. a differently-configured deployment),
     # so this degrades to the previous behavior rather than breaking outright.
-    direct_python = os.path.expanduser(f"~/.conda/envs/{lesionseg_env_name}/bin/python")
-    if os.path.exists(direct_python):
-        run_prefix = shlex.quote(direct_python)
-    else:
-        conda_exe = shutil.which("conda")
-        if not conda_exe:
-            raise RuntimeError("Could not find conda. Set CONDA_ACTIVATE_PATH or ensure `conda` is on PATH.")
-        run_prefix = f"{shlex.quote(conda_exe)} run -n {shlex.quote(lesionseg_env_name)} python"
+    run_prefix = _env_command(lesionseg_env_name)
 
     full_cmd = (
         f"nnUNet_raw={shlex.quote(nnunet_raw)} "
@@ -1125,7 +1196,7 @@ def _run_shapekit_inference(input_dir: str, session_dir: str) -> str:
 
     shapekit_src = os.getenv("SHAPEKIT_SRC_PATH", "/home/visitor/ShapeKit")
     conda_env    = os.getenv("CONDA_ENV_SHAPEKIT", "shapekit")
-    conda_exe    = shutil.which("conda") or "/home/apps/anaconda3/condabin/conda"
+    conda_exe    = _resolve_conda_exe()
     cpu_count    = os.getenv("SHAPEKIT_CPU_NUM", "16")
 
     if not os.path.isdir(shapekit_src):
@@ -1182,8 +1253,8 @@ def _run_shapekit_inference(input_dir: str, session_dir: str) -> str:
     os.makedirs(sk_raw_output, exist_ok=True)
 
     full_cmd = (
-        f"{shlex.quote(conda_exe)} run -n {shlex.quote(conda_env)} "
-        f"python -W ignore {shlex.quote(os.path.join(shapekit_src, 'main.py'))} "
+        f"{_env_command(conda_env)} "
+        f"-W ignore {shlex.quote(os.path.join(shapekit_src, 'main.py'))} "
         f"--input_folder {shlex.quote(os.path.abspath(sk_input_dir))} "
         f"--output_folder {shlex.quote(os.path.abspath(sk_raw_output))} "
         f"--cpu_count {cpu_count} "

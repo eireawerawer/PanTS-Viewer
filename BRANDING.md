@@ -4,9 +4,20 @@ The visual identity comes from the BodyMaps brand pack (v1.0, July 2026). The
 tokens live in `PanTS-Demo/src/styles/brand.css` and are available globally —
 use them instead of hex literals for any app-chrome color or font.
 
-CI runs `node scripts/brand-guard.mjs` (the **Brand guard** workflow) plus
-`src/test/brand.test.ts` in the normal test suite. Both fail on regressions of
-the rules below.
+> **Colors reverted, 2026-08-14.** The brand pack's color rollout (ink primary
+> + orange accent) was reverted app-wide back to the pre-pack palette (JHU
+> blue `#002d72` primary, blue accents in the viewer). Typography (IBM Plex),
+> the logo, favicon/OG assets, and the site footer were **not** reverted and
+> stay as shipped. `scripts/brand-guard.mjs` and its CI workflow were removed
+> since they specifically enforced the now-reverted colors and would otherwise
+> fail every future PR. `brand.css`'s token *values* are unchanged (still used
+> by the footer and some viewer surfaces) — most app-chrome components were
+> switched back to hardcoded pre-pack hex instead of consuming those tokens.
+> The color rows below describe `brand.css` as authored, not what most of the
+> app currently renders.
+
+CI no longer runs a dedicated brand-color guard. `src/test/brand.test.ts`
+still checks the surviving invariants (fonts, logo, favicon/OG metadata).
 
 ## Colors
 

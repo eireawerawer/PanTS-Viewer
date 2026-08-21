@@ -77,14 +77,14 @@
 .cmp__viewerlink {
   padding: 8px 12px;
   border-radius: 8px;
-  background: var(--accent);
-  color: var(--ink);
+  background: #2563eb;
+  color: #fff;
   text-decoration: none;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
 }
-.cmp__viewerlink:hover { background: var(--accent-tint); }
+.cmp__viewerlink:hover { background: #1d4ed8; }
 
 /* Now the page's main content (the stats table moved into a popup) — the two cases get
    room to be a real "hero" section instead of a cramped strip above a giant table. */
@@ -138,7 +138,7 @@
 .cmp-case__open {
   margin-top: auto;
   font-size: 12px;
-  color: var(--accent-tint);
+  color: #7aa2ff;
   text-decoration: none;
 }
 .cmp-case__open:hover { text-decoration: underline; }

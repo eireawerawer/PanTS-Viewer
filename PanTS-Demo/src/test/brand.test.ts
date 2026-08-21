@@ -23,9 +23,9 @@ describe("brand identity", () => {
     expect(html).not.toMatch(/fonts\.(googleapis|gstatic)\.com/);
   });
 
-  it("the logo file is the adopted mark (two ink bars + orange band)", () => {
+  it("the logo file is the adopted mark (two ink bars + blue band)", () => {
     const svg = read("public/bodymaps-logo.svg");
-    expect(svg).toContain("#E76F51"); // agreement band
+    expect(svg).toContain("#68ACE5"); // agreement band (JHU Spirit Blue)
     expect(svg).toContain("#0F172A"); // ink bars
     expect(svg).not.toContain("#27379b"); // invented navy crosshair
   });
@@ -38,9 +38,8 @@ describe("brand identity", () => {
     expect(css).toContain('--font-sans: "IBM Plex Sans"');
   });
 
-  it("the viewer accent seam points at the brand accent", () => {
+  it("the viewer font seam points at the brand fonts (accent color was reverted separately)", () => {
     const css = read("src/index.css");
-    expect(css).toContain("--vp-accent: var(--accent)");
     expect(css).toContain("--vp-font: var(--font-sans)");
     expect(css).toContain("--vp-mono: var(--font-mono)");
   });

@@ -32,7 +32,7 @@
 }
 
 .filterBadge {
-  background: var(--ink);
+  background: #002D72;
   color: #ffffff;
   font-size: 10px;
   font-weight: 600;
@@ -47,7 +47,7 @@
 
 .searchBtn {
   padding: 10px 32px;
-  background: var(--ink);
+  background: #002D72;
   border: none;
   border-radius: 8px;
   color: #ffffff;

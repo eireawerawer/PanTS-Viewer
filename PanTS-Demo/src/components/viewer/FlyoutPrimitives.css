@@ -86,8 +86,8 @@
     width: 12px;
     height: 12px;
     background: #202124;
-    border-left: 2px solid #E76F51;
-    border-top: 2px solid #E76F51;
+    border-left: 2px solid #3499ff;
+    border-top: 2px solid #3499ff;
     border-radius: 3px 0 0 0;
     z-index: 1;
 }
@@ -284,13 +284,17 @@
    instead of a differently-shaped control breaking the column's rhythm. */
 .atb-menu-row--checkbox {
     cursor: pointer;
+    
+}
+.atb-menu-row_.check {
+    stroke: #3b82f6;
 }
 
 .atb-menu-row__checkbox-input {
     flex-shrink: 0;
     width: 14px;
     height: 14px;
-    accent-color: #E76F51;
+    accent-color: #3499ff;
     cursor: pointer;
 }
 
@@ -336,9 +340,9 @@
 }
 
 .atb-menu-row__expand-chip.is-open {
-    background: rgba(15, 23, 42, 0.35);
+    background: rgba(0, 45, 114, 0.35);
     border-color: rgba(104, 172, 229, 0.5);
-    color: #E76F51;
+    color: #3499ff;
 }
 
 .atb-menu-row:hover:not(:disabled) .atb-menu-row__expand-chip:not(.is-open) {
@@ -367,7 +371,7 @@
     justify-content: center;
     width: 16px;
     height: 16px;
-    color: var(--accent, #E76F51);
+    color: #68ACE5;
     animation: atb-check-pop 0.15s ease-out;
 }
 
@@ -587,7 +591,7 @@
 
 .atb-action-btn__check {
     flex-shrink: 0;
-    color: #E76F51;
+    color: #3499ff;
     animation: atb-action-check-in 0.24s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 

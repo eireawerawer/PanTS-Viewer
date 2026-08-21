@@ -14,6 +14,8 @@ import {
 	IconWaveSine,
 	IconCircleDashed,
 	IconCheck,
+	IconPointer,
+	IconFrame,
 } from "@tabler/icons-react";
 import "./AnnotationToolbar.css";
 import MaskingSelect, { type MaskingArea } from "../segmentation/MaskingSelect";
@@ -71,6 +73,7 @@ export type PrimaryEditTool =
 	| "paint" | "erase" | "scissors" | "levelTracing"
 	| "margin" | "smoothing" | "islands" | "logicalOperators"
 	| "growFromSeeds" | "fillBetweenSlices" | "copyAcrossSlices" | "hollow"
+	| "pointSegment" | "boxSegment"
 	| null;
 export type ScissorsOperation = "eraseInside" | "eraseOutside" | "fillInside" | "fillOutside";
 export type ScissorsSliceCut = "unlimited" | "positive" | "negative" | "symmetric";
@@ -127,6 +130,15 @@ interface AnnotationToolbarProps {
 	// and the guided-overlay tools (close once their full-screen walkthrough
 	// takes over).
 	renderFlyout: (tool: Exclude<PrimaryEditTool, null>, onApplied: () => void, onCloseSettings: () => void, onGuidedControlsChange: (controls: GuidedFlowControls | null) => void) => React.ReactNode;
+	/** Fired whenever a guided slice-anchor pick flow (Copy/Fill across
+	 *  slices) becomes active or finishes — true for the flow's entire
+	 *  lifecycle (both click steps, the ready-to-apply confirm, and while
+	 *  committing), not just the literal picking sub-phase, since the
+	 *  crosshair shouldn't be live for any of it: clicking a pane during a
+	 *  guided pick is meant to choose a slice/anchor, not move the
+	 *  crosshair. The caller (VisualizationPage) uses this to suppress
+	 *  Crosshairs for the duration. */
+	onGuidedPickingChange?: (active: boolean) => void;
 
 	popupRef?: React.RefObject<HTMLDivElement | null>;
 	popupDragRef?: React.RefObject<HTMLDivElement | null>;
@@ -143,18 +155,20 @@ interface AnnotationToolbarProps {
 }
 
 const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon: typeof IconBrush; description: string }> = [	
-	{ id: "paint", label: "Brush", Icon: IconBrush, description: "Paint with a round brush." },
-	{ id: "erase", label: "Erase", Icon: IconEraser, description: "Erase with a round brush." },
-	{ id: "scissors", label: "Scissors", Icon: IconScissors, description: "Cut through the entire class from the current viewpoint." },
-	{ id: "levelTracing", label: "Level Tracing", Icon: IconRipple, description: "Trace the boundary of similar intensity around the cursor." },
-	{ id: "margin", label: "Margin", Icon: IconArrowsDiagonal, description: "Grow or shrink the selected class by a specified margin size." },
-	{ id: "smoothing", label: "Smoothing", Icon: IconWaveSine, description: "Make class boundaries smoother." },
+	{ id: "paint", label: "Brush", Icon: IconBrush, description: "Paint freehand with a round brush." },
+	{ id: "erase", label: "Erase", Icon: IconEraser, description: "Erase parts of a shape manually." },
+	{ id: "scissors", label: "Scissors", Icon: IconScissors, description: "Lasso tool using anchor points." },
+	{ id: "levelTracing", label: "Level Tracing", Icon: IconRipple, description: "Traces the boundary of similar intensity around cursor." },
+	{ id: "margin", label: "Margin", Icon: IconArrowsDiagonal, description: "Grow or shrink by a specified margin size." },
+	{ id: "smoothing", label: "Smoothing", Icon: IconWaveSine, description: "Smooth class boundaries." },
 	{ id: "islands", label: "Islands", Icon: IconDroplet, description: "Edit islands (connected components) in a class." },
 	{ id: "logicalOperators", label: "Logical operators", Icon: IconMathFunction, description: "Apply logical operators or combine classes." },
-	{ id: "growFromSeeds", label: "Grow from seeds", Icon: IconWand, description: "Grow a class from user-placed seed scribbles." },
+	{ id: "growFromSeeds", label: "Grow from seeds", Icon: IconWand, description: "Grow a class from user-placed scribbles." },
 	{ id: "fillBetweenSlices", label: "Fill between slices", Icon: IconStack2, description: "Interpolate a class's shape between two annotated slices." },
-	{ id: "copyAcrossSlices", label: "Copy across slices", Icon: IconCopy, description: "Copy a class's shape from one slice across a range." },
+	{ id: "copyAcrossSlices", label: "Copy across slices", Icon: IconCopy, description: "Copy a class's shape from first to last slice." },
 	{ id: "hollow", label: "Hollow", Icon: IconCircleDashed, description: "Make the class hollow by replacing it with a uniform-thickness shell." },
+	{ id: "pointSegment", label: "Click to segment", Icon: IconPointer, description: "Click an object to fill its shape" },
+	{ id: "boxSegment", label: "Box to segment", Icon: IconFrame, description: "Draw a box to find a shape inside that area." },
 ];
 
 const SCISSORS_OPERATIONS: { value: ScissorsOperation; label: string }[] = [
@@ -166,7 +180,7 @@ const SCISSORS_OPERATIONS: { value: ScissorsOperation; label: string }[] = [
 
 // Tools that don't have an ApplyButton — they commit directly on pointer
 // interaction, so the rendering dot is the only feedback available.
-const LIVE_COMMIT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["paint", "erase", "scissors", "levelTracing"];
+const LIVE_COMMIT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["paint", "erase", "scissors", "levelTracing", "pointSegment", "boxSegment"];
 
 const MIN_DIAMETER_MM = 2;
 const MAX_DIAMETER_MM = 40;
@@ -186,7 +200,7 @@ const GUIDED_HINT_COPY: Record<GuidedHintGroup, string> = {
 	growSeeds:
 		"Continue moves on once you've placed your seed scribbles. Start over clears every seed and lets you begin again. Exit leaves Grow from Seeds without changing anything.",
 	sliceOps:
-		"Continue (labeled Remove picked/Keep picked/etc. depending on the tool) applies your picks. Start over clears them and lets you pick again. Exit leaves the tool without changing anything.",
+		"Start over clears any choices made and lets you pick again. Exit leaves the tool without changing anything.",
 };
 
 // Ribbon height, matches --atb-ribbon-h in CSS. Exported so SegmentsPopup
@@ -388,7 +402,7 @@ function RenderingIndicator({ label: _label, visible }: { label?: string; visibl
 					width: 7,
 					height: 7,
 					borderRadius: "50%",
-					background: "var(--accent, #E76F51)",
+					background: "var(--jhu-blue-accent, #68ACE5)",
 					animation: "seg-effect-render-pulse 0.9s ease-in-out infinite",
 				}}
 			/>
@@ -460,7 +474,7 @@ export default function AnnotationToolbar({
 	renderFlyout, scissorsPointCount, onScissorsCancel, maskingArea,
 	onMaskingAreaChange, hasAnySegments, scopeLocked, isRendering, isDeletingSegment,
 	targetKey, showOnlyTargetMask, onShowOnlyTargetMaskChange,
-	popupRef, popupDragRef, popupMinRef, anchorRef,
+	popupRef, popupDragRef, popupMinRef, anchorRef, onGuidedPickingChange,
 }: AnnotationToolbarProps) {
 	const [hoveredTool, setHoveredTool] = useState<string | null>(null);
 	const [hoveredRect, setHoveredRect] = useState<DOMRect | null>(null);
@@ -607,12 +621,20 @@ export default function AnnotationToolbar({
 
 	const toolFlyout = useFlyout(false, {
 		scope: "top",
-		// Outside click = full deselect. For a guided-overlay tool, route
-		// through its own Exit handler so scribbles/anchors/picks get
-		// cleared too; everything else just deselects directly.
+		// Outside click = full deselect for most tools. For a guided-overlay
+		// tool, route through its own Exit handler so scribbles/anchors/picks
+		// get cleared too. LIVE_COMMIT_TOOLS (brush, erase, scissors, level
+		// tracing/"smart fill") are the exception: an outside click there
+		// should only close the settings flyout — the icon stays selected
+		// (white background) because the tool itself is still "live" and
+		// ready to paint/cut on the next pointer interaction.
 		onOutsideClose: () => {
-			if (guidedControlsRef.current) guidedControlsRef.current.onExit();
-			else onToolChange(null);
+			if (guidedControlsRef.current) {
+				guidedControlsRef.current.onExit();
+				return;
+			}
+			if (activeTool && LIVE_COMMIT_TOOLS.includes(activeTool)) return;
+			onToolChange(null);
 		},
 	});
 
@@ -841,6 +863,9 @@ export default function AnnotationToolbar({
 	useEffect(() => {
 		guidedControlsRef.current = guidedControls;
 	}, [guidedControls]);
+	useEffect(() => {
+		onGuidedPickingChange?.(guidedControls != null);
+	}, [guidedControls, onGuidedPickingChange]);
 
 	// Small non-blocking hint shown right next to the cursor when Continue
 	// is clicked while `continueDisabled` — e.g. "Mark at least one point
@@ -999,11 +1024,17 @@ export default function AnnotationToolbar({
 			aria-orientation="horizontal"
 		>
 			<div ref={dockContentRef} style={{ display: "flex", alignItems: "center", width: "100%" }}>
-			<div style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0, gap: 30 }}>
+			<div style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0, gap: 13}}>
 				{TOOL_DEFS.map(({ id, label, Icon, description }) => {
 					// Only equip-and-use tools (paint/erase/scissors/level tracing)
 					// get a settings arrow; other tools open settings on icon click.
-					const hasSettingsArrow = LIVE_COMMIT_TOOLS.includes(id);
+					// pointSegment/boxSegment are equip-and-use too (no separate
+					// settings step needed to click/drag) but have no configurable
+					// settings at all, so they're excluded from the arrow itself even
+					// though they stay in LIVE_COMMIT_TOOLS for the rest of its
+					// behavior (outside-click keeps them armed, etc).
+					const hasSettingsArrow =
+						LIVE_COMMIT_TOOLS.includes(id) && id !== "pointSegment" && id !== "boxSegment";
 					const settingsOpenHere = toolFlyout.open && activeTool === id;
 					return (
 						<div
@@ -1028,6 +1059,12 @@ export default function AnnotationToolbar({
 								<FlyoutArrow
 									open={settingsOpenHere}
 									onClick={() => {
+										// Mirrors the main icon button's disabled-click handling above:
+										// the arrow previously called openToolSettings unconditionally,
+										// even when `enabled` was false, silently opening a tool's
+										// settings flyout with no class selected. Route it through the
+										// same "pick a class first" walkthrough popout instead.
+										if (!enabled) { setPickClassHintOpen(true); return; }
 										if (settingsOpenHere) toolFlyout.setOpen(false);
 										else openToolSettings(id);
 									}}
@@ -1073,7 +1110,7 @@ export default function AnnotationToolbar({
 						flexShrink: 0,
 						display: "flex",
 						alignItems: "center",
-						gap: 8,
+						gap: 15,
 						marginLeft: 14,
 						paddingLeft: 14,
 						borderLeft: "1px solid rgba(255, 255, 255, 0.09)",
@@ -1110,7 +1147,7 @@ export default function AnnotationToolbar({
 									width: 7,
 									height: 7,
 									borderRadius: "50%",
-									background: "var(--accent, #E76F51)",
+									background: "var(--jhu-blue-accent, #68ACE5)",
 									animation: "seg-effect-render-pulse 0.9s ease-in-out infinite",
 								}}
 							/>
@@ -1220,8 +1257,8 @@ export default function AnnotationToolbar({
 						width: 16,
 						height: 16,
 						borderRadius: 4,
-						background: showOnlyTargetMask ? "#0F172A" : "rgba(255,255,255,0.06)",
-						border: `1px solid ${showOnlyTargetMask ? "#0F172A" : "rgba(255,255,255,0.28)"}`,
+						background: showOnlyTargetMask ? "#002d72" : "rgba(255,255,255,0.06)",
+						border: `1px solid ${showOnlyTargetMask ? "#002d72" : "rgba(255,255,255,0.28)"}`,
 						transition: "background 0.16s ease, border-color 0.16s ease",
 						cursor: hasActiveTarget ? "pointer" : "default",
 						pointerEvents: hasActiveTarget ? "auto" : "none",
@@ -1313,7 +1350,7 @@ export default function AnnotationToolbar({
 											onCloseSettings={() => toolFlyout.setOpen(false)}
 										/>
 									)}
-									{activeTool && !["paint", "erase", "scissors"].includes(activeTool) && renderFlyout(activeTool, handleToolApplied, () => toolFlyout.setOpen(false), setGuidedControls)}
+									{activeTool && !["paint", "erase", "scissors", "pointSegment", "boxSegment"].includes(activeTool) && renderFlyout(activeTool, handleToolApplied, () => toolFlyout.setOpen(false), setGuidedControls)}
 								</div>
 							</div>
 						</div>
@@ -1334,7 +1371,7 @@ export default function AnnotationToolbar({
 						left: pickClassHintRect.left - 3,
 						width: pickClassHintRect.width + 6,
 						height: pickClassHintRect.height + 3,
-						border: "2px dashed var(--accent, #E76F51)",
+						border: "2px dashed var(--jhu-blue-accent, #68ACE5)",
 						borderRadius: 12,
 						pointerEvents: "none",
 						zIndex: 120,
@@ -1359,7 +1396,7 @@ export default function AnnotationToolbar({
 					}}
 				>
 					<div style={{ fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.9)" }}>
-						Select an existing class or create a custom one, then start annotating.
+						Select an existing class or create a custom one to start annotating.
 					</div>
 					<button
 						type="button"
@@ -1393,7 +1430,7 @@ export default function AnnotationToolbar({
 						left: firstTargetHintRect.left,
 						width: firstTargetHintRect.width,
 						height: firstTargetHintRect.height,
-						border: "2px dashed var(--accent, #E76F51)",
+						border: "2px dashed var(--jhu-blue-accent, #68ACE5)",
 						borderRadius: 8,
 						pointerEvents: "none",
 						zIndex: 120,
@@ -1458,7 +1495,7 @@ export default function AnnotationToolbar({
 						left: guidedHintRect.left - 8,
 						width: guidedHintRect.width + 16,
 						height: guidedHintRect.height + 16,
-						border: "2px dashed var(--accent, #E76F51)",
+						border: "2px dashed var(--jhu-blue-accent, #68ACE5)",
 						borderRadius: 12,
 						pointerEvents: "none",
 						zIndex: 120,
@@ -1525,7 +1562,7 @@ export default function AnnotationToolbar({
 					maxWidth: 240,
 					padding: "8px 12px",
 					borderRadius: 10,
-					background: "#0F172A",
+					background: "#002d72",
 					border: "1px solid rgba(255, 255, 255, 0.25)",
 					color: "#ffffff",
 					fontSize: 12.5,
