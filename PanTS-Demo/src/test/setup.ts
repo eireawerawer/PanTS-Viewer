@@ -2,6 +2,19 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
 
+// Node 24 defines its own optional `localStorage` getter. Vitest 3 sees that
+// property and skips copying jsdom's Storage object onto the test global, leaving
+// the getter undefined unless Node was started with a storage-file flag.
+const jsdomStorage = (globalThis as typeof globalThis & {
+	jsdom?: { window: { localStorage: Storage } };
+}).jsdom?.window.localStorage;
+if (jsdomStorage) {
+	Object.defineProperty(globalThis, "localStorage", {
+		configurable: true,
+		value: jsdomStorage,
+	});
+}
+
 // Unmount React trees between tests so they don't leak into each other.
 afterEach(() => cleanup());
 

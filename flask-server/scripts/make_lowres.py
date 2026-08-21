@@ -50,7 +50,9 @@ SEG_LOW = "combined_labels_lowres.nii.gz"
 
 def _downsample(img, factor, order):
     """Return (data, affine) downsampled by `factor` per axis, preserving world extent."""
-    data = img.get_fdata()
+    # Preserve source dtype where possible. get_fdata() always expands to float64,
+    # which can multiply memory use for full-body CTs during a 500-case batch.
+    data = np.asanyarray(img.dataobj)
     out = zoom(data, 1.0 / factor, order=order)
     new_affine = img.affine.copy()
     # voxels are now `factor`x larger, so scale the voxel->world matrix to match.

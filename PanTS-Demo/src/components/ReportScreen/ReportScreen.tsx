@@ -136,9 +136,9 @@ function getReportMeasurements(organ: string, comments: string): ReportMeasureme
   // Prefer the lesion's own numbers over the organ's baseline stats when a
   // lesion block is present in this section, since those matter more clinically.
   const lesionVolumeMatch = section?.match(/lesion[\s\S]*?volume:\s*([\d.]+)\s*cc/i);
-  const lesionHuMatch = section?.match(/hu\s*value\s*is\s*(-?[\d.]+)(?:\s*\+\/\-\s*([\d.]+))?/i);
+  const lesionHuMatch = section?.match(/hu\s*value\s*is\s*(-?[\d.]+)(?:\s*\+\/-\s*([\d.]+))?/i);
   const volumeMatch = lesionVolumeMatch ?? section?.match(/volume:\s*([\d.]+)\s*cc/i);
-  const huMatch = lesionHuMatch ?? section?.match(/Mean HU value:\s*([\d.]+)(?:\s*\+\/\-\s*([\d.]+))?/i);
+  const huMatch = lesionHuMatch ?? section?.match(/Mean HU value:\s*([\d.]+)(?:\s*\+\/-\s*([\d.]+))?/i);
   // BUG FIX: the size capture excluded '.' from its own character class, so it
   // could never match decimal sizes like "1.0 x 0.5 cm" — only whole numbers.
   // That silently broke "Report size" for virtually every real lesion.
@@ -659,7 +659,9 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
       });
       const j = await r.json();
       setPlain2(j.plain_language || []);
-    } catch {} finally { setPLoad(false); }
+    } catch {
+      // Plain-language text is optional; retain the original report on failure.
+    } finally { setPLoad(false); }
   }, [data, plain2]);
 
   useEffect(() => { if (data) fetchPlain(); }, [data]);

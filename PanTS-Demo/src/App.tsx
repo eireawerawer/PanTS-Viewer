@@ -19,6 +19,9 @@ import ScrollToTopButton from "./components/ScrollToTopButton";
 const VisualizationPage = lazy(() => import("./routes/VisualizationPage"));
 const CompareViewerPage = lazy(() => import("./routes/CompareViewerPage"));
 const UploadPage = lazy(() => import("./routes/UploadPage"));
+const LiveRoomPage = lazy(() => import("./liveRooms/LiveRoomPage"));
+const SoloChallengePage = lazy(() => import("./education/SoloChallengePage"));
+const QuizPracticePage = lazy(() => import("./education/QuizPracticePage"));
 const SettingsPage = lazy(() => import("./routes/Settings"));
 const ProfileSettings = lazy(() => import("./routes/Settings/ProfileSettings"));
 const PlanSettings = lazy(() => import("./routes/Settings/PlanSettings"));
@@ -99,6 +102,9 @@ function App() {
                   />
                   <Route path="/dashboard" element={<Homepage />} />
                   <Route path="/case/:caseId" element={<VisualizationPage />} />
+                  <Route path="/live/:roomId" element={<LiveRoomPage />} />
+                  <Route path="/live/challenge/:challengeId" element={<SoloChallengePage />} />
+                  <Route path="/learn/quiz/:packId" element={<QuizPracticePage />} />
                   <Route path="/share/:shareId" element={<SharePatientCard />} />
                   <Route
                     path="/session/:sessionId"

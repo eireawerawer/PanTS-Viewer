@@ -1,4 +1,5 @@
 from werkzeug.datastructures import MultiDict, FileStorage
+from werkzeug.utils import secure_filename
 from flask import Blueprint, send_file, make_response, request, jsonify
 from services.nifti_processor import NiftiProcessor
 from services.session_manager import SessionManager, generate_uuid
@@ -128,11 +129,14 @@ def create_nifti_multi_dict(seg_filenames: list[str], segmentation_path: str):
     
     nifti_multi_dict = MultiDict()
     for filename in seg_filenames:
-        path = os.path.join(segmentation_path, filename)
+        safe_name = secure_filename(filename)
+        if not safe_name or safe_name != filename:
+            continue
+        path = os.path.join(segmentation_path, safe_name)
         
         with open(path, 'rb') as file_stream:
-            file_storage = FileStorage(stream=BytesIO(file_stream.read()), filename=filename, content_type='application/gzip')
-            nifti_multi_dict.add(key=filename, value=file_storage)
+            file_storage = FileStorage(stream=BytesIO(file_stream.read()), filename=safe_name, content_type='application/gzip')
+            nifti_multi_dict.add(key=safe_name, value=file_storage)
     
     return nifti_multi_dict
 
@@ -140,16 +144,18 @@ def create_nifti_multi_dict(seg_filenames: list[str], segmentation_path: str):
 def get_mask_data_internal(id, fallback=False):
     """Retrieve or compute organ metadata from NIfTI and mask paths for a session."""
     try:
-        main_nifti_path = f"{Constants.PANTS_PATH}/image_only/{get_panTS_id(id)}/{Constants.MAIN_NIFTI_FILENAME}"
-        combined_labels_path = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(id)}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
+        numeric_id = int(id)
+        pants_id = get_panTS_id(numeric_id)
+        main_nifti_path = os.path.join(Constants.PANTS_PATH, "image_only", pants_id, Constants.MAIN_NIFTI_FILENAME)
+        combined_labels_path = os.path.join(Constants.PANTS_PATH, "mask_only", pants_id, Constants.COMBINED_LABELS_NIFTI_FILENAME)
         print(f"[INFO] Processing NIFTI for id {id}")
         organ_intensities = None
         
-        organ_intensities_path = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(id)}/{Constants.ORGAN_INTENSITIES_FILENAME}"
+        organ_intensities_path = os.path.join(Constants.PANTS_PATH, "mask_only", pants_id, Constants.ORGAN_INTENSITIES_FILENAME)
         
         nifti_processor = NiftiProcessor(main_nifti_path, combined_labels_path)
         if not os.path.exists(organ_intensities_path) or not os.path.exists(combined_labels_path):
-            segmentation_path = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(id)}/segmentations"
+            segmentation_path = os.path.join(Constants.PANTS_PATH, "mask_only", pants_id, "segmentations")
             seg_filenames = os.listdir(segmentation_path)
             
             print(f"[INFO] Creating organ intesities at {organ_intensities_path} for id {id}")

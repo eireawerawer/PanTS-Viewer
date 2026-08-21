@@ -12,6 +12,11 @@ def generate_uuid():
 class SessionManager(object):
     _instance = None
 
+    @staticmethod
+    def generate_uuid():
+        """Compatibility wrapper for callers that obtain IDs from the manager."""
+        return generate_uuid()
+
     def __init__(self):
         self.active_sessions = {}  # session_id -> ApplicationSession 映射表
 

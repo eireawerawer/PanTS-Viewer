@@ -39,7 +39,7 @@ class Constants:
     # staging dir now; relocate beside PanTS/CancerVerse once write access lands.
     USER_DATASET_PATH = os.environ.get('USER_DATASET_PATH')
     PERMISSIONS_DIR = os.environ.get('PERMISSIONS_DIR', "/home/visitor/data")
-    MESH_PATH = PERMISSIONS_DIR + "/render_only"
+    MESH_PATH = os.environ.get('MESH_PATH', os.path.join(PERMISSIONS_DIR, "render_only"))
     CASE_QUALITY_MANIFEST = os.environ.get('BODYMAPS_CASE_QUALITY_MANIFEST')
     THUMBNAIL_VISION_MODEL = os.environ.get(
         'BODYMAPS_THUMBNAIL_VISION_MODEL',

@@ -34,6 +34,8 @@ import {
     IconShare,
     IconSquareDashed,
     IconTrash,
+    IconUsersGroup,
+    IconX,
     IconZoomIn
 } from "@tabler/icons-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
@@ -53,6 +55,9 @@ import SessionHUD from "../components/ReadingSession/SessionHUD";
 import SessionSummary from "../components/ReadingSession/SessionSummary";
 import ReportScreen from "../components/ReportScreen/ReportScreen";
 import SliceJumpInput from "../components/SliceJumpInput";
+import { SoloChallengeDock, SoloChallengeHeader } from "../education/SoloChallengeChrome";
+import { QuizPracticeDock, QuizPracticeHeader } from "../education/QuizPracticeChrome";
+import type { QuizPracticeController, SoloChallengeController } from "../education/types";
 import SegmentsPopup from "../components/segmentation/SegmentsPopup";
 import MarginPanel from "../components/segmentation/MarginPanel";
 import IslandsPanel from "../components/segmentation/IslandsPanel";
@@ -83,6 +88,9 @@ import {
 } from "../helpers/constants";
 import {
     ANGLE_TOOL,
+    applyRemoteMaskRanges,
+    applyRemoteMeasurement,
+    applySharedMprView,
     applyVolume3DPreset,
     ARROW_TOOL,
     BIDIRECTIONAL_TOOL,
@@ -91,7 +99,9 @@ import {
     clearMaskEditCursor,
     clearMeasurements,
     createNewAnnotationClass,
+	createSegmentationShadow,
     disableVolume3D,
+    diffSegmentationFromShadow,
     EDIT_BRUSH,
     EDIT_ERASER,
     ELLIPSE_TOOL,
@@ -102,6 +112,7 @@ import {
     getCurrentVolumeModality,
     getCustomSegmentLabels,
     getMeasurementSummaries,
+    getSharedMprView,
     getOrganCentroids,
     getOrganLabelAtPoint,
     getOrganLabelOnClick,
@@ -109,7 +120,9 @@ import {
     MAGNIFY_TOOL,
     moveCornerstoneCrosshairToMm,
     PROBE_TOOL,
+    removeRemoteMeasurement,
     redoMaskEdit,
+    registerNewSegmentColor,
     renderVisualization,
     resetMprOrientation,
 	releasePrimaryMouseTools,
@@ -123,10 +136,13 @@ import {
     setReferenceLinesEnabled,
     setVisibilities,
     setZoom,
+    serializeMeasurement,
     startCine,
     stopCine,
     subscribeToCrosshairChanges,
     subscribeToMeasurementChanges,
+    subscribeToMprViewChanges,
+    subscribeToSegmentationEdits,
     subscribeToSliceChanges,
     subscribeToVolumeProgress,
     toggleCrosshairTool,
@@ -136,11 +152,13 @@ import {
     VOLUME_3D_PRESETS,
     VOLUME_3D_PRESETS_MR,
     zoomToFit,
-	registerNewSegmentColor,
 	isSegmentPresent,
     type CinePane,
+    type MeasurementSummary,
     type PrimaryMouseToolName,
+    type SharedMeasurement,
     type SliceInfo,
+	worldToVisiblePaneCanvas,
 	setActiveEditSegment,
 	beginBrushMaskGuard,
 	endBrushMaskGuard,
@@ -182,6 +200,10 @@ import { toolDisplayName, type ReportMeasurement } from "../helpers/sessionRepor
 import {getPanTSId } from "../helpers/utils";
 import { filenameToName } from "../helpers/utils.name";
 import { decodeViewerState, encodeViewerState } from "../helpers/viewerShareState";
+import { LiveRoomDock, LiveRoomHeader } from "../liveRooms/LiveRoomChrome";
+import LiveRoomCreateDialog from "../liveRooms/LiveRoomCreateDialog";
+import { appRootRelativeUrl } from "../liveRooms/protocol";
+import type { LiveRoomController, LiveRoomMaskPatch } from "../liveRooms/types";
 import { type CheckBoxData } from "../types";
 import "./VisualizationPage.css";
 import LiveWireOverlay from "../components/viewer/LiveWireOverlay";
@@ -453,32 +475,36 @@ function CloseLoopHint({ nearClose, anchor }: { nearClose: boolean; anchor: [num
 	);
 }
 
-// The 3D surface pane is EXCLUDED from the assistant's snapshots.
-//
-// Its WebGL drawing buffer cannot be read back reliably across every
-// GPU/driver/browser combination: on some machines toDataURL returns the
-// cleared buffer no matter how the read is timed, producing a solid black
-// image. A black pane is worse than an absent one — the vision model receives
-// it as evidence and describes an empty scene. The three MPR views carry the
-// anatomy the model actually reasons about.
-//
-// Set this to true to send the 3D view again.
+// WebGL readback is unreliable across GPU/driver combinations. Excluding the
+// 3D pane prevents black frames from being sent to the vision assistant.
 const INCLUDE_3D_PANE_IN_SNAPSHOTS: boolean = false;
 
-function VisualizationPage() {
+type VisualizationPageProps = {
+	liveRoom?: LiveRoomController;
+	soloChallenge?: SoloChallengeController;
+	quizPractice?: QuizPracticeController;
+};
+
+function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: VisualizationPageProps = {}) {
 	// References and state
 	const params = useParams();
-	const pantsCase = params.caseId;
+	const isLiveRoom = Boolean(liveRoom);
+	const isSoloChallenge = Boolean(soloChallenge);
+	const isQuizPractice = Boolean(quizPractice);
+	const liveRoomMaskUrl = liveRoom?.maskUrl;
+	const soloChallengeMaskUrl = soloChallenge?.maskUrl;
+	const quizPracticeMaskUrl = quizPractice?.maskUrl;
+	const pantsCase = liveRoom?.metadata.case_id ?? soloChallenge?.challenge.case_id ?? quizPractice?.pack.case_id ?? params.caseId;
 	const isCvCase = String(pantsCase ?? "").toUpperCase().startsWith("CV");
-	const sessionId = params.sessionId;
+	const sessionId = liveRoom || soloChallenge || quizPractice ? undefined : params.sessionId;
 	// Local DICOM mode (/dicom): a folder of .dcm files picked on the Upload page,
 	// viewed entirely in-browser. No backend case, so no segmentation layer.
 	const routerLocation = useLocation();
-	const isDicom = routerLocation.pathname === "/dicom";
+	const isDicom = !liveRoom && !soloChallenge && !quizPractice && routerLocation.pathname === "/dicom";
 	// Local NIfTI (/local-nifti): a single .nii/.nii.gz picked on the Upload page, viewed
 	// in-browser with no backend case. `isLocal` = either in-browser mode; both are
 	// seg-less, so they share the same "hide segmentation UI, default to 3D volume" behavior.
-	const isLocalNifti = routerLocation.pathname === "/local-nifti";
+	const isLocalNifti = !liveRoom && !soloChallenge && !quizPractice && routerLocation.pathname === "/local-nifti";
 	const isLocal = isDicom || isLocalNifti;
 	const [dicomError, setDicomError] = useState<string | null>(null);
 
@@ -494,9 +520,9 @@ function VisualizationPage() {
 	// Whether the local volumes exist (enables the HD toggle). Dataset cases default to
 	// the low-res copy for fast loading; ?hd=1 in the URL requests full resolution.
 	const [localAvailable, setLocalAvailable] = useState(false);
-	const isHd =
-		typeof window !== "undefined" &&
-		new URLSearchParams(window.location.search).get("hd") === "1";
+	const isHd = liveRoom
+		? liveRoom.metadata.resolution === "full"
+		: typeof window !== "undefined" && new URLSearchParams(window.location.search).get("hd") === "1";
 	
 	useEffect(() => {
 		if (isDicom || !caseId || reportDataCache[caseId]) return;
@@ -546,6 +572,10 @@ function VisualizationPage() {
 		let cancelled = false;
 		const resolveSources = async () => {
 			if (isLocal) return; // local files, not URLs — the setup effect handles them
+			// A case/reveal replacement must first invalidate the currently displayed
+			// sources so no interaction can continue against the previous medical data.
+			setCtUrl(null);
+			setSegUrl(null);
 			if (sessionId) {
 				setCtUrl(`${API_BASE}/api/session-ct/${sessionId}`);
 				setSegUrl(`${API_BASE}/api/session-segmentation/${sessionId}`);
@@ -558,20 +588,28 @@ function VisualizationPage() {
 			const p = isCvCase ? "" : getPanTSId(id);
 			const localCt = `${API_BASE}/api/get-main-nifti/${id}.nii.gz`;
 			const localSeg = `${API_BASE}/api/get-segmentations/${id}.nii.gz`;
+			const challengeSeg = soloChallengeMaskUrl ?? null;
 			const hfCt = `https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/image_only/${p}/ct.nii.gz?download=true`;
 			const hfSeg = `https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/mask_only/${p}/combined_labels.nii.gz?download=true`;
 			// HEAD probe: fast, doesn't download the volume; 404/500 → use HF fallback.
 			const localOk = await fetch(localCt, { method: "HEAD" }).then((r) => r.ok).catch(() => false);
 			if (cancelled) return;
 			setLocalAvailable(localOk);
-			// Local: low-res by default (server falls back to full if not yet generated),
-			// full res when ?hd=1. HuggingFace fallback is full res only.
+			// Keep the categorical mask at full resolution even while the CT uses its fast
+			// preview. Cornerstone aligns both volumes in world space; downsampling labels
+			// creates avoidable stair-stepping and loses small structures.
 			const resParam = isHd ? "" : "?res=low";
 			setCtUrl(localOk ? `${localCt}${resParam}` : hfCt);
 			// CancerVerse cases have no masks yet — /api/get-segmentations returns
 			// {"masks_available": false} (JSON, HTTP 200) which hangs the nifti loader.
 			// Skip the seg URL entirely so the viewer opens CT-only without hanging.
-			if (isCvCase) {
+			if (isLiveRoom) {
+				setSegUrl(liveRoomMaskUrl ?? null);
+			} else if (isSoloChallenge) {
+				setSegUrl(challengeSeg);
+			} else if (isQuizPractice) {
+				setSegUrl(quizPracticeMaskUrl ?? null);
+			} else if (isCvCase) {
 				setSegUrl(null);
 			} else {
 				setSegUrl(localOk ? `${localSeg}${resParam}` : hfSeg);
@@ -579,7 +617,7 @@ function VisualizationPage() {
 		};
 		resolveSources();
 		return () => { cancelled = true; };
-	}, [pantsCase, sessionId, isHd, isLocal]);
+	}, [pantsCase, sessionId, isHd, isLocal, isLiveRoom, isQuizPractice, isSoloChallenge, liveRoomMaskUrl, quizPracticeMaskUrl, soloChallengeMaskUrl]);
 
 	// Flip between low-res and full-res by reloading the route — a fresh mount cleanly
 	// re-inits the Cornerstone/NiiVue contexts (re-running them in place is fragile).
@@ -605,6 +643,28 @@ function VisualizationPage() {
 	//const [isolatedOrgan, setIsolatedOrgan] = useState<string | null>(null);
 
 	const [checkState, setCheckState] = useState<boolean[]>([true]);
+	const meshCheckState = useMemo(() => {
+		if (liveRoom?.metadata.mode === "quiz") {
+			const lesionRevealed = Boolean(liveRoom.quiz?.reveal?.viewer_cue?.show_lesion_overlay);
+			// The source-mask label can differ from the viewer's pancreatic-lesion mesh ID.
+			// Keep that mesh hidden until the server-authored final reveal.
+			const lesionMeshId = segmentation_categories.indexOf("pancreatic_lesion") + 1;
+			return checkState.map((_, index) => (
+				index === 0 || lesionRevealed || index !== lesionMeshId
+			));
+		}
+		if (quizPractice) {
+			const finalReveal = quizPractice.result?.reveals.find((item) => item.question_id === "conclusion");
+			const lesionRevealed = Boolean(finalReveal?.viewer_cue?.show_lesion_overlay);
+			const lesionMeshId = segmentation_categories.indexOf("pancreatic_lesion") + 1;
+			return checkState.map((_, index) => (
+				index === 0 || lesionRevealed || index !== lesionMeshId
+			));
+		}
+		const meshOrganId = soloChallenge?.result?.ground_truth.mesh_organ_id;
+		if (!isSoloChallenge || !meshOrganId || meshOrganId >= checkState.length) return checkState;
+		return checkState.map((_, index) => index === 0 || index === meshOrganId);
+	}, [checkState, isSoloChallenge, liveRoom?.metadata.mode, liveRoom?.quiz?.reveal, quizPractice, soloChallenge?.result]);
 	const [NV, _setNV] = useState<Niivue | undefined>();
 	const [checkBoxData, setCheckBoxData] = useState<CheckBoxData[]>([]);
 	// Fill (solid color wash) and outline (border) opacity are independent sliders — see
@@ -728,6 +788,15 @@ function VisualizationPage() {
 	const stageRef = useRef<HTMLDivElement>(null);
 	const [showOrganDetails, setShowOrganDetails] = useState(false);
 	const [loading, setLoading] = useState(true);
+	const [viewerReady, setViewerReady] = useState(false);
+	const [acceptedViewerVolumeId, setAcceptedViewerVolumeId] = useState<string | null>(null);
+	const viewerReadyRef = useRef(false);
+	useEffect(() => {
+		viewerReadyRef.current = false;
+		setViewerReady(false);
+		setAcceptedViewerVolumeId(null);
+		setLoading(true);
+	}, [caseId, liveRoomMaskUrl, quizPracticeMaskUrl, soloChallengeMaskUrl]);
 	const [crosshairMm, setCrosshairMm] = useState<[number, number, number] | null>(null);
 	const [labelColorMap, setLabelColorMap] = useState<{ [key: number]: Color }>(
 		segmentation_category_colors
@@ -772,7 +841,7 @@ function VisualizationPage() {
 
 	
 	const handleToolbarToolChange = (tool: PrimaryEditTool) => {
-		if (tool && !hasActiveTarget) return; // no target picked — refuse to activate anything
+		if (!viewerReady || (tool && !hasActiveTarget)) return;
 		setActiveToolbarTool(tool);
 		setEditMode(tool ? TOOLBAR_TO_EDIT_MODE[tool] ?? null : null);
 		// setMaskBrushSize's very first call (from the slider) is the only
@@ -1405,12 +1474,37 @@ function VisualizationPage() {
 		setRenamingScan(false);
 	};
 	const [showMeasurePanel, setShowMeasurePanel] = useState(false);
+	const [showLiveRoomCreate, setShowLiveRoomCreate] = useState(false);
+	const [challengeMeasurements, setChallengeMeasurements] = useState<MeasurementSummary[]>([]);
+	const [liveRoomDockOpen, setLiveRoomDockOpen] = useState(Boolean(liveRoom));
+	const [openPinnedNote, setOpenPinnedNote] = useState<{ noteId: string; pane: CinePane } | null>(null);
+	const segmentationShadowRef = useRef<Uint8Array | null>(null);
+	const authoritativeMeasurementsRef = useRef(liveRoom?.state.measurements);
+	authoritativeMeasurementsRef.current = liveRoom?.state.measurements;
+	const initialLiveMeasurementsAppliedRef = useRef<string | null>(null);
+	const initialChallengeMeasurementAppliedRef = useRef<string | null>(null);
+	const challengeTimedOutRef = useRef(false);
+	const challengeLengthMeasurement = useMemo(
+		() => [...challengeMeasurements].reverse().find((measurement) => measurement.tool === LENGTH_TOOL) ?? null,
+		[challengeMeasurements],
+	);
+	const serializedChallengeMeasurement = useMemo(
+		() => challengeLengthMeasurement ? serializeMeasurement(challengeLengthMeasurement.uid) : null,
+		[challengeLengthMeasurement],
+	);
+	const restoredChallengeAttemptId = soloChallenge?.attempt.attempt_id;
+	const restoredChallengeMarker = soloChallenge?.marker ?? null;
+	const restoredChallengeMeasurement = soloChallenge?.measurement ?? null;
 	// Shareable-link state: brief "copied" confirmation, and a guard so a deep-link's view
 	// state is applied exactly once after the volume finishes loading.
 	const [shareCopied, setShareCopied] = useState(false);
 	const shareStateAppliedRef = useRef(false);
 	const [viewMode, setViewMode] = useState<ViewMode>("mpr");
-	const focusedPane = useFocusedPane({ viewMode, referenceLinesOn });
+	const focusedPane = useFocusedPane({
+		viewMode,
+		referenceLinesOn,
+		onInteraction: liveRoom?.stopFollowing,
+	});
 
 	// Which pane gets the lion's share of the grid while in "mpr" view — no-op in the
 	// single-view / 3d-fullscreen modes, which already give one pane 100% of the stage.
@@ -1718,21 +1812,344 @@ function VisualizationPage() {
 
 	// Completed measurements land in the session timeline and auto-capture a key image
 	// (on the next frame, after the annotation has painted onto the SVG overlay).
+	const liveRoomConnected = liveRoom?.connectionState === "connected" && !liveRoom.collaborationLocked;
+	const sendLiveRoomDurable = liveRoom?.sendDurable;
+	const setSoloChallengeMeasurement = soloChallenge?.setMeasurement;
 	useEffect(() => {
 		const unsubscribe = subscribeToMeasurementChanges((kind, m) => {
-			if (!sessionRef.current) return;
+			if (isSoloChallenge) {
+				const summaries = getMeasurementSummaries();
+				setChallengeMeasurements(summaries);
+				const latestLength = [...summaries].reverse().find((measurement) => measurement.tool === LENGTH_TOOL);
+				setSoloChallengeMeasurement?.(latestLength ? serializeMeasurement(latestLength.uid) : null);
+			}
+			if (liveRoomConnected && sendLiveRoomDurable) {
+				const recoverAuthoritativeMeasurement = () => {
+					const authoritative = authoritativeMeasurementsRef.current?.[m.uid];
+					if (authoritative) applyRemoteMeasurement(authoritative as SharedMeasurement);
+					else removeRemoteMeasurement(m.uid);
+				};
+				if (kind === "removed") {
+					void sendLiveRoomDurable("measurement.delete", { id: m.uid }, undefined, { onRejected: recoverAuthoritativeMeasurement });
+				} else {
+					const measurement = serializeMeasurement(m.uid);
+					if (measurement) void sendLiveRoomDurable("measurement.upsert", { measurement }, undefined, { onRejected: recoverAuthoritativeMeasurement });
+				}
+			}
 			if (kind === "completed") {
 				track("viewer_measure");
+			}
+			if (kind === "completed" && sessionRef.current) {
 				sessionRef.current.log("measure", `${toolDisplayName(m.tool)} measured: ${m.value}`);
 				requestAnimationFrame(() => {
 					void takeSnapshot(`${toolDisplayName(m.tool)} — ${m.value}`);
 				});
-			} else if (kind === "removed") {
+			} else if (kind === "removed" && sessionRef.current) {
 				sessionRef.current.log("measure", `Removed a ${toolDisplayName(m.tool)} measurement`);
 			}
 		});
 		return unsubscribe;
-	}, [takeSnapshot]);
+	}, [takeSnapshot, liveRoomConnected, sendLiveRoomDurable, isSoloChallenge, setSoloChallengeMeasurement]);
+
+	useEffect(() => {
+		if (!soloChallenge || soloChallenge.result || soloChallenge.remainingSeconds > 0) return;
+		if (challengeTimedOutRef.current) return;
+		challengeTimedOutRef.current = true;
+		void soloChallenge.submit(serializedChallengeMeasurement, true);
+	}, [soloChallenge, soloChallenge?.remainingSeconds, soloChallenge?.result, serializedChallengeMeasurement]);
+
+	useEffect(() => {
+		if (!isSoloChallenge || !viewerReady || checkBoxData.length === 0) return;
+		const visible = [true, ...checkBoxData.map(() => false)];
+		const revealedLabel = soloChallenge?.result?.ground_truth.segmentation_label;
+		const meshOrganId = soloChallenge?.result?.ground_truth.mesh_organ_id;
+		if (revealedLabel && revealedLabel < visible.length) {
+			visible[revealedLabel] = true;
+			const revealColor: Color = [239, 68, 68, 255];
+			registerNewSegmentColor(revealedLabel, revealColor);
+			setLabelColorMap((current) => ({
+				...current,
+				[revealedLabel]: revealColor,
+				...(meshOrganId ? { [meshOrganId]: revealColor } : {}),
+			}));
+		}
+		setCheckState(visible);
+		setVisibilities(visible);
+		if (soloChallenge?.result) {
+			setOpacityValue(76);
+			setFillOpacity(0.76);
+			const [start, end] = soloChallenge.result.ground_truth.reference_measurement_lps;
+			if (start?.length === 3 && end?.length === 3) {
+				const center: [number, number, number] = [
+					(start[0] + end[0]) / 2,
+					(start[1] + end[1]) / 2,
+					(start[2] + end[2]) / 2,
+				];
+				moveCornerstoneCrosshairToMm(center);
+				setCrosshairMm(center);
+			}
+		}
+	}, [isSoloChallenge, soloChallenge?.result, viewerReady, checkBoxData]);
+
+	// Quiz questions share only the server-authored viewer cue. Student navigation
+	// remains local; masks and measurements stay hidden until the final reveal.
+	useEffect(() => {
+		if (!liveRoom || liveRoom.metadata.mode !== "quiz" || !viewerReady || !liveRoom.quiz) return;
+		const quiz = liveRoom.quiz;
+		if (quiz.phase === "question_open") {
+			clearMeasurements();
+			const hidden = [true, ...checkBoxData.map(() => false)];
+			setCheckState(hidden);
+			setVisibilities(hidden);
+			const cue = quiz.current_question?.viewer_cue;
+			if (cue?.crosshair_lps) {
+				moveCornerstoneCrosshairToMm(cue.crosshair_lps);
+				setCrosshairMm([...cue.crosshair_lps]);
+			}
+			return;
+		}
+		const revealCue = quiz.reveal?.viewer_cue;
+		if (!revealCue?.show_lesion_overlay) return;
+		const visible = [true, ...checkBoxData.map(() => false)];
+		if (visible.length > 1) visible[1] = true;
+		const revealColor: Color = [239, 68, 68, 255];
+		registerNewSegmentColor(1, revealColor);
+		setLabelColorMap((current) => ({ ...current, 1: revealColor }));
+		setCheckState(visible);
+		setVisibilities(visible);
+		setOpacityValue(76);
+		setFillOpacity(0.76);
+		if (revealCue.crosshair_lps) {
+			moveCornerstoneCrosshairToMm(revealCue.crosshair_lps);
+			setCrosshairMm([...revealCue.crosshair_lps]);
+		}
+		if (revealCue.reference_measurement_lps) {
+			applyRemoteMeasurement({
+					id: `quiz-${liveRoom.metadata.quiz_pack_id ?? liveRoom.metadata.case_id}-reference-measurement`,
+				tool: LENGTH_TOOL,
+				points: revealCue.reference_measurement_lps,
+				polyline: [],
+					text: `${revealCue.reference_diameter_mm ?? 0} mm reference`,
+				label: "Reference diameter",
+				frame_of_reference: "",
+				metadata: {},
+			});
+		}
+	}, [
+		liveRoom?.metadata.mode,
+		liveRoom?.quiz?.phase,
+		liveRoom?.quiz?.current_question?.id,
+		liveRoom?.quiz?.reveal?.question_id,
+		liveRoom?.metadata.case_id,
+		liveRoom?.metadata.quiz_pack_id,
+		liveRoom?.maskUrl,
+		viewerReady,
+		checkBoxData,
+	]);
+
+	useEffect(() => {
+		if (!quizPractice || !viewerReady) return;
+		const question = quizPractice.pack.questions[quizPractice.questionIndex];
+		if (!quizPractice.result) {
+			clearMeasurements();
+			const hidden = [true, ...checkBoxData.map(() => false)];
+			setCheckState(hidden);
+			setVisibilities(hidden);
+			const cue = question?.viewer_cue;
+			if (cue?.crosshair_lps) {
+				moveCornerstoneCrosshairToMm(cue.crosshair_lps);
+				setCrosshairMm([...cue.crosshair_lps]);
+			}
+			return;
+		}
+		const conclusion = quizPractice.result.reveals.find((item) => item.question_id === "conclusion");
+		const revealCue = conclusion?.viewer_cue;
+		if (!revealCue) return;
+		const visible = [true, ...checkBoxData.map(() => false)];
+		if (revealCue.show_lesion_overlay && visible.length > 1) {
+			visible[1] = true;
+			const revealColor: Color = [239, 68, 68, 255];
+			registerNewSegmentColor(1, revealColor);
+			setLabelColorMap((current) => ({ ...current, 1: revealColor }));
+		}
+		setCheckState(visible);
+		setVisibilities(visible);
+		if (revealCue.show_lesion_overlay) {
+			setOpacityValue(76);
+			setFillOpacity(0.76);
+		}
+		if (revealCue.crosshair_lps) {
+			moveCornerstoneCrosshairToMm(revealCue.crosshair_lps);
+			setCrosshairMm([...revealCue.crosshair_lps]);
+		}
+		if (revealCue.reference_measurement_lps) {
+			applyRemoteMeasurement({
+				id: `quiz-${quizPractice.pack.pack_id}-reference-measurement`,
+				tool: LENGTH_TOOL,
+				points: revealCue.reference_measurement_lps,
+				polyline: [],
+				text: `${revealCue.reference_diameter_mm ?? 0} mm reference`,
+				label: "Reference diameter",
+				frame_of_reference: "",
+				metadata: {},
+			});
+		}
+	}, [
+		quizPractice?.pack.pack_id,
+		quizPractice?.questionIndex,
+		quizPractice?.result,
+		quizPractice?.maskUrl,
+		viewerReady,
+		checkBoxData,
+	]);
+
+	// A solo attempt is tab-scoped and survives refresh. Once Cornerstone is ready,
+	// restore its saved marker and portable length annotation into the new viewports.
+	useEffect(() => {
+		if (
+			!isSoloChallenge ||
+			!acceptedViewerVolumeId ||
+			initialChallengeMeasurementAppliedRef.current === acceptedViewerVolumeId
+		) return;
+		initialChallengeMeasurementAppliedRef.current = acceptedViewerVolumeId;
+		clearMeasurements();
+		setChallengeMeasurements([]);
+		if (restoredChallengeMarker) {
+			moveCornerstoneCrosshairToMm(restoredChallengeMarker);
+			setCrosshairMm([...restoredChallengeMarker]);
+		}
+		if (restoredChallengeMeasurement) {
+			applyRemoteMeasurement(restoredChallengeMeasurement);
+			setChallengeMeasurements(getMeasurementSummaries());
+		}
+	}, [isSoloChallenge, acceptedViewerVolumeId, restoredChallengeAttemptId, restoredChallengeMarker, restoredChallengeMeasurement]);
+
+	// Live Room durable state is loaded before Cornerstone.  Hydrate shared measurements
+	// once the viewports exist, then apply later committed events incrementally.
+	useEffect(() => {
+		if (
+			!liveRoom ||
+			!acceptedViewerVolumeId ||
+			initialLiveMeasurementsAppliedRef.current === acceptedViewerVolumeId
+		) return;
+		initialLiveMeasurementsAppliedRef.current = acceptedViewerVolumeId;
+		if (liveRoom.metadata.mode !== "quiz") clearMeasurements();
+		for (const measurement of Object.values(liveRoom.state.measurements)) {
+			applyRemoteMeasurement(measurement as SharedMeasurement);
+		}
+	}, [liveRoom?.metadata.mode, liveRoom?.state.measurements, acceptedViewerVolumeId]);
+
+	useEffect(() => {
+		if (!liveRoom?.pendingEvents.length || !viewerReady) return;
+		let appliedThrough = 0;
+		for (const { event, replayed } of liveRoom.pendingEvents) {
+			appliedThrough = Math.max(appliedThrough, event.seq);
+			// Sender already has ordinary live edits. Replayed edits and server-generated
+			// undo events must also be applied to the sender's newly loaded viewport.
+			if (event.participant_id === liveRoom.participantId && !event.undo_of && !replayed) continue;
+			const payload = event.payload as Record<string, unknown>;
+			if (event.type === "measurement.upsert" && payload.measurement) {
+				applyRemoteMeasurement(payload.measurement as SharedMeasurement);
+			} else if (event.type === "measurement.delete" && payload.id) {
+				removeRemoteMeasurement(String(payload.id));
+			} else if (event.type === "mask.patch") {
+				const patch = payload as unknown as LiveRoomMaskPatch;
+				applyRemoteMaskRanges(patch.ranges, segmentationShadowRef.current);
+			}
+		}
+		liveRoom.acknowledgeEvents(appliedThrough);
+	}, [liveRoom?.pendingEvents, liveRoom?.participantId, liveRoom?.acknowledgeEvents, viewerReady]);
+
+	// Client shadow + modified-slice RLE keeps brush traffic proportional to changed
+	// voxels instead of serializing a full labelmap after every stroke.
+	useEffect(() => {
+		if (!liveRoom || !viewerReady || liveRoom.collaborationLocked) return;
+		segmentationShadowRef.current = createSegmentationShadow();
+		const unsubscribe = subscribeToSegmentationEdits((detail) => {
+			const shadow = segmentationShadowRef.current;
+			if (!shadow) return;
+			const ranges = diffSegmentationFromShadow(shadow, detail?.modifiedSlicesToUse);
+			if (!ranges.length || liveRoom.connectionState !== "connected") return;
+			const segmentLabel = detail?.segmentIndex ?? ranges.find((range) => range.after > 0)?.after ?? 0;
+			const operationId = crypto.randomUUID();
+			void liveRoom.sendDurable("mask.patch", {
+				operation_id: operationId,
+				geometry_hash: liveRoom.metadata.geometry_hash,
+				resolution: liveRoom.metadata.resolution,
+				segment_label: segmentLabel,
+				ranges,
+			}, operationId, { onRejected: () => window.location.reload() });
+		});
+		return unsubscribe;
+	}, [
+		liveRoom?.connectionState,
+		liveRoom?.sendDurable,
+		liveRoom?.metadata.geometry_hash,
+		liveRoom?.metadata.resolution,
+		liveRoom?.collaborationLocked,
+		viewerReady,
+	]);
+
+	// Publish camera/navigation state at the hook's 20 Hz cap.  Following suppresses
+	// outbound view echoes; applying a leader's camera therefore stays one-way.
+	useEffect(() => {
+		if (!liveRoom || liveRoom.metadata.mode === "quiz" || !viewerReady || !renderingEngine) return;
+		const publish = () => {
+			if (liveRoom.followingId) return;
+			// The server replaces each participant's view frame, so publish a fresh
+			// complete MPR snapshot rather than the pane that raised the camera event.
+			const view = getSharedMprView();
+			if (!view) return;
+			liveRoom.sendView({
+				view: {
+					...view,
+					windowWidth,
+					windowCenter,
+					opacity: opacityValue,
+					visibleOrgans: checkState,
+				},
+			});
+		};
+		const unsubscribe = subscribeToMprViewChanges(publish);
+		publish();
+		return unsubscribe;
+	}, [liveRoom?.followingId, liveRoom?.sendView, viewerReady, renderingEngine, windowWidth, windowCenter, opacityValue, checkState]);
+
+	useEffect(() => {
+		if (!liveRoom?.followingId || liveRoom.metadata.mode === "quiz" || !viewerReady) return;
+		const leader = liveRoom.participants.find((item) => item.participant_id === liveRoom.followingId);
+		if (!leader?.view) return;
+		applySharedMprView(leader.view);
+		if (leader.view.windowWidth != null && leader.view.windowCenter != null) {
+			handleWindowChange(leader.view.windowWidth, leader.view.windowCenter);
+		}
+		if (leader.view.opacity != null) {
+			setOpacityValue(leader.view.opacity);
+			setFillOpacity(leader.view.opacity / 100);
+		}
+		if (leader.view.visibleOrgans) setCheckState(leader.view.visibleOrgans);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [liveRoom?.followingId, liveRoom?.participants, viewerReady]);
+
+	useEffect(() => {
+		if (!liveRoom) return;
+		if (liveRoom.metadata.mode === "quiz") {
+			liveRoom.sendPresence({ plane: focusedPane.activePaneRef.current });
+			return;
+		}
+		liveRoom.sendPresence({
+			crosshair: crosshairMm,
+			active_tool: editMode ?? activeMeasureTool ?? (crosshairToolActive ? "crosshair" : "pan"),
+			plane: focusedPane.activePaneRef.current,
+		});
+	}, [liveRoom?.sendPresence, crosshairMm, editMode, activeMeasureTool, crosshairToolActive]);
+
+	useEffect(() => {
+		if (!liveRoom || (liveRoom.connectionState === "connected" && !liveRoom.collaborationLocked)) return;
+		setEditMode(null);
+		setShowAnnotationToolbar(false);
+		setActiveMeasureTool(null);
+	}, [liveRoom?.connectionState, liveRoom?.collaborationLocked]);
 
 
 
@@ -1753,6 +2170,7 @@ function VisualizationPage() {
 	// call startCine/stopCine twice per click (this app runs in StrictMode; see the similar
 	// double-run workarounds in dicomLocal.ts).
 	const toggleCine = useCallback(() => {
+		if (!viewerReady) return;
 		const pane = focusedPane.getFocusedPane();
 		if (cinePlaying) {
 			stopCine();
@@ -1767,7 +2185,7 @@ function VisualizationPage() {
 		} else {
 			console.warn(`Cine playback failed to start for pane "${pane}"`);
 		}
-	}, [cinePlaying, focusedPane.getFocusedPane, cineFps]);
+	}, [cinePlaying, focusedPane.getFocusedPane, cineFps, viewerReady]);
 
 	useKeyboardShortcuts({
 		takeSnapshot,
@@ -1783,6 +2201,9 @@ function VisualizationPage() {
 		sliceInfoRef,
 		editMode,
 		setZoomLevel,
+		collaborationConnected: liveRoom?.connectionState === "connected",
+		collaborationLocked: liveRoom?.collaborationLocked,
+		onCollaborationUndo: liveRoom?.requestUndo,
 		onUndo: handleUndo,
 	});
 	// Live-adjust the frame rate: if a clip is already running, restart it immediately at
@@ -1806,7 +2227,6 @@ function VisualizationPage() {
 		if (windowReadoutTimerRef.current) clearTimeout(windowReadoutTimerRef.current);
 	}, []);
 
-
 	// View-mode changes belong in the reading timeline (skip the initial mount).
 	const loggedViewMode = useRef<ViewMode | null>(null);
 	useEffect(() => {
@@ -1822,7 +2242,7 @@ function VisualizationPage() {
 	// ---- Progressive resolution: background full-res stream + in-place swap --------
 
 	const runEnhance = async () => {
-		if (!pantsCase || enhanceStartedRef.current) return;
+		if (!pantsCase || !viewerReady || enhanceStartedRef.current) return;
 		enhanceStartedRef.current = true;
 		setEnhance({ state: "streaming", pct: 0 });
 		// The HD stream is the only download in flight, so any progress event is ours.
@@ -1833,6 +2253,7 @@ function VisualizationPage() {
 		});
 		try {
 			const newVolumeId = await upgradeCtVolume(`${API_BASE}/api/get-main-nifti/${pantsCase}.nii.gz`);
+			if (!viewerReadyRef.current) return;
 			if (!newVolumeId) {
 				setEnhance({ state: "failed", pct: null });
 				return;
@@ -1875,19 +2296,19 @@ function VisualizationPage() {
 	// Only when the local files exist (server disk — fast); the HuggingFace fallback
 	// is already full-res, and ?hd=1 loads full-res up front.
 	useEffect(() => {
-		if (loading || !localAvailable || isHd || isLocal || !pantsCase) return;
+		if (isSoloChallenge || isQuizPractice || liveRoom?.metadata.mode === "quiz" || !viewerReady || !localAvailable || isHd || isLocal || !pantsCase) return;
 		if (enhanceStartedRef.current) return;
 		// Ref is flipped inside the timer (not here) so StrictMode's double-run —
 		// which clears the first timer — still ends up scheduling exactly one stream.
 		const timer = window.setTimeout(() => { void runEnhance(); }, 1500);
 		return () => window.clearTimeout(timer);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [loading, localAvailable, isHd, isLocal, pantsCase]);
+	}, [isQuizPractice, isSoloChallenge, liveRoom?.metadata.mode, viewerReady, localAvailable, isHd, isLocal, pantsCase]);
 
 	// ---- Shaded 3D volume rendering (Volume mode in the 3D pane) -------------------
 
 	useEffect(() => {
-		if (loading || threeDMode !== "volume" || !renderingEngine) return;
+		if (!viewerReady || threeDMode !== "volume" || !renderingEngine) return;
 		const element = volume3DRef.current;
 		if (!element) return;
 		let disposed = false;
@@ -1903,7 +2324,7 @@ function VisualizationPage() {
 		// volumePreset intentionally omitted — preset changes are applied in place below,
 		// without tearing the viewport down.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [threeDMode, loading, renderingEngine]);
+	}, [threeDMode, viewerReady, renderingEngine]);
 
 	useEffect(() => {
 		if (threeDMode === "volume") applyVolume3DPreset(volumePreset);
@@ -1940,6 +2361,34 @@ function VisualizationPage() {
 		// mid-load (e.g. HD toggle or navigation), the first renderVisualization can
 		// resolve after the second and clobber state with the wrong case's result.
 		let cancelled = false;
+		const controller = new AbortController();
+		let disposeLoaded: (() => void) | undefined;
+		viewerReadyRef.current = false;
+		setViewerReady(false);
+		setAcceptedViewerVolumeId(null);
+		initialLiveMeasurementsAppliedRef.current = null;
+		initialChallengeMeasurementAppliedRef.current = null;
+		setLoading(true);
+		enhanceStartedRef.current = false;
+		setEnhance({ state: "idle", pct: null });
+		setRenderingEngine(null);
+		setViewportIds([]);
+		setVolumeId(null);
+		const acceptLoadedViewer = (result: Awaited<ReturnType<typeof renderVisualization>>) => {
+			if (cancelled) {
+				result.dispose();
+				return false;
+			}
+			disposeLoaded = result.dispose;
+			setRenderingEngine(result.renderingEngine);
+			setViewportIds(result.viewportIds);
+			setVolumeId(result.volumeId);
+			setAcceptedViewerVolumeId(result.volumeId);
+			viewerReadyRef.current = true;
+			setViewerReady(true);
+			setLoading(false);
+			return true;
+		};
 		const setup = async () => {
 			// Local DICOM/NIfTI have no server-side segmentation — don't seed the static
 			// 32-organ catalog for them; checkBoxData should only ever contain segments
@@ -1952,7 +2401,9 @@ function VisualizationPage() {
 				}));
 				setCheckBoxData(checkBoxData);
 				const initialState = [true];
-				checkBoxData.forEach((item) => { initialState[item.id] = true; });
+				checkBoxData.forEach((item) => {
+					initialState[item.id] = !isSoloChallenge && !isQuizPractice && liveRoom?.metadata.mode !== "quiz";
+				});
 				setCheckState(initialState);
 			} else {
 				setCheckBoxData([]);
@@ -1977,6 +2428,7 @@ function VisualizationPage() {
 				}
 				try {
 					const { imageIds } = await loadLocalDicomSeries(files);
+					if (cancelled) return;
 					const result = await renderVisualization(
 						axial_ref.current,
 						sagittal_ref.current,
@@ -1985,9 +2437,9 @@ function VisualizationPage() {
 						"",
 						undefined,
 						setLoading,
-						{ ctImageIds: imageIds }
+						{ ctImageIds: imageIds, resourceKey: "local-dicom", signal: controller.signal }
 					);
-					setLoading(false);
+					if (cancelled) return void result.dispose();
 					// Non-CT DICOM (MR/PET/…) needs its own window, not the CT presets —
 					// seed the sliders from the scan's VOI so the initial-window effect
 					// applies the right level instead of clipping the image flat.
@@ -2002,10 +2454,9 @@ function VisualizationPage() {
 						setVolume3DPresets(VOLUME_3D_PRESETS_MR);
 						setVolumePreset(VOLUME_3D_PRESETS_MR[0].name);
 					}
-					setRenderingEngine(result.renderingEngine);
-					setViewportIds(result.viewportIds);
-					setVolumeId(result.volumeId);
+					acceptLoadedViewer(result);
 				} catch (e) {
+					if (cancelled || (e instanceof DOMException && e.name === "AbortError")) return;
 					console.error(e);
 					setDicomError(e instanceof Error ? e.message : "Failed to load the DICOM series.");
 					setLoading(false);
@@ -2037,14 +2488,12 @@ function VisualizationPage() {
 						cmap,
 						rawUrl,
 						undefined,
-						setLoading
+						setLoading,
+						{ resourceKey: "local-nifti", signal: controller.signal }
 					);
-					if (cancelled) return;
-					setLoading(false);
-					setRenderingEngine(result.renderingEngine);
-					setViewportIds(result.viewportIds);
-					setVolumeId(result.volumeId);
+					acceptLoadedViewer(result);
 				} catch (e) {
+					if (cancelled || (e instanceof DOMException && e.name === "AbortError")) return;
 					console.error(e);
 					setDicomError(e instanceof Error ? e.message : "Failed to load the NIfTI file.");
 					setLoading(false);
@@ -2054,39 +2503,37 @@ function VisualizationPage() {
 
 			if (
 				!ctUrl ||
-				(!segUrl && !isCvCase) ||   // CV is CT-only; only require seg for non-CV cases
+				// Solo quiz modes are CT-only until submission unlocks their reveal masks.
+				// Requiring that hidden mask here leaves the viewer loading forever.
+				(!segUrl && !isCvCase && !isQuizPractice && !isSoloChallenge) ||
 				!axial_ref.current ||
 				!sagittal_ref.current ||
 				!coronal_ref.current ||
 				// !render_ref.current ||
 				cmap.length === 0
 			) {
-				console.log("return", ctUrl, segUrl);
 				return;
 			}
 
-			const result = await renderVisualization(
-				axial_ref.current,
-				sagittal_ref.current,
-				coronal_ref.current,
-				cmap,
-				ctUrl,
-				segUrl ?? undefined,
-				setLoading
-			);
+			try {
+				const result = await renderVisualization(
+					axial_ref.current,
+					sagittal_ref.current,
+					coronal_ref.current,
+					cmap,
+					ctUrl,
+					segUrl ?? undefined,
+					setLoading,
+					{ resourceKey: ctUrl, signal: controller.signal }
+				);
 
-			if (cancelled) return; // a newer load started; drop this stale result
-
-			setLoading(false);
-			const {
-				renderingEngine,
-				viewportIds,
-				volumeId,
-			} = result;
-
-			setRenderingEngine(renderingEngine);
-			setViewportIds(viewportIds);
-			setVolumeId(volumeId);
+				acceptLoadedViewer(result);
+			} catch (e) {
+				if (cancelled || (e instanceof DOMException && e.name === "AbortError")) return;
+				console.error(e);
+				setDicomError(e instanceof Error ? e.message : "Failed to load the viewer.");
+				setLoading(false);
+			}
 
 			// const { nv, cmapCopy } = await create3DVolume(
 			// 	render_ref,
@@ -2107,6 +2554,9 @@ function VisualizationPage() {
 
 		return () => {
 			cancelled = true;
+			viewerReadyRef.current = false;
+			controller.abort();
+			disposeLoaded?.();
 		};
 		// refs have stable identity, so they aren't real deps; the loads key off
 		// ctUrl/segUrl/labelColorMap.
@@ -2115,6 +2565,8 @@ function VisualizationPage() {
 		segUrl,
 		isDicom,
 		isLocalNifti,
+		isSoloChallenge,
+		liveRoom?.metadata.mode,
 		axial_ref,
 		sagittal_ref,
 		coronal_ref,
@@ -2172,7 +2624,12 @@ function VisualizationPage() {
 
 		viewportIds.forEach((viewportId) => {
 			const viewport = renderingEngine.getViewport(viewportId);
-			const actor = viewport.getDefaultActor();
+			// Labelmap representations can become the viewport's default actor after
+			// quiz reveal. Windowing that actor paints its zero-valued background gray
+			// and hides the CT, so always target the known CT volume actor instead.
+			const actor = viewport.getActors().find((entry) => entry.referencedId === volumeId)
+				?? viewport.getDefaultActor();
+			if (!actor) return;
 
 			const tf = (actor.actor.getProperty() as vtkVolumeProperty).getRGBTransferFunction(0);
 			tf.setMappingRange(windowLow, windowHigh);
@@ -2204,6 +2661,20 @@ function VisualizationPage() {
 		return unsubscribe;
 	}, [renderingEngine, viewportIds, volumeId]);
 
+	// A pin popover belongs to its visible slice. Close it as soon as navigation
+	// leaves that note's plane tolerance so returning later never resurrects stale UI.
+	useEffect(() => {
+		if (!openPinnedNote || !liveRoom) return;
+		const note = liveRoom.state.notes[openPinnedNote.noteId];
+		if (
+			!note
+			|| note.plane !== openPinnedNote.pane
+			|| !worldToVisiblePaneCanvas(openPinnedNote.pane, note.world)
+		) {
+			setOpenPinnedNote(null);
+		}
+	}, [liveRoom?.state.notes, openPinnedNote, sliceInfo]);
+
 	// Apply the reference-lines toggle once the engine/viewports/volume are ready, and
 	// re-apply on both a user toggle and a volume reload (a fresh tool group always starts
 	// with every tool disabled).
@@ -2213,13 +2684,11 @@ function VisualizationPage() {
 		}
 	}, [referenceLinesOn, renderingEngine, viewportIds, volumeId]);
 
-
-
 	// Apply a shared deep-link's view state once the volume is ready (orientation, window,
 	// opacity, hidden organs, crosshair). Runs a single time — after that the URL is just a
 	// snapshot and the user is free to change things.
 	useEffect(() => {
-		if (shareStateAppliedRef.current || loading) return;
+		if (shareStateAppliedRef.current || !viewerReady) return;
 		if (!renderingEngine || !viewportIds.length || !volumeId) return;
 		shareStateAppliedRef.current = true;
 
@@ -2244,7 +2713,7 @@ function VisualizationPage() {
 			requestAnimationFrame(() => moveCornerstoneCrosshairToMm(shared.crosshair!));
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [loading, renderingEngine, viewportIds, volumeId]);
+	}, [viewerReady, renderingEngine, viewportIds, volumeId]);
 
 	// Build a shareable URL that reproduces the current view, and copy it to the clipboard.
 	const handleShare = async () => {
@@ -2283,6 +2752,9 @@ function VisualizationPage() {
 	// still visually reflects its contents' state without having to be open.
 	const viewGroupActive = hoverIdentifyEnabled || referenceLinesOn;
 	const panelsGroupActive = showOrganDetails || showStats || showMetadata || showMeasurePanel;
+	const collaborationDisabled = !viewerReady || Boolean(liveRoom && (
+		liveRoom.connectionState !== "connected" || liveRoom.collaborationLocked
+	));
 
 	// The Layout ▾ trigger shows the pane-layout preset's name when one is active
 	// (it's the more specific choice), otherwise the current view mode.
@@ -2356,7 +2828,7 @@ function VisualizationPage() {
 		});
 	}, []);
 
-	
+
 
 	// Resize Cornerstone + NiiVue when view mode changes. resize(immediate, keepCamera):
 	// keepCamera defaults to true, which preserved the zoom/pan from a single (fullscreen)
@@ -2473,8 +2945,104 @@ function VisualizationPage() {
 		// these are the elements that were bleeding through on top of the 3D render.
 		if (viewMode === "3d") return null;
 		const info = sliceInfo[pane];
+		const paneElement = pane === "axial"
+			? axial_ref.current
+			: pane === "sagittal"
+				? sagittal_ref.current
+				: coronal_ref.current;
+		const pinnedNotes = liveRoom
+			? Object.values(liveRoom.state.notes).flatMap((note) => {
+				if (note.plane !== pane) return [];
+				const position = worldToVisiblePaneCanvas(pane, note.world);
+				if (!position || position[0] < 0 || position[1] < 0) return [];
+				return [{
+					note,
+					position,
+					opensLeft: Boolean(paneElement && position[0] > paneElement.clientWidth * 0.62),
+					opensAbove: Boolean(paneElement && position[1] > paneElement.clientHeight * 0.62),
+				}];
+			})
+			: [];
+		const challengeMarkerPosition = soloChallenge?.marker
+			? worldToVisiblePaneCanvas(pane, soloChallenge.marker)
+			: null;
 		return (
 			<>
+				{challengeMarkerPosition && challengeMarkerPosition[0] >= 0 && challengeMarkerPosition[1] >= 0 && (
+					<span
+						className="edu-finding-marker"
+						style={{ left: challengeMarkerPosition[0], top: challengeMarkerPosition[1] }}
+						aria-label="Locked finding marker"
+					/>
+				)}
+				{pinnedNotes.map(({ note, position, opensLeft, opensAbove }) => {
+					const popoverId = `lr-note-popover-${pane}-${note.id}`;
+					const isOpen = openPinnedNote?.noteId === note.id && openPinnedNote.pane === pane;
+					return (
+					<div
+						className="lr-note-anchor"
+						key={note.id}
+						style={{ left: position[0], top: position[1] }}
+						data-horizontal={opensLeft ? "left" : "right"}
+						data-vertical={opensAbove ? "above" : "below"}
+						onKeyDown={(event) => {
+							if (event.key === "Escape") setOpenPinnedNote(null);
+						}}
+					>
+						<button
+							className="lr-note-pin"
+							title={`${note.author}: ${note.text}`}
+							aria-label={`Pinned note from ${note.author}: ${note.text}`}
+							aria-expanded={isOpen}
+							aria-controls={popoverId}
+							onClick={(event) => {
+								event.stopPropagation();
+								setOpenPinnedNote(isOpen ? null : { noteId: note.id, pane });
+							}}
+						>
+							<span />
+						</button>
+						{isOpen && (
+							<div
+								className="lr-note-popover"
+								id={popoverId}
+								role="dialog"
+								aria-labelledby={`${popoverId}-author`}
+								aria-describedby={`${popoverId}-text`}
+								onClick={(event) => event.stopPropagation()}
+							>
+								<header>
+									<div>
+										<span>PINNED NOTE</span>
+										<strong id={`${popoverId}-author`}>{note.author}</strong>
+									</div>
+									<button type="button" aria-label="Close pinned note" onClick={() => setOpenPinnedNote(null)}><IconX size={15} /></button>
+								</header>
+								<p id={`${popoverId}-text`}>{note.text}</p>
+								<footer>
+									<span>{note.organ_label || pane}</span>
+									<span>{note.world.map((value) => Math.round(value)).join(", ")} mm</span>
+								</footer>
+							</div>
+						)}
+					</div>
+					);
+				})}
+				{liveRoom?.participants
+					.filter((participant) => participant.participant_id !== liveRoom.participantId && participant.cursor?.pane === pane)
+					.map((participant) => (
+						<div
+							className="lr-remote-cursor"
+							key={participant.participant_id}
+							style={{
+								left: `${Math.max(0, Math.min(1, participant.cursor!.x)) * 100}%`,
+								top: `${Math.max(0, Math.min(1, participant.cursor!.y)) * 100}%`,
+								color: participant.color,
+							}}
+						>
+							<span>{participant.name}</span>
+						</div>
+					))}
 				{info && info.total > 1 && (
 					<>
 						<input
@@ -2518,7 +3086,7 @@ function VisualizationPage() {
 
 	// Update segmentation visibility when state changes
 	useEffect(() => {
-		if (checkState) {
+		if (viewerReady && checkState) {
 			const checkStateArr = [
 				true, // ID=0 background 永远可见
 				...checkBoxData.map((item) => !!checkState[item.id]),
@@ -2537,6 +3105,7 @@ function VisualizationPage() {
 	}, [
 		checkState,
 		checkBoxData,
+		viewerReady,
 	]);
 
 	const handleOpacityOnSliderChange = (
@@ -2685,6 +3254,7 @@ function VisualizationPage() {
 	};
 
 	const handleToggleAISidebar = () => {
+		if (liveRoom?.metadata.mode === "quiz") return;
 		const opening = !showAISidebar;
 
 		if (opening) track("assistant_open");
@@ -2857,6 +3427,17 @@ const aiAvailableOrgans = useMemo(() => {
 	// cursor for one specific pane (via canvasToWorld, not the crosshair) and floats a
 	// tooltip next to the pointer. No-ops entirely while the tool is off.
 	const handlePaneHover = (pane: CinePane) => (e: MouseEvent) => {
+		if (liveRoom?.metadata.mode === "review") {
+			const bounds = e.currentTarget.getBoundingClientRect();
+			liveRoom.sendPresence({
+				cursor: {
+					pane,
+					x: (e.clientX - bounds.left) / Math.max(1, bounds.width),
+					y: (e.clientY - bounds.top) / Math.max(1, bounds.height),
+				},
+				plane: pane,
+			});
+		}
 		if (!hoverIdentifyEnabled) return;
 		const idx = getOrganLabelAtPoint(pane, e.clientX, e.clientY);
 		if (!idx) {
@@ -2876,6 +3457,7 @@ const aiAvailableOrgans = useMemo(() => {
 	};
 
 	const handlePaneHoverLeave = (pane: CinePane) => () => {
+		if (liveRoom?.metadata.mode === "review") liveRoom.sendPresence({ cursor: null });
 		setHoverOrganTip((t) => (t.visible ? { ...t, visible: false } : t));
 		// Without this, BrushTool can leave its circular cursor painted in the
 		// pane you just moved out of instead of it reading as one cursor that
@@ -2887,7 +3469,11 @@ const aiAvailableOrgans = useMemo(() => {
 	};
 
 	const navBack = () => {
-		window.location.href = "/dashboard";
+		window.location.href = liveRoom
+			? appRootRelativeUrl(`/case/${liveRoom.metadata.case_id}`)
+			: soloChallenge
+				? `/case/${soloChallenge.challenge.case_id}`
+				: "/dashboard";
 	};
 	// const PREVIEW_IDS = [1, 17, 30, 35, 121];
 
@@ -2899,12 +3485,17 @@ const aiAvailableOrgans = useMemo(() => {
 	return (
 		<div
 			ref={vpRootRef}
-			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${showAnnotationToolbar ? " annotation-open" : ""}`}
+			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${showAnnotationToolbar ? " annotation-open" : ""}${liveRoom ? " is-live-room" : ""}${soloChallenge ? " is-solo-challenge" : ""}${quizPractice ? " is-quiz-practice" : ""}`}
+			onPointerDownCapture={(event) => {
+				if (!liveRoom?.followingId) return;
+				const target = event.target as HTMLElement;
+				if (!target.closest(".lr-header, .lr-dock")) liveRoom.stopFollowing();
+			}}
 			style={{
 				display: "flex",
 				overflow: "hidden",
 				flexDirection: "column",
-				height: "100vh",
+				height: "100dvh",
 				["--vp-ai-width" as string]: `${aiWidth}px`,
 				// When the AI sidebar opens, shrink the app to the left of it so the
 				// CT views reflow beside the panel instead of being covered by it
@@ -2913,6 +3504,15 @@ const aiAvailableOrgans = useMemo(() => {
 				width: showAISidebar ? "calc(100vw - var(--vp-ai-width, 400px))" : "100vw",
 				transition: "width 180ms ease",
 			} as React.CSSProperties}>
+			{liveRoom && (
+				<LiveRoomHeader
+					room={liveRoom}
+					dockOpen={liveRoomDockOpen}
+					onToggleDock={() => setLiveRoomDockOpen((value) => !value)}
+				/>
+			)}
+			{soloChallenge && <SoloChallengeHeader controller={soloChallenge} />}
+			{quizPractice && <QuizPracticeHeader controller={quizPractice} />}
 		
 			{/* ---- Top toolbar (PYCAD-style). Lives in normal flow, so it sits ABOVE the
 			     viewports and never overlays them. Shown/hidden by the gear button. ---- */}
@@ -2975,6 +3575,16 @@ const aiAvailableOrgans = useMemo(() => {
 							</span>
 						)}
 					</div>
+					{!liveRoom && params.caseId && (
+						<button
+							className="vp-tb-mini vp-live-room-button"
+							onClick={() => setShowLiveRoomCreate(true)}
+							aria-label="Start Live Room"
+						>
+							<IconUsersGroup size={17} />
+							<span>Live Room</span>
+						</button>
+					)}
 
 					<span className="vp-tb-divider" />
 
@@ -3200,8 +3810,9 @@ const aiAvailableOrgans = useMemo(() => {
 											<div className="vp-toolgroup" ref={measureFlyout.groupRef}>
 												<button
 													ref={measureFlyout.btnRef}
-													className={`vp-tool ${measureToolActive || measureFlyout.open ? "vp-tool--active" : ""}`}
-													onClick={measureFlyout.toggle}
+												className={`vp-tool ${measureToolActive || measureFlyout.open ? "vp-tool--active" : ""}`}
+												onClick={measureFlyout.toggle}
+												disabled={collaborationDisabled}
 													aria-label="Measurement tools"
 													aria-haspopup="menu"
 													aria-expanded={measureFlyout.open}
@@ -3222,7 +3833,8 @@ const aiAvailableOrgans = useMemo(() => {
 																<button
 																	key={name}
 																	className={`vp-flyout__item ${activeMeasureTool === name ? "is-active" : ""}`}
-																	role="menuitem"
+															role="menuitem"
+															disabled={collaborationDisabled}
 																	onClick={() => {
 																		setEditMode(null);
 																		setActiveMeasureTool((p) => (p === name ? null : name));
@@ -3236,7 +3848,8 @@ const aiAvailableOrgans = useMemo(() => {
 															))}
 															<button
 																className="vp-flyout__item"
-																role="menuitem"
+														role="menuitem"
+														disabled={collaborationDisabled}
 																onClick={() => {
 																	clearMeasurements();
 																	measureFlyout.close();
@@ -3390,7 +4003,8 @@ const aiAvailableOrgans = useMemo(() => {
 											<div ref={undoRedoGroupRef} style={{ display: "contents" }}>
 												<button
 													className="vp-tool"
-													onClick={handleUndo}
+												onClick={() => liveRoom ? liveRoom.requestUndo() : handleUndo()}
+												disabled={collaborationDisabled}
 													aria-label="Undo"
 												>
 													<IconArrowBackUp size={20} color="white" />
@@ -3399,6 +4013,7 @@ const aiAvailableOrgans = useMemo(() => {
 												<button
 													className="vp-tool"
 													onClick={() => redoMaskEdit()}
+													disabled={Boolean(liveRoom)}
 													aria-label="Redo"
 												>
 													<IconArrowForwardUp size={20} color="white" />
@@ -3406,22 +4021,23 @@ const aiAvailableOrgans = useMemo(() => {
 												</button>
 											</div>
 											
-											{!isLocal && (() => {
+											{!isLocal && !soloChallenge && liveRoom?.metadata.mode !== "quiz" && (() => {
 												// Annotating on the low-res stream would edit a mask that
 												// doesn't line up with the eventual full-res volume, so the
 												// button stays disabled until the HD upgrade has actually
 												// finished (native HD load, or the progressive stream done).
-												const hdReady = isHd || enhance.state === "done";
+													const hdReady = isHd || enhance.state === "done";
+													const annotationDisabled = !hdReady || collaborationDisabled;
 												return (
 													<button
 														ref={annotatePencilRef}
-														className={`vp-tool ${showAnnotationToolbar ? "vp-tool--active" : ""} ${!hdReady ? "vp-tool--disabled" : ""}`}
+														className={`vp-tool ${showAnnotationToolbar ? "vp-tool--active" : ""} ${annotationDisabled ? "vp-tool--disabled" : ""}`}
 														onClick={() => {
 															if (!hdReady) return;
 															handleToggleAnnotationToolbar();
 														}}
-														disabled={!hdReady}
-														aria-disabled={!hdReady}
+															disabled={annotationDisabled}
+															aria-disabled={annotationDisabled}
 														aria-label="Annotate"
 														aria-pressed={showAnnotationToolbar}
 													>
@@ -3434,7 +4050,7 @@ const aiAvailableOrgans = useMemo(() => {
 											})()}
 
 											{/* Capture ▾ — snapshot, voice-narrated reading session, share link. */}
-											<div className="vp-toolgroup" ref={captureFlyout.groupRef}>
+											{!soloChallenge && <div className="vp-toolgroup" ref={captureFlyout.groupRef}>
 												<button
 													ref={captureFlyout.btnRef}
 													className={`vp-tool ${readingSession ? "vp-tool--rec" : ""} ${captureFlyout.open ? "vp-tool--active" : ""}`}
@@ -3504,11 +4120,11 @@ const aiAvailableOrgans = useMemo(() => {
 														</div>,
 														document.body
 													)}
-											</div>
+											</div>}
 
 											{/* Panels ▾ — every side-panel opener in one place (organs list, organ
 											    stats, case metadata, measurements). */}
-											<div className="vp-toolgroup" ref={panelsFlyout.groupRef}>
+											{!soloChallenge && <div className="vp-toolgroup" ref={panelsFlyout.groupRef}>
 												<button
 													ref={panelsFlyout.btnRef}
 													className={`vp-tool ${panelsGroupActive || panelsFlyout.open ? "vp-tool--active" : ""}`}
@@ -3595,11 +4211,11 @@ const aiAvailableOrgans = useMemo(() => {
 														</div>,
 														document.body
 													)}
-											</div>
+											</div>}
 
 											{/* Report and Download stay standalone and separate (not grouped with
 											    each other) — distinct export actions users reach for independently. */}
-											{!isLocal && (
+											{!isLocal && !soloChallenge && !quizPractice && !liveRoom && (
 												<button
 													className="vp-tool"
 													onClick={() => { closeAnnotationToolbarIfOpen(); handleDownloadClick(); }}
@@ -3609,24 +4225,24 @@ const aiAvailableOrgans = useMemo(() => {
 													<span className="vp-tool__tip">Download</span>
 												</button>
 											)}
-											{!isLocal && (
-													<button
-															className="vp-tool"
-															onClick={() => {
-																	track("report_open");
-																	setViewMode("3d");
-																	setShowReportScreen(true);
-															}}
-															aria-label="Open report"
-													>
-															<IconReport size={20} color="white" />
-															<span className="vp-tool__tip">Report</span>
-													</button>
+											{!isLocal && !soloChallenge && !quizPractice && !liveRoom && (
+												<button
+													className="vp-tool"
+													onClick={() => {
+														track("report_open");
+														setViewMode("3d");
+														setShowReportScreen(true);
+													}}
+													aria-label="Open report"
+												>
+													<IconReport size={20} color="white" />
+													<span className="vp-tool__tip">Report</span>
+												</button>
 											)}
 
 											{/* HD and AI stay inline: HD is a live status indicator (streaming %),
 											    and AI is a headline feature — neither belongs buried in a menu. */}
-											{!sessionId && localAvailable && (
+											{!liveRoom && !soloChallenge && !quizPractice && !sessionId && localAvailable && (
 												<button
 													className={`vp-tool ${isHd || enhance.state === "done" ? "vp-tool--active" : ""} ${enhance.state === "streaming" ? "vp-tool--busy" : ""}`}
 													onClick={() => {
@@ -3655,7 +4271,7 @@ const aiAvailableOrgans = useMemo(() => {
 													</span>
 												</button>
 											)}
-											{!isLocal && (
+											{!isLocal && !soloChallenge && (
 												<button
 													type="button"
 													className={`vp-tool ${showAISidebar ? "vp-tool--active" : ""}`}
@@ -3703,7 +4319,7 @@ const aiAvailableOrgans = useMemo(() => {
 			     above pushing it down). The stage's ResizeObserver refits the canvases
 			     whenever a dock opens or closes. */}
 			<div className="vp-body">
-				{!isLocal && (
+				{!isLocal && !soloChallenge && (
 					<OrganCheckbox
 						setCheckState={setCheckState}
 						checkState={checkState}
@@ -4032,8 +4648,8 @@ const aiAvailableOrgans = useMemo(() => {
 									No organ meshes for local DICOM
 									<span>(switch to Volume rendering above)</span>
 								</div>
-							) : (
-								<SegmentationMeshViewer caseId={caseId} isSession={!!sessionId && !pantsCase} crosshairMm={crosshairMm} checkState={checkState} loading={loading} opacity={opacityValue} customOrgans={customOrgans} labelColorMap={labelColorMap} />
+											) : (
+								<SegmentationMeshViewer caseId={caseId} isSession={!!sessionId && !pantsCase} crosshairMm={crosshairMm} checkState={meshCheckState} loading={loading} opacity={opacityValue} customOrgans={customOrgans} labelColorMap={labelColorMap} />
 							)}
 						</div>
 						{!loading && (
@@ -4073,6 +4689,34 @@ const aiAvailableOrgans = useMemo(() => {
 					</div>
 				</div>
 			</div>
+			{liveRoom && liveRoomDockOpen && (
+				<LiveRoomDock
+					room={liveRoom}
+					crosshair={crosshairMm}
+					activePlane={focusedPane.getFocusedPane()}
+					onClose={() => setLiveRoomDockOpen(false)}
+				/>
+			)}
+			{soloChallenge && soloChallenge.taskDockOpen && (
+				<SoloChallengeDock
+					controller={soloChallenge}
+					crosshair={crosshairMm}
+					measurement={challengeLengthMeasurement}
+					serializedMeasurement={serializedChallengeMeasurement}
+					onSetMarker={() => {
+						if (crosshairMm) soloChallenge.setMarker([...crosshairMm]);
+					}}
+					onActivateMeasure={() => {
+						setShowToolbar(true);
+						setCrosshairToolActive(false);
+						setActiveMeasureTool(LENGTH_TOOL);
+					}}
+					onSubmit={() => void soloChallenge.submit(serializedChallengeMeasurement)}
+				/>
+			)}
+			{quizPractice && quizPractice.dockOpen && (
+				<QuizPracticeDock controller={quizPractice} />
+			)}
 			</div>
 			{hoverOrganTip.visible && (
 				<div
@@ -4285,10 +4929,8 @@ const aiAvailableOrgans = useMemo(() => {
 					onJump={(mm) => setCrosshairMm(mm)}
 				/>
 			)}
-
-
 			{/* Kept mounted (display toggles) so the chat history survives open/close. */}
-			<AISidebar
+			{!soloChallenge && liveRoom?.metadata.mode !== "quiz" && <AISidebar
 				open={showAISidebar}
 				onClose={() => setShowAISidebar(false)}
 				caseId={String(caseId)}
@@ -4308,7 +4950,7 @@ const aiAvailableOrgans = useMemo(() => {
 				getMaskLegend={getMaskLegend}
 				onResize={applyAiWidth}
 				onResizeEnd={commitAiWidth}
-			/>
+				/>}
 			<AnnotationToolbar
 				open={showAnnotationToolbar}
 				hasSegments={hasSegments}
@@ -4388,7 +5030,6 @@ const aiAvailableOrgans = useMemo(() => {
 				dragHandleRef={annotationPopupDragRef}
 				minButtonRef={annotationPopupMinRef}
 			/>
-
 			{/* Local-DICOM load failure: explain and offer the way back. */}
 			{dicomError && (
 				<div className="vp-loading" role="alert">
@@ -4433,6 +5074,24 @@ const aiAvailableOrgans = useMemo(() => {
 					/>
 				)
 			}
+
+			{!liveRoom && params.caseId && (
+				<LiveRoomCreateDialog
+					caseId={params.caseId}
+					open={showLiveRoomCreate}
+					onClose={() => setShowLiveRoomCreate(false)}
+				/>
+			)}
+
+			{liveRoom?.connectionState === "expired" && (
+				<div className="lr-room-ended" role="alert">
+					<div>
+						<h2>Live Room expired</h2>
+						<p>Temporary room data was deleted. Canonical dataset case remains unchanged.</p>
+						<a className="lr-button lr-button--primary" href={`/case/${liveRoom.metadata.case_id}`}>Return to case</a>
+					</div>
+				</div>
+			)}
 
 		</div >
 	);

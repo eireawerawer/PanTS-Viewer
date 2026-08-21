@@ -36,14 +36,14 @@ class NiftiProcessor:
         self._clabel_path = clabel_path
         self.number_max = 999999
         self._organ_intensities = organ_intensities
-    
+
     def set_organ_intensities(self, organ_intensities):
         self._organ_intensities = organ_intensities
 
     @classmethod
     def from_clabel_path(cls, clabel_path):
         return cls(None, clabel_path)
-    
+
     def calculate_metrics(self):
         if (
             self._organ_intensities is None
@@ -322,7 +322,7 @@ class NiftiProcessor:
         if len(filenames) == 1:
             filename = filenames[0]
             segmentation = nifti_multi_dict[filename]
-            
+
             img_data, affine, header = self.load_uploaded_nifti(segmentation)
 
             combined_labels_img_data = np.rint(img_data).astype(np.uint16)

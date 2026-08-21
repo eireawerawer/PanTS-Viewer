@@ -5,6 +5,7 @@ import time
 import shutil
 import tempfile
 import zipfile
+from werkzeug.utils import secure_filename
 from datetime import datetime, timezone
 from contextlib import contextmanager
 try:
@@ -50,39 +51,47 @@ class InferenceJobQueue:
                     msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
     def _job_path(self, job_id: str) -> str:
-        return os.path.join(self.jobs_dir, f"{job_id}.json")
+        try:
+            safe_job_id = str(uuid.UUID(str(job_id)))
+        except (TypeError, ValueError):
+            return ""
+        return os.path.join(self.jobs_dir, f"{safe_job_id}.json")
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
 
     def _read_job(self, job_id: str):
         path = self._job_path(job_id)
-        if not os.path.exists(path):
+        if not path or not os.path.exists(path):
             return None
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
     def _write_job(self, job: dict):
         path = self._job_path(job["job_id"])
+        if not path:
+            raise ValueError("Invalid job ID")
         tmp_fd, tmp_path = tempfile.mkstemp(prefix="job_", suffix=".json", dir=self.jobs_dir)
         os.close(tmp_fd)
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(job, f, ensure_ascii=False)
         os.replace(tmp_path, path)
 
-    def create_job(self, input_file_path: str, session_id: str | None = None, model: str = "ePAI", max_attempts: int = 3):
-        if not os.path.exists(input_file_path):
-            raise FileNotFoundError(f"Input file not found: {input_file_path}")
-
+    def create_job(self, input_stream, input_filename: str, session_id: str | None = None, model: str = "ePAI", max_attempts: int = 3):
         job_id = str(uuid.uuid4())
         session_id = session_id or job_id
 
-        ext = ".nii.gz" if input_file_path.lower().endswith(".nii.gz") else os.path.splitext(input_file_path)[1]
-        if not ext:
+        safe_input_name = secure_filename(str(input_filename or ""))
+        if safe_input_name.lower().endswith(".nii.gz"):
             ext = ".nii.gz"
+        elif safe_input_name.lower().endswith(".nii"):
+            ext = ".nii"
+        else:
+            ext = ".bin"
 
         input_copy_path = os.path.join(self.inputs_dir, f"{job_id}{ext}")
-        shutil.copy2(input_file_path, input_copy_path)
+        with open(input_copy_path, "wb") as output_stream:
+            shutil.copyfileobj(input_stream, output_stream)
 
         now = self._now()
         job = {
@@ -208,7 +217,8 @@ class InferenceJobQueue:
             if job.get("lease_owner") != worker_id:
                 raise PermissionError("Lease owner mismatch")
 
-            result_dir = os.path.join(self.results_dir, job_id)
+            safe_job_id = str(uuid.UUID(str(job["job_id"])))
+            result_dir = os.path.join(self.results_dir, safe_job_id)
             os.makedirs(result_dir, exist_ok=True)
 
             mask_dest = os.path.join(result_dir, "combined_labels.nii.gz")

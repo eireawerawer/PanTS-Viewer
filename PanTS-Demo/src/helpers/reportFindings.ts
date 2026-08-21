@@ -101,9 +101,9 @@ export function getReportSection(organ: string, comments: string): string | null
 export function getReportMeasurements(organ: string, comments: string): ReportMeasurements {
   const section = getReportSection(organ, comments);
   const lesionVolumeMatch = section?.match(/lesion[\s\S]*?volume:\s*([\d.]+)\s*cc/i);
-  const lesionHuMatch = section?.match(/hu\s*value\s*is\s*(-?[\d.]+)(?:\s*\+\/\-\s*([\d.]+))?/i);
+  const lesionHuMatch = section?.match(/hu\s*value\s*is\s*(-?[\d.]+)(?:\s*\+\/-\s*([\d.]+))?/i);
   const volumeMatch = lesionVolumeMatch ?? section?.match(/volume:\s*([\d.]+)\s*cc/i);
-  const huMatch = lesionHuMatch ?? section?.match(/Mean HU value:\s*([\d.]+)(?:\s*\+\/\-\s*([\d.]+))?/i);
+  const huMatch = lesionHuMatch ?? section?.match(/Mean HU value:\s*([\d.]+)(?:\s*\+\/-\s*([\d.]+))?/i);
   const sizeMatch = section?.match(/Size:\s*([^()]+?)\s*cm/i);
 
   const organVolumeMatch = section?.match(/volume:\s*([\d.]+)\s*cc/i);

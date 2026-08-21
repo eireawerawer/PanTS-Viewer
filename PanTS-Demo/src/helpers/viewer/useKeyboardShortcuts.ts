@@ -60,6 +60,10 @@ interface UseKeyboardShortcutsArgs {
 	sliceInfoRef: MutableRefObject<Record<CinePane, SliceInfo | null>>;
 	editMode: MaskEditMode;
 	setZoomLevel: Dispatch<SetStateAction<number>>;
+	/** Live Rooms use server-ordered undo and lock edit shortcuts while disconnected. */
+	collaborationConnected?: boolean;
+	collaborationLocked?: boolean;
+	onCollaborationUndo?: () => void;
 	/** Called for the plain undo shortcut (⌘Z/Ctrl+Z, no Shift). Owned by
 	 *  VisualizationPage so it can peel off a scissors/lasso in-progress
 	 *  point before falling through to the global mask-edit undo — see
@@ -103,6 +107,9 @@ export function useKeyboardShortcuts({
 	sliceInfoRef,
 	editMode,
 	setZoomLevel,
+	collaborationConnected,
+	collaborationLocked,
+	onCollaborationUndo,
 	onUndo,
 }: UseKeyboardShortcutsArgs) {
 	// Last-seen mouse position (viewport-relative clientX/Y), updated on every
@@ -201,6 +208,11 @@ export function useKeyboardShortcuts({
 			// handleUndo in VisualizationPage for why. Redo has no per-tool
 			// equivalent, so it still calls redoMaskEdit() straight through.
 			if ((e.metaKey || e.ctrlKey) && !e.altKey && key === "z") {
+				if (onCollaborationUndo) {
+					if (!e.shiftKey && collaborationConnected && !collaborationLocked) onCollaborationUndo();
+					e.preventDefault();
+					return;
+				}
 				if (e.shiftKey) redoMaskEdit();
 				else onUndo();
 				e.preventDefault();
@@ -270,6 +282,7 @@ export function useKeyboardShortcuts({
 
 			// ---- Plain letter shortcuts -------------------------------------------
 			if (TOOL_BY_KEY[key]) {
+				if (onCollaborationUndo && (!collaborationConnected || collaborationLocked)) return;
 				setEditMode(null); // measurement keys take the mouse back from the brush
 				setActiveMeasureTool((prev) => (prev === TOOL_BY_KEY[key] ? null : TOOL_BY_KEY[key]));
 			} else if (key === "c") {
@@ -308,6 +321,9 @@ export function useKeyboardShortcuts({
 		sliceInfoRef,
 		editMode,
 		setZoomLevel,
+		collaborationConnected,
+		collaborationLocked,
+		onCollaborationUndo,
 		onUndo,
 	]);
 }

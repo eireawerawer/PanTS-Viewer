@@ -14,6 +14,8 @@ from constants import Constants
 #print("DEBUG_CONSTANT:", Constants.SESSIONS_DIR_NAME)
 
 from api.api_blueprint import api_blueprint
+from api.education import education_blueprint
+from api.live_rooms import live_rooms_blueprint
 from api.auth_blueprint import auth_blueprint
 from api.oauth_blueprint import init_oauth, oauth_blueprint
 from api.admin_blueprint import admin_blueprint
@@ -65,6 +67,8 @@ def create_app():
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=hops, x_proto=1, x_host=1)
 
     app.register_blueprint(api_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
+    app.register_blueprint(education_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
+    app.register_blueprint(live_rooms_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(auth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(oauth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(admin_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')

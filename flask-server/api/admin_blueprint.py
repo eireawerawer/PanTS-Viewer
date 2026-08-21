@@ -48,7 +48,9 @@ def people():
 @admin_blueprint.route("/admin/people/<user_id>/roles", methods=["POST"])
 @require_role(role_store.ROLE_ADMIN)
 def grant_role(user_id: str):
-    role = (request.get_json(silent=True) or {}).get("role") or ""
+    raw_body = request.get_json(silent=True)
+    body = raw_body if isinstance(raw_body, dict) else {}
+    role = body.get("role") or ""
     try:
         roles = role_store.grant(user_id, role, granted_by=current_user()["id"])
     except LookupError:

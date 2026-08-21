@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useAuth } from "../../contexts/authContext";
+import { track } from "../../helpers/analytics";
 import { API_BASE } from "../../helpers/constants";
 import type {
   AIAction,
@@ -911,6 +912,7 @@ export default function AISidebar({
       const text = (overrideText ?? input).trim();
       const outgoingAttachments = attachments;
       if ((!text && outgoingAttachments.length === 0) || loading) return;
+      track("assistant_send_message");
 
       const conversation = messages
         .filter((message) => message.role === "user" || message.role === "assistant")

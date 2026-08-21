@@ -6,6 +6,7 @@ type ViewMode = "mpr" | "axial" | "sagittal" | "coronal" | "3d";
 interface UseFocusedPaneArgs {
 	viewMode: ViewMode;
 	referenceLinesOn: boolean;
+	onInteraction?: () => void;
 }
 
 /**
@@ -14,7 +15,7 @@ interface UseFocusedPaneArgs {
  * while in MPR grid view. Used by every single-pane tool: reference lines'
  * source, cine playback, flip, rotate.
  */
-export function useFocusedPane({ viewMode, referenceLinesOn }: UseFocusedPaneArgs) {
+export function useFocusedPane({ viewMode, referenceLinesOn, onInteraction }: UseFocusedPaneArgs) {
 	// A ref, not state: a wheel tick shouldn't force a re-render, and reading
 	// .current at call time is always fresh regardless of when the enclosing
 	// closure was created.
@@ -43,8 +44,14 @@ export function useFocusedPane({ viewMode, referenceLinesOn }: UseFocusedPaneArg
 		[referenceLinesOn]
 	);
 
-	const handleWheel = useCallback((pane: CinePane) => () => handleFocus(pane), [handleFocus]);
-	const handleMouseDown = useCallback((pane: CinePane) => () => handleFocus(pane), [handleFocus]);
+	const handleWheel = useCallback((pane: CinePane) => () => {
+		onInteraction?.();
+		handleFocus(pane);
+	}, [handleFocus, onInteraction]);
+	const handleMouseDown = useCallback((pane: CinePane) => () => {
+		onInteraction?.();
+		handleFocus(pane);
+	}, [handleFocus, onInteraction]);
 
 	return { activePaneRef, getFocusedPane, handleFocus, handleWheel, handleMouseDown };
 }

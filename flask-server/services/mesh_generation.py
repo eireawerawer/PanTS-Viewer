@@ -3,6 +3,9 @@ import json
 import re
 import dotenv
 import os
+import shutil
+import threading
+import uuid
 
 import nibabel as nib
 import numpy as np
@@ -52,9 +55,67 @@ LABELS = {
     35: {"key": "colon_lesion", "name": "Colon Lesion"},
 }
 
+_mesh_generation_lock = threading.Lock()
+
 
 def safe_filename(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_\\-]+", "_", s).lower()
+
+
+def _manifest_is_complete(manifest_path: Path) -> bool:
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        organs = manifest["organs"]
+        bounds = manifest["bounds"]
+        if not isinstance(organs, list) or not isinstance(bounds, dict):
+            return False
+        return all(
+            isinstance(organ, dict)
+            and (manifest_path.parent / f"{safe_filename(str(organ.get('key', '')))}.glb").is_file()
+            for organ in organs
+        )
+    except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def ensure_case_meshes(case_id: str, label_nifti_path: str, output_root: str) -> Path:
+    """Create one complete, reusable mesh cache when precomputed assets are absent."""
+    label_path = Path(label_nifti_path)
+    if not label_path.is_file():
+        raise FileNotFoundError(label_path)
+
+    root = Path(output_root)
+    case_dir = root / case_id
+    manifest_path = case_dir / "manifest.json"
+    if _manifest_is_complete(manifest_path):
+        return manifest_path
+
+    # React Strict Mode can request the manifest twice. One process-wide lock keeps
+    # both requests from running marching cubes over the same case concurrently.
+    with _mesh_generation_lock:
+        if _manifest_is_complete(manifest_path):
+            return manifest_path
+
+        from services.preprocess_meshes import preprocess_case
+
+        root.mkdir(parents=True, exist_ok=True)
+        temporary_dir = root / f".{case_id}.{uuid.uuid4().hex}.tmp"
+        try:
+            preprocess_case(case_id, str(label_path), str(temporary_dir), verbose=False)
+            case_dir.mkdir(parents=True, exist_ok=True)
+            # Manifest is generated last, then moved last. Readers never observe a
+            # manifest that points at only a partial set of GLB files.
+            generated_manifest = temporary_dir / "manifest.json"
+            for asset in temporary_dir.iterdir():
+                if asset != generated_manifest:
+                    os.replace(asset, case_dir / asset.name)
+            os.replace(generated_manifest, manifest_path)
+        finally:
+            shutil.rmtree(temporary_dir, ignore_errors=True)
+
+        if not _manifest_is_complete(manifest_path):
+            raise RuntimeError("Mesh preprocessing produced an incomplete cache")
+        return manifest_path
 
 
 def nifti_world_to_three(world_xyz: np.ndarray) -> np.ndarray:
@@ -355,5 +416,4 @@ def generate_mesh_manifest(
         # The viewer's 3D crosshair only renders when bounds are present.
         "bounds": bounds,
     }
-
 

@@ -1,5 +1,11 @@
 # Backend
 
+## Live Rooms
+
+Dataset viewer supports temporary, account-free collaborative review at `/live/<room-id>#<room-key>`. Up to eight equal editors can collaborate for 24 hours, then room files expire. Exports include edited labelmap, annotations, notes, chat, event history, and report without changing canonical dataset files.
+
+Deployment and local service instructions: [`flask-server/deploy/LIVE_ROOMS.md`](flask-server/deploy/LIVE_ROOMS.md).
+
 #### Create Conda Environment
 ```
 conda create -n PanTS_backend python=3.11

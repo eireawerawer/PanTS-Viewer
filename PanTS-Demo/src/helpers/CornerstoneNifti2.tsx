@@ -9,6 +9,8 @@ import vtkImageData from "@kitware/vtk.js/Common/DataModel/ImageData";
 import vtkDataArray from "@kitware/vtk.js/Common/Core/DataArray";
 import vtkImageMarchingCubes from "@kitware/vtk.js/Filters/General/ImageMarchingCubes";
 import type { MaskingArea } from "../components/segmentation/MaskingSelect";
+import { createOperationGeneration } from "./viewer/operationGeneration";
+import { rollbackVolumeUpgrade } from "./viewer/volumeUpgrade";
 type viewportIdTypes = 'CT_NIFTI_AXIAL' | 'CT_NIFTI_SAGITTAL' | 'CT_NIFTI_CORONAL';
 
 const {
@@ -104,10 +106,7 @@ const DEFAULT_SEGMENTATION_CONFIG = {
 };
 
 
-const volumeId = "myVolume";
-const segmentationId = "mySegmentation";
-// const volumeId = `${volumeLoaderScheme}:${mainNiftiURL}`;
-// const segmentationId = `${volumeLoaderScheme}:${segmentationURL}`;
+let segmentationId = "";
 
 const viewportId1 = "CT_NIFTI_AXIAL";
 const viewportId2 = "CT_NIFTI_SAGITTAL";
@@ -127,6 +126,188 @@ function _getVolume3DEngine(): RenderingEngine {
 }
 
 let currentRenderingEngine: RenderingEngine | null = null;
+type ViewerResourceContext = {
+  generation: number;
+  key: string;
+  engine: RenderingEngine | null;
+  segmentationId: string | null;
+  volumeIds: Set<string>;
+  volumeImageIds: Map<string, Set<string>>;
+  releasedVolumeIds: Set<string>;
+  signal?: AbortSignal;
+  abortListener?: () => void;
+  disposed: boolean;
+};
+
+let _viewerGeneration = 0;
+let _activeViewerContext: ViewerResourceContext | null = null;
+const _imageOwners = new Map<string, number>();
+
+function _resourceKey(value: string | undefined): string {
+  const safe = (value ?? "viewer").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  return (safe || "viewer").slice(0, 80);
+}
+
+function _claimVolumeImages(context: ViewerResourceContext, volumeId: string, imageIds: string[]) {
+  let claimed = context.volumeImageIds.get(volumeId);
+  if (!claimed) {
+    claimed = new Set();
+    context.volumeImageIds.set(volumeId, claimed);
+  }
+  for (const imageId of imageIds) {
+    if (claimed.has(imageId)) continue;
+    claimed.add(imageId);
+    if (context.releasedVolumeIds.has(volumeId)) {
+      if (!_imageOwners.has(imageId)) {
+        try {
+          imageLoader.cancelLoadImage?.(imageId);
+          cache.removeImageLoadObject(imageId, { force: true });
+        } catch {
+          /* image already evicted */
+        }
+      }
+      continue;
+    }
+    _imageOwners.set(imageId, (_imageOwners.get(imageId) ?? 0) + 1);
+  }
+}
+
+function _removeCachedVolume(volumeIdToRemove: string) {
+  try {
+    cache.getVolume(volumeIdToRemove)?.cancelLoading?.();
+    cache.removeVolumeLoadObject(volumeIdToRemove);
+  } catch {
+    /* already absent */
+  }
+}
+
+function _releaseContextVolume(context: ViewerResourceContext, volumeIdToRelease: string) {
+  _removeCachedVolume(volumeIdToRelease);
+  const imageIds = context.volumeImageIds.get(volumeIdToRelease) ?? new Set<string>();
+  if (context.releasedVolumeIds.has(volumeIdToRelease)) {
+    for (const imageId of imageIds) {
+      if (_imageOwners.has(imageId)) continue;
+      try {
+        imageLoader.cancelLoadImage?.(imageId);
+        cache.removeImageLoadObject(imageId, { force: true });
+      } catch {
+        /* image already evicted */
+      }
+    }
+    return;
+  }
+
+  context.releasedVolumeIds.add(volumeIdToRelease);
+  for (const imageId of imageIds) {
+    const remaining = (_imageOwners.get(imageId) ?? 1) - 1;
+    if (remaining > 0) {
+      _imageOwners.set(imageId, remaining);
+      continue;
+    }
+    _imageOwners.delete(imageId);
+    try {
+      imageLoader.cancelLoadImage?.(imageId);
+      cache.removeImageLoadObject(imageId, { force: true });
+    } catch {
+      /* image already evicted */
+    }
+  }
+}
+
+function _clearViewerAnnotations() {
+  try {
+    const all = annotation.state.getAllAnnotations() ?? [];
+    for (const item of [...all]) {
+      if (item?.annotationUID) annotation.state.removeAnnotation(item.annotationUID);
+    }
+  } catch {
+    /* annotation state not initialized */
+  }
+}
+
+function _removeContextSegmentation(context: ViewerResourceContext) {
+  if (!context.segmentationId) return;
+  for (const viewportId of MPR_VIEWPORT_IDS) {
+    try {
+      (segmentation as any).removeSegmentationRepresentations?.(viewportId, {
+        segmentationId: context.segmentationId,
+        type: csToolsEnums.SegmentationRepresentations.Labelmap,
+      });
+    } catch {
+      /* representation already gone */
+    }
+  }
+  try {
+    (segmentation as any).removeSegmentation?.(context.segmentationId);
+  } catch {
+    /* segmentation already gone */
+  }
+}
+
+function _disposeViewerContext(context: ViewerResourceContext) {
+  if (context.signal && context.abortListener) {
+    context.signal.removeEventListener("abort", context.abortListener);
+    context.abortListener = undefined;
+  }
+  if (context.disposed) {
+    // A loader may finish after its first cleanup removed an in-flight cache entry.
+    // Reap anything it republished, but never evict image IDs now owned by a replacement.
+    for (const id of context.volumeIds) _releaseContextVolume(context, id);
+    _removeContextSegmentation(context);
+    return;
+  }
+  context.disposed = true;
+  const ownsActiveViewer = _activeViewerContext === context;
+
+  _removeContextSegmentation(context);
+
+  if (ownsActiveViewer) {
+    _viewerGeneration += 1;
+    stopCine();
+    disableVolume3D();
+    _clearViewerAnnotations();
+    try {
+      segmentation.removeAllSegmentations();
+    } catch {
+      /* segmentation state not initialized */
+    }
+    try {
+      ToolGroupManager.destroyToolGroup(toolGroupId);
+    } catch {
+      /* tool group already gone */
+    }
+    try {
+      context.engine?.destroy();
+    } catch {
+      /* rendering engine already gone */
+    }
+    if (currentRenderingEngine === context.engine) currentRenderingEngine = null;
+    _activeViewerContext = null;
+    _currentCtVolumeId = null;
+    segmentationId = "";
+    _lastColorLUT = null;
+    _organCentroids = null;
+    _customSegmentLabels = {};
+    clearEditedSegments();
+  }
+
+  for (const id of context.volumeIds) _releaseContextVolume(context, id);
+}
+
+export function disposeVisualization() {
+  if (_activeViewerContext) _disposeViewerContext(_activeViewerContext);
+}
+
+function _throwIfViewerLoadStale(context: ViewerResourceContext, signal?: AbortSignal) {
+  if (
+    signal?.aborted ||
+    context.disposed ||
+    _activeViewerContext !== context ||
+    context.generation !== _viewerGeneration
+  ) {
+    throw new DOMException("Viewer load was replaced", "AbortError");
+  }
+}
 // The CT volume currently on the MPR viewports (changes when the progressive
 // full-res upgrade swaps it) and the color LUT used for the labelmap, kept so
 // the segmentation representation can be rebuilt after a volume swap.
@@ -298,26 +479,51 @@ export function subscribeToVolumeProgress(
 // tool registration. Mirrors the guard in compareViewer.ts.
 let _cornerstoneInited = false;
 
-export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivElement, ref3: HTMLDivElement, convertedColorLUT: ColorLUT, ctUrl: string, segUrl: string | undefined, setLoading: React.Dispatch<React.SetStateAction<boolean>>, opts?: { ctImageIds?: string[] }) {
+export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivElement, ref3: HTMLDivElement, convertedColorLUT: ColorLUT, ctUrl: string, segUrl: string | undefined, _setLoading: React.Dispatch<React.SetStateAction<boolean>>, opts?: { ctImageIds?: string[]; resourceKey?: string; signal?: AbortSignal }) {
     if (!_cornerstoneInited) {
         coreInit();
         niftiImageLoaderInit();
         cornerstoneToolsInit();
         _cornerstoneInited = true;
     }
+    disposeVisualization();
+    const generation = ++_viewerGeneration;
+    const key = _resourceKey(opts?.resourceKey ?? ctUrl);
+    const context: ViewerResourceContext = {
+        generation,
+        key,
+        engine: null,
+        segmentationId: null,
+        volumeIds: new Set(),
+        volumeImageIds: new Map(),
+        releasedVolumeIds: new Set(),
+        signal: opts?.signal,
+        disposed: false,
+    };
+    _activeViewerContext = context;
+    context.abortListener = () => _disposeViewerContext(context);
+    opts?.signal?.addEventListener("abort", context.abortListener, { once: true });
+    _throwIfViewerLoadStale(context, opts?.signal);
     _organCentroids = null; // recomputed lazily for the new case's segmentation
     _customSegmentLabels = {};
 
+    try {
     const mainNiftiURL = ctUrl;
     const segmentationURL = segUrl;
-    ToolGroupManager.destroyToolGroup(toolGroupId);
-    disableVolume3D(); // tear down any prior case's 3D engine/tool group
+    const ctVolumeId = `bodymaps-ct-${key}-g${generation}`;
+    const segmentationVolumeId = `bodymaps-seg-${key}-g${generation}`;
+    context.volumeIds.add(ctVolumeId);
+    if (segmentationURL) {
+        context.volumeIds.add(segmentationVolumeId);
+        context.segmentationId = segmentationVolumeId;
+    }
+
     const toolGroup = ToolGroupManager.createToolGroup(toolGroupId);
     if (!toolGroup) {
         throw new Error("Failed to create tool group");
     }
 
-    
+
     cornerstoneTools.addTool(PanTool);
     cornerstoneTools.addTool(ZoomTool);
     cornerstoneTools.addTool(StackScrollTool);
@@ -405,24 +611,23 @@ export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivEle
         currentRenderingEngine.destroy();
         currentRenderingEngine = null;
     }
-    
+
     const renderingEngine = new RenderingEngine(renderingEngineId);
+    context.engine = renderingEngine;
     currentRenderingEngine = renderingEngine;
-    
+
     imageLoader.registerImageLoader("nifti", cornerstoneNiftiImageLoader);
     // The CT stack either streams from a NIfTI URL (dataset cases / sessions) or is a
     // set of already-registered DICOM imageIds (local "open DICOM folder" flow).
     const imageIds = opts?.ctImageIds ?? (await createNiftiImageIdsAndCacheMetadata({ url: mainNiftiURL }));
+    _claimVolumeImages(context, ctVolumeId, imageIds);
+    _throwIfViewerLoadStale(context, opts?.signal);
     const segmentationImageIds = segmentationURL
     ? await createNiftiImageIdsAndCacheMetadata({ url: segmentationURL })
     : [];
-    // Dataset navigations are full page reloads, so the fixed volumeId never collides.
-    // Local DICOM opens happen within one SPA session (upload → view → back → open
-    // another folder), so each load needs a fresh id or the cache serves the old scan.
-    const ctVolumeId = opts?.ctImageIds ? `dicomVolume-${Date.now()}` : volumeId;
-    _currentCtVolumeId = ctVolumeId;
-    _lastColorLUT = convertedColorLUT;
-    
+    _claimVolumeImages(context, segmentationVolumeId, segmentationImageIds);
+    _throwIfViewerLoadStale(context, opts?.signal);
+
     const viewportInputArray = [
         {
             viewportId: viewportId1,
@@ -472,56 +677,65 @@ export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivEle
     renderingEngine.setViewports(viewportInputArray);
 
     const volume = await volumeLoader.createAndCacheVolume(ctVolumeId, { imageIds });
+    _throwIfViewerLoadStale(context, opts?.signal);
     await volume.load();
+    _throwIfViewerLoadStale(context, opts?.signal);
     await setVolumesForViewports(
         renderingEngine,
         [{ volumeId: ctVolumeId }],
         viewportInputArray.map((viewport) => viewport.viewportId)
     );
+    _throwIfViewerLoadStale(context, opts?.signal);
 
     renderingEngine.renderViewports(viewportInputArray.map((viewport) => viewport.viewportId));
 
     if (segmentationURL && segmentationImageIds.length > 0 && segmentation) {
-        const segmentationVolume = await volumeLoader.createAndCacheVolume(segmentationId, {
+        const segmentationVolume = await volumeLoader.createAndCacheVolume(segmentationVolumeId, {
             imageIds: segmentationImageIds
         });
-
+        _throwIfViewerLoadStale(context, opts?.signal);
         await segmentationVolume.load();
+        _throwIfViewerLoadStale(context, opts?.signal);
 
-        segmentation.segmentationStyle.setStyle({ type: SegmentationRepresentations.Labelmap, segmentationId: segmentationId }, DEFAULT_SEGMENTATION_CONFIG);
+        segmentation.segmentationStyle.setStyle({ type: SegmentationRepresentations.Labelmap, segmentationId: segmentationVolumeId }, DEFAULT_SEGMENTATION_CONFIG);
         segmentation.removeAllSegmentations();
         segmentation.addSegmentations([
             {
-                segmentationId,
+                segmentationId: segmentationVolumeId,
                 representation: {
                     type: SegmentationRepresentations.Labelmap,
                     data: {
                         imageIds: segmentationImageIds,
-                        volumeId: segmentationId
+                        volumeId: segmentationVolumeId
                     },
                 },
             },
         ]);
 
-        viewportInputArray.forEach(async (viewport) => {
+        // Wait until every viewport owns its representation before reporting that the
+        // viewer is ready. Challenge mode hides the ground-truth segments as soon as
+        // loading ends; letting these promises float races that visibility update and
+        // can leave the default labelmap painted over the CT.
+        await Promise.all(viewportInputArray.map(async (viewport) => {
             await segmentation.addSegmentationRepresentations(viewport.viewportId, [
                 {
-                    segmentationId,
+                    segmentationId: segmentationVolumeId,
                     type: csToolsEnums.SegmentationRepresentations.Labelmap,
                     config: {
                         colorLUTOrIndex: convertedColorLUT
                     }
                 }
             ]);
-            if (segmentationURL && segmentationImageIds.length > 0) {
-
-            segmentation.activeSegmentation.setActiveSegmentation(viewport.viewportId, segmentationId);
-            }
-        });
+            segmentation.activeSegmentation.setActiveSegmentation(viewport.viewportId, segmentationVolumeId);
+        }));
+        _throwIfViewerLoadStale(context, opts?.signal);
     }
 
+    _throwIfViewerLoadStale(context, opts?.signal);
+    _currentCtVolumeId = ctVolumeId;
+    segmentationId = segmentationURL ? segmentationVolumeId : "";
+    _lastColorLUT = convertedColorLUT;
     renderingEngine.renderViewports(viewportInputArray.map((viewport) => viewport.viewportId));
-    setLoading(false);
 
     // Local DICOM can be any modality (MR, PET, …), so the CT window presets are
     // meaningless — seed the viewer with the scan's *own* VOI from the DICOM header
@@ -547,6 +761,11 @@ export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivEle
         renderingEngine: renderingEngine,
         volumeId: ctVolumeId,
         initialVoi,
+        dispose: () => _disposeViewerContext(context),
+    }
+    } catch (error) {
+        _disposeViewerContext(context);
+        throw error;
     }
 }
 
@@ -752,7 +971,7 @@ export function registerNewSegmentColor(segmentIndex: number, color: Color) {
         color
       );
     } catch {
-      // viewport not yet initialised 
+      // viewport not yet initialised
     }
   }
   if (currentRenderingEngine) {
@@ -869,14 +1088,14 @@ export function getMaskEditHistoryState(): { canUndo: boolean; canRedo: boolean 
 }
 
 // Fires whenever any stroke (or undo/redo of one) changes the labelmap.
-export function subscribeToSegmentationEdits(cb: () => void): () => void {
-  const handler = () => {
-    // Any edit (brush/eraser strokes fire this natively; every other edit path
-    // routes through _notifySegmentationChanged, which fires the same event) —
-    // mark whichever segment is currently targeted so the 3D pane knows to
-    // extract a live mesh for it instead of trusting the stale server GLB.
-    markSegmentEdited(_activeEditSegment);
-    cb();
+export function subscribeToSegmentationEdits(cb: (detail?: SegmentationEditDetail) => void): () => void {
+  const handler = (event: Event) => {
+    if (_remoteSegmentationEventDepth > 0) return;
+    const detail = (event as CustomEvent).detail as SegmentationEditDetail | undefined;
+    // Static server meshes become stale after any local edit, so the 3D pane
+    // switches the affected segment to a live marching-cubes mesh.
+    markSegmentEdited(detail?.segmentIndex ?? _activeEditSegment);
+    cb(detail);
   };
   eventTarget.addEventListener(
     csToolsEnums.Events.SEGMENTATION_DATA_MODIFIED,
@@ -903,6 +1122,107 @@ export function markSegmentEdited(segmentIndex: number) {
 
 export function clearEditedSegments() {
   _editedSegmentIndices.clear();
+}
+
+export type SegmentationEditDetail = {
+  modifiedSlicesToUse?: number[];
+  segmentIndex?: number;
+};
+
+export type MaskRange = {
+  start: number;
+  length: number;
+  before: number;
+  after: number;
+};
+
+let _remoteSegmentationEventDepth = 0;
+
+/** Snapshot used to diff only slices Cornerstone says a local stroke modified. */
+export function createSegmentationShadow(): Uint8Array | null {
+  const current = getSegmentationExport();
+  if (!current) return null;
+  const shadow = new Uint8Array(current.data.length);
+  for (let i = 0; i < current.data.length; i++) shadow[i] = Number(current.data[i]);
+  return shadow;
+}
+
+/** Build constant before/after runs and advance the caller's shadow in place. */
+export function diffSegmentationFromShadow(
+  shadow: Uint8Array,
+  modifiedSlices?: number[]
+): MaskRange[] {
+  const current = getSegmentationExport();
+  if (!current || current.data.length !== shadow.length) return [];
+  const [width, height, depth] = current.dimensions;
+  const sliceSize = width * height;
+  const slices = modifiedSlices?.length
+    ? [...new Set(modifiedSlices.filter((slice) => slice >= 0 && slice < depth))].sort((a, b) => a - b)
+    : Array.from({ length: depth }, (_, index) => index);
+  const ranges: MaskRange[] = [];
+  let active: MaskRange | null = null;
+  for (const slice of slices) {
+    const first = slice * sliceSize;
+    const end = Math.min(first + sliceSize, current.data.length);
+    for (let index = first; index < end; index++) {
+      const before = shadow[index];
+      const after = Number(current.data[index]);
+      if (before === after) continue;
+      shadow[index] = after;
+      if (
+        active &&
+        active.start + active.length === index &&
+        active.before === before &&
+        active.after === after
+      ) {
+        active.length += 1;
+      } else {
+        active = { start: index, length: 1, before, after };
+        ranges.push(active);
+      }
+    }
+    active = null; // never merge across an uninspected slice boundary
+  }
+  return ranges;
+}
+
+/** Apply server-ordered ranges without re-emitting them as local brush strokes. */
+export function applyRemoteMaskRanges(ranges: MaskRange[], shadow?: Uint8Array | null): void {
+  const volume = cache.getVolume(segmentationId);
+  const vm = volume?.voxelManager;
+  if (!volume || !vm || !ranges.length) return;
+  const scalar = vm.getCompleteScalarDataArray?.() as
+    | Uint8Array
+    | Uint16Array
+    | Float32Array
+    | undefined;
+  const modifiedSlices = new Set<number>();
+  const modifiedSegments = new Set<number>();
+  const sliceSize = volume.dimensions[0] * volume.dimensions[1];
+  for (const range of ranges) {
+    if (range.before > 0) modifiedSegments.add(range.before);
+    if (range.after > 0) modifiedSegments.add(range.after);
+    const end = range.start + range.length;
+    for (let index = range.start; index < end; index++) {
+      if (scalar) scalar[index] = range.after;
+      else vm.setAtIndex(index, range.after);
+      if (shadow && index < shadow.length) shadow[index] = range.after;
+    }
+    const firstSlice = Math.floor(range.start / sliceSize);
+    const lastSlice = Math.floor((end - 1) / sliceSize);
+    for (let slice = firstSlice; slice <= lastSlice; slice++) modifiedSlices.add(slice);
+  }
+  for (const segmentIndex of modifiedSegments) markSegmentEdited(segmentIndex);
+  _remoteSegmentationEventDepth += 1;
+  try {
+    segmentation.triggerSegmentationEvents.triggerSegmentationDataModified(
+      segmentationId,
+      [...modifiedSlices]
+    );
+  } finally {
+    _remoteSegmentationEventDepth -= 1;
+  }
+  currentRenderingEngine?.render();
 }
 
 export type LabelmapExport = {
@@ -1044,6 +1364,99 @@ export function removeMeasurement(uid: string) {
   currentRenderingEngine?.render();
 }
 
+export type SharedMeasurement = {
+  id: string;
+  tool: string;
+  points: number[][];
+  polyline: number[][];
+  text: string;
+  label: string;
+  frame_of_reference: string;
+  metadata: Record<string, unknown>;
+  revision?: number;
+};
+
+let _remoteMeasurementEventDepth = 0;
+
+function finitePointList(value: unknown): number[][] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((point) => Array.isArray(point) && point.length === 3)
+    .map((point) => (point as number[]).map(Number))
+    .filter((point) => point.every(Number.isFinite));
+}
+
+/** Serialize only portable world-coordinate fields; cached statistics stay local. */
+export function serializeMeasurement(uid: string): SharedMeasurement | null {
+  const a = annotation.state.getAnnotation(uid) as any;
+  if (!a?.annotationUID || !MEASUREMENT_TOOL_NAMES.includes(a?.metadata?.toolName)) return null;
+  const metadata = a.metadata ?? {};
+  return {
+    id: String(a.annotationUID),
+    tool: String(metadata.toolName),
+    points: finitePointList(a?.data?.handles?.points),
+    polyline: finitePointList(a?.data?.contour?.polyline),
+    text: String(a?.data?.text ?? ""),
+    label: String(a?.data?.label ?? ""),
+    frame_of_reference: String(metadata.FrameOfReferenceUID ?? ""),
+    metadata: {
+      referencedImageId: metadata.referencedImageId,
+      viewPlaneNormal: metadata.viewPlaneNormal,
+      viewUp: metadata.viewUp,
+      FrameOfReferenceUID: metadata.FrameOfReferenceUID,
+    },
+  };
+}
+
+export function applyRemoteMeasurement(shared: SharedMeasurement): void {
+  const engine = currentRenderingEngine;
+  if (!engine || !MEASUREMENT_TOOL_NAMES.includes(shared.tool as MeasurementToolName)) return;
+  const viewport = engine.getViewport(viewportId1);
+  if (!viewport?.element) return;
+  const existing = annotation.state.getAnnotation(shared.id);
+  _remoteMeasurementEventDepth += 1;
+  try {
+    if (existing) annotation.state.removeAnnotation(shared.id);
+    const metadata = shared.metadata ?? {};
+    annotation.state.addAnnotation(
+      {
+        annotationUID: shared.id,
+        highlighted: false,
+        invalidated: true,
+        metadata: {
+          toolName: shared.tool,
+          referencedImageId: metadata.referencedImageId,
+          viewPlaneNormal: metadata.viewPlaneNormal,
+          viewUp: metadata.viewUp,
+          FrameOfReferenceUID: shared.frame_of_reference || metadata.FrameOfReferenceUID,
+        },
+        data: {
+          handles: { points: shared.points },
+          contour: shared.polyline.length ? { polyline: shared.polyline, closed: true } : undefined,
+          text: shared.text,
+          label: shared.label,
+        },
+      } as any,
+      viewport.element
+    );
+  } finally {
+    _remoteMeasurementEventDepth -= 1;
+  }
+  engine.render();
+}
+
+export function removeRemoteMeasurement(uid: string): void {
+  _remoteMeasurementEventDepth += 1;
+  try {
+    annotation.state.removeAnnotation(uid);
+  } catch {
+    /* already removed */
+  } finally {
+    _remoteMeasurementEventDepth -= 1;
+  }
+  currentRenderingEngine?.render();
+}
+
 // Moves the crosshair to the annotation and returns the target (so the caller
 // can also sync its own crosshair state / the 3D view).
 export function jumpToMeasurement(uid: string): [number, number, number] | null {
@@ -1086,9 +1499,11 @@ type MprViewport = {
   scroll(delta?: number): void;
   getNumberOfSlices(): number;
   getSliceIndex(): number;
+  getCamera(): { focalPoint?: Point3; viewPlaneNormal?: Point3 };
   flip(flipDirection: { flipHorizontal?: boolean; flipVertical?: boolean }): void;
   getRotation(): number;
   setRotation(rotation: number): void;
+  worldToCanvas(world: Point3): Point2;
   render(): void;
 };
 
@@ -1184,6 +1599,54 @@ export function setPaneSliceIndex(pane: CinePane, index: number): void {
   if (delta !== 0) viewport.scroll(delta);
 }
 
+export function worldToPaneCanvas(
+  pane: CinePane,
+  world: [number, number, number]
+): [number, number] | null {
+  const viewport = _getMprViewport(pane);
+  if (!viewport) return null;
+  try {
+    const point = viewport.worldToCanvas(world as Point3);
+    return [Number(point[0]), Number(point[1])];
+  } catch {
+    return null;
+  }
+}
+
+// Project a world-space marker only while its point is near the pane currently on
+// screen. worldToCanvas alone projects points from every depth onto the active plane,
+// which made pinned notes appear to follow users through the entire scan. Tolerance is
+// expressed in slices so anisotropic CTs remain forgiving without a fixed-mm guess.
+export function worldToVisiblePaneCanvas(
+  pane: CinePane,
+  world: [number, number, number],
+  toleranceSlices = 1.25
+): [number, number] | null {
+  const viewport = _getMprViewport(pane);
+  if (!viewport) return null;
+  try {
+    const camera = viewport.getCamera();
+    const focalPoint = camera.focalPoint;
+    const normal = camera.viewPlaneNormal;
+    if (!focalPoint || !normal) return null;
+    const distanceMm = Math.abs(
+      (world[0] - focalPoint[0]) * normal[0]
+      + (world[1] - focalPoint[1]) * normal[1]
+      + (world[2] - focalPoint[2]) * normal[2]
+    );
+    const volume = _currentCtVolumeId ? cache.getVolume(_currentCtVolumeId) : undefined;
+    const measuredSpacing = volume
+      ? csCoreUtils.getSpacingInNormalDirection(volume, normal)
+      : 1;
+    const sliceSpacing = Number.isFinite(measuredSpacing) && measuredSpacing > 0 ? measuredSpacing : 1;
+    const toleranceMm = Math.max(2, sliceSpacing * Math.max(0, toleranceSlices));
+    if (!Number.isFinite(distanceMm) || distanceMm > toleranceMm) return null;
+    return worldToPaneCanvas(pane, world);
+  } catch {
+    return null;
+  }
+}
+
 // Live slice index read directly from the viewport — use this instead of the
 // (possibly one-render-stale) React `sliceInfo` state whenever you need the
 // EXACT slice the user is looking at right now (e.g. marking an endpoint).
@@ -1261,6 +1724,7 @@ export function subscribeToMeasurementChanges(
 ): () => void {
   const names = MEASUREMENT_TOOL_NAMES as readonly string[];
   const make = (kind: MeasurementChangeKind) => (evt: Event) => {
+    if (_remoteMeasurementEventDepth > 0) return;
     const a = (evt as CustomEvent).detail?.annotation;
     if (!a?.annotationUID || !names.includes(a?.metadata?.toolName)) return;
     cb(kind, toSummary(a));
@@ -1270,10 +1734,99 @@ export function subscribeToMeasurementChanges(
     [cornerstoneTools.Enums.Events.ANNOTATION_MODIFIED, make("modified") as EventListener],
     [cornerstoneTools.Enums.Events.ANNOTATION_REMOVED, make("removed") as EventListener],
   ];
+  const historyRedo = ((evt: Event) => {
+    if (_remoteMeasurementEventDepth > 0) return;
+    const annotationUid = (evt as CustomEvent).detail?.id as unknown;
+    const restored = typeof annotationUid === "string" ? annotation.state.getAnnotation(annotationUid) : null;
+    const toolName = restored?.metadata?.toolName as unknown;
+    if (!restored?.annotationUID || typeof toolName !== "string" || !names.includes(toolName)) return;
+    cb("completed", toSummary(restored));
+  }) as EventListener;
+  pairs.push(["CORNERSTONE_TOOLS_HISTORY_REDO", historyRedo]);
   for (const [name, handler] of pairs) eventTarget.addEventListener(name, handler);
   return () => {
     for (const [name, handler] of pairs) eventTarget.removeEventListener(name, handler);
   };
+}
+
+export type SharedCamera = {
+  focalPoint?: number[];
+  position?: number[];
+  viewUp?: number[];
+  viewPlaneNormal?: number[];
+  parallelScale?: number;
+  flipHorizontal?: boolean;
+  flipVertical?: boolean;
+};
+
+export type SharedMprView = {
+  cameras: Partial<Record<CinePane, SharedCamera>>;
+  crosshair: [number, number, number] | null;
+};
+
+function cameraForShare(camera: any): SharedCamera {
+  const copyVector = (value: unknown) => Array.isArray(value) || ArrayBuffer.isView(value)
+    ? Array.from(value as ArrayLike<number>, Number)
+    : undefined;
+  return {
+    focalPoint: copyVector(camera?.focalPoint),
+    position: copyVector(camera?.position),
+    viewUp: copyVector(camera?.viewUp),
+    viewPlaneNormal: copyVector(camera?.viewPlaneNormal),
+    parallelScale: Number.isFinite(camera?.parallelScale) ? Number(camera.parallelScale) : undefined,
+    flipHorizontal: Boolean(camera?.flipHorizontal),
+    flipVertical: Boolean(camera?.flipVertical),
+  };
+}
+
+export function getSharedMprView(): SharedMprView | null {
+  const engine = currentRenderingEngine;
+  if (!engine) return null;
+  const cameras: SharedMprView["cameras"] = {};
+  for (const pane of Object.keys(CINE_VIEWPORT_BY_PANE) as CinePane[]) {
+    try {
+      cameras[pane] = cameraForShare(engine.getViewport(CINE_VIEWPORT_BY_PANE[pane]).getCamera());
+    } catch {
+      /* viewport not ready */
+    }
+  }
+  return { cameras, crosshair: getCrosshairMm() };
+}
+
+export function applySharedMprView(shared: SharedMprView): void {
+  const engine = currentRenderingEngine;
+  if (!engine) return;
+  for (const pane of Object.keys(shared.cameras) as CinePane[]) {
+    const camera = shared.cameras[pane];
+    if (!camera) continue;
+    try {
+      engine.getViewport(CINE_VIEWPORT_BY_PANE[pane]).setCamera(camera as never);
+    } catch {
+      /* viewport may have been replaced during reconnect */
+    }
+  }
+  if (shared.crosshair) moveCornerstoneCrosshairToMm(shared.crosshair);
+  engine.render();
+}
+
+export function subscribeToMprViewChanges(cb: (view: SharedMprView) => void): () => void {
+  const engine = currentRenderingEngine;
+  if (!engine) return () => undefined;
+  const cleanups: Array<() => void> = [];
+  for (const viewportId of Object.values(CINE_VIEWPORT_BY_PANE)) {
+    try {
+      const viewport = engine.getViewport(viewportId);
+      const handler = () => {
+        const view = getSharedMprView();
+        if (view) cb(view);
+      };
+      viewport.element.addEventListener(Enums.Events.CAMERA_MODIFIED, handler);
+      cleanups.push(() => viewport.element.removeEventListener(Enums.Events.CAMERA_MODIFIED, handler));
+    } catch {
+      /* viewport not ready */
+    }
+  }
+  return () => cleanups.forEach((cleanup) => cleanup());
 }
 
 // ---------------------------------------------------------------------------
@@ -1372,12 +1925,22 @@ async function _rebuildSegmentationRepresentations() {
  */
 export async function upgradeCtVolume(fullResCtUrl: string): Promise<string | null> {
   const engine = currentRenderingEngine;
-  if (!engine) return null;
+  const context = _activeViewerContext;
+  if (!engine || !context || context.disposed) return null;
+  const previousVolumeId = _currentCtVolumeId;
+  const imageIds: string[] = [];
+  let newVolumeId: string | null = null;
+  let swappedToNewVolume = false;
   try {
-    const imageIds = await createNiftiImageIdsAndCacheMetadata({ url: fullResCtUrl });
-    const newVolumeId = `ctVolume-hd-${Date.now()}`;
+    imageIds.push(...await createNiftiImageIdsAndCacheMetadata({ url: fullResCtUrl }));
+    newVolumeId = `bodymaps-ct-${context.key}-g${context.generation}-hd`;
+    context.volumeIds.add(newVolumeId);
+    _claimVolumeImages(context, newVolumeId, imageIds);
+    _throwIfViewerLoadStale(context);
     const volume = await volumeLoader.createAndCacheVolume(newVolumeId, { imageIds });
+    _throwIfViewerLoadStale(context);
     await volume.load();
+    _throwIfViewerLoadStale(context);
 
     // Preserve each pane's camera so the swap is visually seamless.
     const cameras = new Map<string, unknown>();
@@ -1389,6 +1952,8 @@ export async function upgradeCtVolume(fullResCtUrl: string): Promise<string | nu
       }
     }
     await setVolumesForViewports(engine, [{ volumeId: newVolumeId }], MPR_VIEWPORT_IDS);
+    swappedToNewVolume = true;
+    _throwIfViewerLoadStale(context);
     for (const viewportId of MPR_VIEWPORT_IDS) {
       const camera = cameras.get(viewportId);
       if (!camera) continue;
@@ -1399,15 +1964,34 @@ export async function upgradeCtVolume(fullResCtUrl: string): Promise<string | nu
       }
     }
     await _rebuildSegmentationRepresentations();
+    _throwIfViewerLoadStale(context);
 
     // The shaded 3D volume view renders its own private copy of the CT (never the
     // shared volume — see _volume3DCopyId), so there is nothing to re-target here.
     // If it's open it keeps its current copy; the next open copies the new volume.
 
-    _currentCtVolumeId = newVolumeId;
     engine.renderViewports([...MPR_VIEWPORT_IDS]);
+    _currentCtVolumeId = newVolumeId;
+    if (previousVolumeId && previousVolumeId !== newVolumeId) {
+      _releaseContextVolume(context, previousVolumeId);
+    }
     return newVolumeId;
   } catch (e) {
+    if (newVolumeId) {
+      const rolledBack = await rollbackVolumeUpgrade({
+        swappedToNewVolume,
+        previousVolumeId,
+        restorePreviousVolume: async (volumeId) => {
+          await setVolumesForViewports(engine, [{ volumeId }], MPR_VIEWPORT_IDS);
+          engine.renderViewports([...MPR_VIEWPORT_IDS]);
+        },
+        releaseNewVolume: () => _releaseContextVolume(context, newVolumeId!),
+      });
+      if (!rolledBack) {
+        console.warn("Full-res upgrade rollback failed; retaining the HD volume cache.");
+      }
+    }
+    if (e instanceof DOMException && e.name === "AbortError") return null;
     console.warn("Full-res upgrade failed; keeping the current volume.", e);
     return null;
   }
@@ -1686,8 +2270,31 @@ let _lastVolume3DPreset: string = VOLUME_3D_PRESETS[0].name;
 // stays black (its frames were "already uploaded" — into the MPR context) and the
 // next MPR render draws the CT through a foreign handle (black CT, labelmap only).
 let _volume3DCopyId: string | null = null;
+const _volume3DOperations = createOperationGeneration("Volume rendering was disabled");
+let _volume3DEngineOwnerGeneration: number | null = null;
+let _volume3DCopyOwnerGeneration: number | null = null;
 
-async function _getOrCreateVolume3DCopy(sourceVolumeId: string): Promise<string | null> {
+function _removeVolumeAndImages(volumeIdToRemove: string) {
+  try {
+    const volume = cache.getVolume(volumeIdToRemove);
+    const imageIds: string[] = volume?.imageIds ?? [];
+    _removeCachedVolume(volumeIdToRemove);
+    for (const imageId of imageIds) {
+      try {
+        cache.removeImageLoadObject(imageId, { force: true });
+      } catch {
+        /* image already evicted */
+      }
+    }
+  } catch {
+    /* volume already evicted */
+  }
+}
+
+async function _getOrCreateVolume3DCopy(
+  sourceVolumeId: string,
+  assertCurrent: () => void
+): Promise<string | null> {
   const copyId = `${sourceVolumeId}-vr3d`;
   if (cache.getVolume(copyId)) return copyId;
   try {
@@ -1705,6 +2312,7 @@ async function _getOrCreateVolume3DCopy(sourceVolumeId: string): Promise<string 
       const slices: any[] = [];
       for (const imageId of source.imageIds) {
         slices.push(await imageLoader.loadAndCacheImage(imageId));
+        assertCurrent();
       }
       const pixelsOf = (img: any) =>
         img?.voxelManager?.getScalarData?.() ?? img?.getPixelData?.();
@@ -1729,9 +2337,42 @@ async function _getOrCreateVolume3DCopy(sourceVolumeId: string): Promise<string 
     });
     return copyId;
   } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
     console.warn("Volume rendering: could not create the 3D volume copy.", e);
     return null;
   }
+}
+
+function _throwIfVolume3DOperationStale(
+  context: ViewerResourceContext,
+  operationGeneration: number
+) {
+  _throwIfViewerLoadStale(context);
+  _volume3DOperations.throwIfStale(operationGeneration);
+}
+
+function _cleanupVolume3DOperation(operationGeneration: number, copyId: string | null) {
+  if (_volume3DEngineOwnerGeneration === operationGeneration) {
+    try {
+      ToolGroupManager.destroyToolGroup(volume3DToolGroupId);
+    } catch {
+      /* tool group already gone */
+    }
+    try {
+      (getRenderingEngine(volume3DEngineId) as RenderingEngine | undefined)?.destroy();
+    } catch {
+      /* engine already gone */
+    }
+    _volume3DEngineOwnerGeneration = null;
+  }
+
+  if (!copyId) return;
+  if (_volume3DCopyId === copyId && _volume3DCopyOwnerGeneration !== operationGeneration) return;
+  if (_volume3DCopyOwnerGeneration === operationGeneration) {
+    _volume3DCopyId = null;
+    _volume3DCopyOwnerGeneration = null;
+  }
+  _removeVolumeAndImages(copyId);
 }
 
 export function applyVolume3DPreset(presetName: string) {
@@ -1765,7 +2406,13 @@ export async function enableVolume3D(
   element: HTMLDivElement,
   presetName: string = _lastVolume3DPreset
 ): Promise<boolean> {
-  if (!_currentCtVolumeId || !cache.getVolume(_currentCtVolumeId)) return false;
+  const context = _activeViewerContext;
+  const sourceVolumeId = _currentCtVolumeId;
+  if (!context || !sourceVolumeId || !cache.getVolume(sourceVolumeId)) return false;
+  const operationGeneration = _volume3DOperations.begin();
+  let copyId: string | null = null;
+  let completed = false;
+  const assertCurrent = () => _throwIfVolume3DOperationStale(context, operationGeneration);
   try {
     try {
       cornerstoneTools.addTool(TrackballRotateTool);
@@ -1773,15 +2420,19 @@ export async function enableVolume3D(
       /* already registered */
     }
     await _waitForLayout(element);
+    assertCurrent();
 
     // Never hand the MPR volume to this engine — render a private copy with its
     // own GL texture (see the note by _volume3DCopyId).
-    const copyId = await _getOrCreateVolume3DCopy(_currentCtVolumeId);
+    copyId = await _getOrCreateVolume3DCopy(sourceVolumeId, assertCurrent);
+    assertCurrent();
     if (!copyId) return false;
     _volume3DCopyId = copyId;
+    _volume3DCopyOwnerGeneration = operationGeneration;
 
     // Dedicated engine — never share the MPR engine (see the note by its id).
     const engine = _getVolume3DEngine();
+    _volume3DEngineOwnerGeneration = operationGeneration;
     engine.enableElement({
       viewportId: volume3DViewportId,
       type: Enums.ViewportType.VOLUME_3D,
@@ -1795,6 +2446,7 @@ export async function enableVolume3D(
     // Canonical VOLUME_3D recipe: attach the volume, THEN the preset (setPreset
     // no-ops if the volume actor isn't present yet), then frame + render.
     await viewport.setVolumes([{ volumeId: copyId }]);
+    assertCurrent();
     viewport.setProperties({ preset: presetName });
     _lastVolume3DPreset = presetName;
     // Match the on-screen canvas to the (now laid-out) element before framing.
@@ -1827,14 +2479,19 @@ export async function enableVolume3D(
     });
     toolGroup.addViewport(volume3DViewportId, volume3DEngineId);
     viewport.render();
+    completed = true;
     return true;
   } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") return false;
     console.warn("Volume rendering unavailable:", e);
     return false;
+  } finally {
+    if (!completed) _cleanupVolume3DOperation(operationGeneration, copyId);
   }
 }
 
 export function disableVolume3D() {
+  _volume3DOperations.invalidate();
   try {
     ToolGroupManager.destroyToolGroup(volume3DToolGroupId);
   } catch {
@@ -1856,21 +2513,14 @@ export function disableVolume3D() {
   // rendering isn't available" even though the GPU is fine.
   try {
     if (_volume3DCopyId) {
-      const copyVolume = cache.getVolume(_volume3DCopyId);
-      const sliceImageIds: string[] = copyVolume?.imageIds ?? [];
-      cache.removeVolumeLoadObject(_volume3DCopyId);
-      for (const imageId of sliceImageIds) {
-        try {
-          cache.removeImageLoadObject(imageId, { force: true });
-        } catch {
-          /* slice already evicted */
-        }
-      }
+      _removeVolumeAndImages(_volume3DCopyId);
     }
   } catch {
     /* already evicted */
   }
   _volume3DCopyId = null;
+  _volume3DCopyOwnerGeneration = null;
+  _volume3DEngineOwnerGeneration = null;
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
@@ -2173,7 +2823,7 @@ export function getOrganCentroids(): Record<number, [number, number, number]> | 
 // Marching cube runs directly on the in-memory label map (no server involvement)
 
 export type LiveMeshResult = {
-  positions: Float32Array; 
+  positions: Float32Array;
   indices: Uint32Array;
 };
 
@@ -2602,13 +3252,18 @@ function _notifySegmentationChanged() {
     // boolean ops, copy-across-slices, CPR paint, etc.) bypass the brush pipeline entirely,
     // so without this call, edits land in the raw array — visible to a fresh marching-cubes
     // pass (3D) — but never make it to the 2D panes' GPU texture.
-    (cornerstoneTools as any).utilities?.segmentation?.triggerSegmentationDataModified?.(segmentationId);
+    segmentation.triggerSegmentationEvents.triggerSegmentationDataModified(
+      segmentationId,
+      undefined,
+      _activeEditSegment
+    );
   } catch {
-    /* fall through to the plain event dispatch below */
+    eventTarget.dispatchEvent(
+      new CustomEvent(csToolsEnums.Events.SEGMENTATION_DATA_MODIFIED, {
+        detail: { segmentationId, segmentIndex: _activeEditSegment },
+      })
+    );
   }
-  eventTarget.dispatchEvent(
-    new CustomEvent(csToolsEnums.Events.SEGMENTATION_DATA_MODIFIED, { detail: { segmentationId } })
-  );
   _dispatchingOwnEdit = false;
   currentRenderingEngine?.renderViewports([...MPR_VIEWPORT_IDS]);
   currentRenderingEngine?.render();
@@ -2626,7 +3281,7 @@ eventTarget.addEventListener(csToolsEnums.Events.SEGMENTATION_DATA_MODIFIED, () 
 });
 
 // ============================================================================
-// SECTION: Undo / Redo History 
+// SECTION: Undo / Redo History
 // ============================================================================
 
 
@@ -4682,7 +5337,6 @@ export function extractSegmentSurface(
 
   return { positions, indices };
 }
-
 // ============================================================================
 // SECTION: Smoothing (median) — mirrors Slicer's Smoothing effect's Median
 // method: same "kernel size in mm -> voxel radius" conversion.
@@ -4819,7 +5473,7 @@ export function applySmoothing(
       for (let v = 0; v < filtered.length; v++) if (filtered[v]) survivingCount++;
     }
     if (survivingCount === 0 && !hasThin) continue; // segment was already empty — nothing to do
-    let cur = filtered;
+    const cur = filtered;
     // Thin components are never smoothed — restore them verbatim.
     for (let li = 0; li < cur.length; li++) if (thin[li]) cur[li] = 1;
 
