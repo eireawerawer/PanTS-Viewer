@@ -19,3 +19,15 @@ flask-server/pants-dev.db-shm
 
 # Local Claude Code scratch config (launch profiles etc.)
 .claude/
+
+# MaxMind GeoLite2 database for the analytics visitor map. ~60MB and not
+# redistributable; each deploy fetches its own with
+# flask-server/scripts/download_geolite.py.
+flask-server/data/
+
+# Vite's dependency-optimizer cache. Created wherever a dev server is started
+# from; never source.
+.vite/
+
+# Runtime lock held by the inference queue worker.
+sessions/inference_queue/.lock

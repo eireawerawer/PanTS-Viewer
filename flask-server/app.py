@@ -32,13 +32,16 @@ def create_app():
     create_session_dir()
     app = Flask(__name__)
 
-    # Behind nginx, the real scheme and host arrive as X-Forwarded-Proto/Host;
-    # without this Flask sees the proxy's http://127.0.0.1 hop, and the OAuth
-    # redirect_uri (built from request.url_root) comes out http:// and fails to
-    # match what's registered with Google/GitHub. Opt-in because these headers
-    # are client-spoofable when nothing trusted is in front of the app.
+    # Behind nginx, the real scheme, host and client address arrive as
+    # X-Forwarded-Proto/Host/For; without this Flask sees the proxy's
+    # http://127.0.0.1 hop. Two things break on that: the OAuth redirect_uri
+    # (built from request.url_root) comes out http:// and fails to match what's
+    # registered with Google/GitHub, and request.remote_addr is the proxy — so
+    # every visitor geolocates to the server itself and the whole site shares
+    # one rate-limit bucket. Opt-in because these headers are client-spoofable
+    # when nothing trusted is in front of the app.
     if os.environ.get("TRUST_PROXY", "false").lower() == "true":
-        app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
     app.register_blueprint(api_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(auth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
@@ -91,6 +94,11 @@ def create_app():
         purged = auth_store.purge_expired_deletions()
         if purged:
             print(f"[boot] purged {purged} account(s) past the deletion grace period")
+        # Same deal for spent reset tokens: housekeeping, not security — they
+        # are already refused on redemption, this just stops the table growing.
+        dropped = auth_store.purge_expired_reset_tokens()
+        if dropped:
+            print(f"[boot] dropped {dropped} spent password reset token(s)")
     except Exception as e:
         print(f"[boot] account/job store init skipped: {e}")
 

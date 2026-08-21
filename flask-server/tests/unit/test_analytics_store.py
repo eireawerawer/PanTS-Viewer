@@ -372,3 +372,220 @@ def test_people_counts_distinct_browsers_not_events(store):
     assert data["totals"]["events"] == 5
     assert data["totals"]["people"] == 2
     assert data["top_actions"][0]["people"] == 2
+
+
+# ---- where visitors came from ----------------------------------------------
+#
+# The location and device columns are the map's whole substance, and every one
+# of them is written by the server from the request rather than by the client.
+# These tests are mostly about that boundary.
+
+GEO_DE = {
+    "country_code": "DE", "country_name": "Germany", "region": "Berlin",
+    "city": "Berlin", "latitude": 52.52, "longitude": 13.40,
+}
+GEO_US = {
+    "country_code": "US", "country_name": "United States", "region": "Maryland",
+    "city": "Baltimore", "latitude": 39.29, "longitude": -76.61,
+}
+
+
+def test_the_batch_stamps_location_and_device_on_every_row(store):
+    analytics_store, _, user_id = store
+    analytics_store.record_events(
+        [action("upload_start_inference"), page("/upload", 5000)],
+        user_id=user_id, ip="203.0.113.7", geo=GEO_DE, device="mobile",
+    )
+
+    from sqlalchemy import select
+    from models.analytics_event import AnalyticsEvent
+    from models.engine import session_scope
+    with session_scope() as s:
+        rows = s.execute(select(AnalyticsEvent)).scalars().all()
+    assert len(rows) == 2
+    assert {r.ip_address for r in rows} == {"203.0.113.7"}
+    assert {r.country_code for r in rows} == {"DE"}
+    assert {r.city for r in rows} == {"Berlin"}
+    assert {r.device_type for r in rows} == {"mobile"}
+
+
+def test_the_client_cannot_claim_a_country_or_a_device(store):
+    """The same rule that already governs plan and account_type: an event body
+    that names its own location would make the map fiction."""
+    analytics_store, _, user_id = store
+    analytics_store.record_events(
+        [action("upload_start_inference", country_code="ZZ", ip_address="1.2.3.4",
+                device_type="tablet", city="Atlantis")],
+        user_id=user_id, ip="203.0.113.7", geo=GEO_DE, device="desktop",
+    )
+
+    from sqlalchemy import select
+    from models.analytics_event import AnalyticsEvent
+    from models.engine import session_scope
+    with session_scope() as s:
+        row = s.execute(select(AnalyticsEvent)).scalars().one()
+    assert row.country_code == "DE"
+    assert row.city == "Berlin"
+    assert row.ip_address == "203.0.113.7"
+    assert row.device_type == "desktop"
+
+
+def test_a_batch_with_no_location_still_records(store):
+    """Local dev, a private address, or no GeoLite2 database installed. The
+    events are worth more than the columns they can't fill."""
+    analytics_store, _, user_id = store
+    assert analytics_store.record_events(
+        [action("upload_start_inference")], user_id=user_id, ip="127.0.0.1",
+    ) == 1
+
+    start, end = wide_range()
+    assert analytics_store.overview(start, end)["by_country"] == []
+
+
+def test_countries_are_grouped_and_ranked_by_sessions(store):
+    analytics_store, _, user_id = store
+    analytics_store.record_events(
+        [action("viewer_open_case", anon_id="a1", session_id="s1")],
+        user_id=user_id, ip="203.0.113.7", geo=GEO_DE, device="desktop",
+    )
+    analytics_store.record_events(
+        [action("viewer_open_case", anon_id="a2", session_id="s2"),
+         action("report_open", anon_id="a2", session_id="s2")],
+        ip="198.51.100.4", geo=GEO_US, device="mobile",
+    )
+    analytics_store.record_events(
+        [action("viewer_open_case", anon_id="a3", session_id="s3")],
+        ip="198.51.100.9", geo=GEO_US, device="desktop",
+    )
+
+    start, end = wide_range()
+    by_country = analytics_store.overview(start, end)["by_country"]
+    assert [c["country_code"] for c in by_country] == ["US", "DE"]
+    assert by_country[0] == {
+        "country_code": "US", "country_name": "United States",
+        "sessions": 2, "people": 2, "events": 3,
+    }
+
+
+def test_picking_a_country_narrows_the_whole_response(store):
+    """Having clicked into Germany, the feature panels should be Germany's too,
+    or the page is showing two different things at once."""
+    analytics_store, _, user_id = store
+    analytics_store.record_events(
+        [action("viewer_open_case", anon_id="a1", session_id="s1")],
+        user_id=user_id, ip="203.0.113.7", geo=GEO_DE, device="desktop",
+    )
+    analytics_store.record_events(
+        [action("report_open", anon_id="a2", session_id="s2")],
+        ip="198.51.100.4", geo=GEO_US, device="mobile",
+    )
+
+    start, end = wide_range()
+    german = analytics_store.overview(start, end, country="DE")
+    assert german["totals"]["events"] == 1
+    assert [a["name"] for a in german["top_actions"]] == ["viewer_open_case"]
+    assert [d["device_type"] for d in german["by_device"]] == ["desktop"]
+    # Cities are only queried once a country is picked — on the whole world it
+    # would be thousands of rows nothing draws.
+    assert [c["city"] for c in german["by_city"]] == ["Berlin"]
+    assert analytics_store.overview(start, end)["by_city"] == []
+
+
+def test_devices_are_counted_by_session(store):
+    analytics_store, _, _ = store
+    analytics_store.record_events(
+        [action("viewer_open_case", anon_id="a1", session_id="s1"),
+         action("report_open", anon_id="a1", session_id="s1")],
+        ip="203.0.113.7", geo=GEO_DE, device="mobile",
+    )
+    analytics_store.record_events(
+        [action("viewer_open_case", anon_id="a2", session_id="s2")],
+        ip="198.51.100.4", geo=GEO_US, device="desktop",
+    )
+
+    start, end = wide_range()
+    by_device = {d["device_type"]: d for d in analytics_store.overview(*wide_range())["by_device"]}
+    assert by_device["mobile"]["sessions"] == 1
+    assert by_device["desktop"]["sessions"] == 1
+    assert start < end  # the range used above
+
+
+# ---- new vs returning, and the previous period -----------------------------
+#
+# Both need events genuinely older than the window under test, and the client's
+# `ts` can't produce them: record_events clamps a claimed timestamp to MAX_AGE
+# (48 hours), so an event saying it happened last month lands in the last two
+# days. The row has to be moved after the fact.
+
+def backdate(session_id, when):
+    """Move every row of one visit back to `when`."""
+    from sqlalchemy import update
+    from models.analytics_event import AnalyticsEvent
+    from models.engine import session_scope
+    with session_scope() as s:
+        s.execute(
+            update(AnalyticsEvent)
+            .where(AnalyticsEvent.session_id == session_id)
+            .values(created_at=when)
+        )
+
+
+
+def test_a_visitor_seen_before_the_range_counts_as_returning(store):
+    analytics_store, _, _ = store
+    now = utcnow()
+    old = now - timedelta(days=40)
+
+    # anon "a1" was here before the window; "a2" is new to it.
+    analytics_store.record_events([action("viewer_open_case", anon_id="a1", session_id="s0")])
+    backdate("s0", old)
+    analytics_store.record_events(
+        [action("viewer_open_case", anon_id="a1", session_id="s1"),
+         action("viewer_open_case", anon_id="a2", session_id="s2")],
+    )
+
+    split = analytics_store.overview(now - timedelta(days=1), now + timedelta(days=1))
+    assert split["new_vs_returning"] == {"returning": 1, "new": 1}
+
+
+def test_new_and_returning_add_up_to_the_headline_figure(store):
+    analytics_store, _, _ = store
+    analytics_store.record_events([
+        action("viewer_open_case", anon_id=f"a{i}", session_id=f"s{i}") for i in range(5)
+    ])
+
+    data = analytics_store.overview(*wide_range())
+    split = data["new_vs_returning"]
+    assert split["new"] + split["returning"] == data["totals"]["people"] == 5
+
+
+def test_the_previous_period_is_the_window_before_this_one(store):
+    analytics_store, _, _ = store
+    now = utcnow()
+    # Two events fifteen days ago, one today. A ten-day window ending now holds
+    # the one; the ten days before it hold the two.
+    for i in range(2):
+        analytics_store.record_events([
+            action("report_open", anon_id=f"old{i}", session_id=f"olds{i}"),
+        ])
+        backdate(f"olds{i}", now - timedelta(days=15))
+    analytics_store.record_events([action("report_open", anon_id="new", session_id="news")])
+
+    data = analytics_store.overview(now - timedelta(days=10), now + timedelta(minutes=1))
+    assert data["totals"]["events"] == 1
+    assert data["previous"]["events"] == 2
+    assert data["previous"]["people"] == 2
+
+
+def test_hour_and_weekday_buckets_cover_the_events(store):
+    analytics_store, _, _ = store
+    analytics_store.record_events([
+        action("report_open", anon_id="a1", session_id="s1"),
+        action("report_open", anon_id="a2", session_id="s2"),
+    ])
+
+    data = analytics_store.overview(*wide_range())
+    assert sum(h["sessions"] for h in data["by_hour"]) == 2
+    assert sum(w["sessions"] for w in data["by_weekday"]) == 2
+    assert all(0 <= w["weekday"] <= 6 for w in data["by_weekday"])
+    assert all(0 <= h["hour"] <= 23 for h in data["by_hour"])

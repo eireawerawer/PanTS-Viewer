@@ -5,6 +5,8 @@ Routes (registered under <BASE_PATH>/api):
   POST   /auth/register   {email, password, name?}  -> creates account, logs in
   POST   /auth/login      {email, password}         -> logs in
   POST   /auth/logout                               -> revokes session
+  POST   /auth/forgot-password {email}              -> emails a reset link (always 200)
+  POST   /auth/reset-password  {token, password}    -> sets a new password, logs in
   GET    /auth/me                                   -> current user + roles (401 if none)
   PATCH  /auth/me         {name?, account_type?}    -> update name / account type
   POST   /me/plan         {plan}                    -> change plan (no payment)
@@ -16,15 +18,29 @@ Routes (registered under <BASE_PATH>/api):
 """
 
 import json
+import os
 
 from flask import Blueprint, jsonify, make_response, request
 
 from api.auth import (
     COOKIE_NAME, clear_session_cookie, current_user, require_auth, set_session_cookie,
 )
-from services import auth_store, job_store, plan_store, role_store
+from api.rate_limit import Limiter
+from services import auth_store, job_store, mailer, plan_store, role_store
 
 auth_blueprint = Blueprint("auth", __name__)
+
+MIN_PASSWORD_LEN = 8
+
+# Both reset endpoints take no auth, and one of them sends mail on demand.
+# Without a ceiling, a script can empty a mailbox's sending quota, spam a real
+# person's inbox with links they didn't ask for, and grind through reset tokens.
+# An hour-long window because asking for a reset is a rare, deliberate act — a
+# person doing it legitimately does it once or twice, not ten times.
+RESET_WINDOW_S = 3600
+RESET_MAX_PER_WINDOW = 10
+
+_reset_limiter = Limiter(RESET_WINDOW_S)
 
 
 def _json():
@@ -55,8 +71,10 @@ def register():
     password = data.get("password") or ""
     if not email or not password:
         return jsonify({"error": "Email and password are required"}), 400
-    if len(password) < 8:
-        return jsonify({"error": "Password must be at least 8 characters"}), 400
+    if len(password) < MIN_PASSWORD_LEN:
+        return jsonify({
+            "error": f"Password must be at least {MIN_PASSWORD_LEN} characters"
+        }), 400
     try:
         user = auth_store.create_user(email, password, data.get("name"))
     except auth_store.EmailTakenError:
@@ -80,6 +98,102 @@ def logout():
     auth_store.revoke_session(request.cookies.get(COOKIE_NAME))
     resp = make_response(jsonify({"ok": True}), 200)
     return clear_session_cookie(resp)
+
+
+# ---- password reset -------------------------------------------------------
+#
+# The pair of endpoints behind "Forgot password?". The first hands out a link,
+# the second redeems it. Both are unauthenticated by necessity — the person
+# using them is, by definition, the one who can't sign in.
+
+def _reset_link(raw_token: str) -> str:
+    """Where the emailed link points.
+
+    PUBLIC_BASE_URL is the same variable the OAuth callback already depends on,
+    for the same reason: the server has to state its own public address, because
+    request.url_root behind nginx is the proxy hop, not the site.
+    """
+    base = (os.environ.get("PUBLIC_BASE_URL") or request.url_root).rstrip("/")
+    return f"{base}/reset-password?token={raw_token}"
+
+
+def _reset_email(name: str | None, link: str) -> tuple[str, str, str]:
+    """(subject, text, html) for the reset message."""
+    greeting = f"Hi {name}," if name else "Hi,"
+    minutes = auth_store.RESET_TTL_MINUTES
+    text = (
+        f"{greeting}\n\n"
+        "Someone asked to reset the password for your BodyMaps account. If that "
+        "was you, open the link below to choose a new one:\n\n"
+        f"{link}\n\n"
+        f"The link works once and expires in {minutes} minutes.\n\n"
+        "If it wasn't you, you can ignore this email — nothing has changed and "
+        "your current password still works.\n\n"
+        "— BodyMaps\n"
+    )
+    html = (
+        f"<p>{greeting}</p>"
+        "<p>Someone asked to reset the password for your BodyMaps account. "
+        "If that was you, choose a new one here:</p>"
+        f'<p><a href="{link}">Reset your password</a></p>'
+        f"<p>The link works once and expires in {minutes} minutes.</p>"
+        "<p>If it wasn't you, you can ignore this email — nothing has changed "
+        "and your current password still works.</p>"
+        "<p>— BodyMaps</p>"
+    )
+    return "Reset your BodyMaps password", text, html
+
+
+@auth_blueprint.route("/auth/forgot-password", methods=["POST"])
+def forgot_password():
+    """Email a reset link.
+
+    **Always 200, whatever happens.** Not for tidiness: the response is the only
+    thing the caller can observe, so any difference between "sent" and "no such
+    account" turns this into a way to test which email addresses have accounts
+    here. The same reasoning is why authenticate() verifies against a dummy hash
+    for unknown emails. That also means a typo'd address gets the same cheerful
+    answer as a real one, which is why the UI says "if an account exists".
+
+    A mail that fails to send is likewise not reported — the user can't fix our
+    SMTP config, and the failure is on the server's log where someone can.
+    """
+    if _reset_limiter.over(request.remote_addr or "unknown", RESET_MAX_PER_WINDOW):
+        return jsonify({"error": "Too many requests. Try again later."}), 429
+
+    result = auth_store.create_password_reset((_json().get("email") or "").strip())
+    if result is not None:
+        user, raw_token = result
+        subject, text, html = _reset_email(user.get("name"), _reset_link(raw_token))
+        mailer.send(user["email"], subject, text, html)
+
+    return jsonify({"ok": True}), 200
+
+
+@auth_blueprint.route("/auth/reset-password", methods=["POST"])
+def reset_password():
+    """Redeem a reset token and sign the user in.
+
+    Signing them in is the point of doing it here rather than bouncing to the
+    login form: they have just proved they control the mailbox and chosen a
+    password, and asking them to type it again immediately is ceremony.
+    """
+    if _reset_limiter.over(request.remote_addr or "unknown", RESET_MAX_PER_WINDOW):
+        return jsonify({"error": "Too many requests. Try again later."}), 429
+
+    data = _json()
+    password = data.get("password") or ""
+    if len(password) < MIN_PASSWORD_LEN:
+        return jsonify({
+            "error": f"Password must be at least {MIN_PASSWORD_LEN} characters"
+        }), 400
+
+    user = auth_store.reset_password(data.get("token") or "", password)
+    if user is None:
+        return jsonify({
+            "error": "This link has expired or has already been used. Ask for a new one."
+        }), 400
+    return _logged_in_response(user)
 
 
 @auth_blueprint.route("/auth/me", methods=["GET"])
