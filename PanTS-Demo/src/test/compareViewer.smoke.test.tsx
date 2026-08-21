@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -6,7 +6,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // the isolated setup helper so we can verify the page mounts + lays out two panes.
 // vi.hoisted so the mock fn exists when the hoisted vi.mock factory runs.
 const { setupCompare } = vi.hoisted(() => ({ setupCompare: vi.fn() }));
-vi.mock("../helpers/compareViewer", () => ({ setupCompare }));
+vi.mock("../helpers/compareViewer", () => ({
+	setupCompare,
+	getOrganLabelAtPoint: vi.fn(),
+	VIEWPORT_IDS: {
+		aAx: "cmp_a_ax", aSag: "cmp_a_sag", aCor: "cmp_a_cor",
+		bAx: "cmp_b_ax", bSag: "cmp_b_sag", bCor: "cmp_b_cor",
+	},
+	LENGTH_TOOL: "Length",
+	BIDIRECTIONAL_TOOL: "Bidirectional",
+	ANGLE_TOOL: "Angle",
+	PROBE_TOOL: "Probe",
+	ROI_TOOL: "RectangleROI",
+	ELLIPSE_TOOL: "EllipticalROI",
+	FREEHAND_ROI_TOOL: "PlanarFreehandROI",
+	ARROW_TOOL: "ArrowAnnotate",
+	MAGNIFY_TOOL: "AdvancedMagnify",
+}));
 
 import CompareViewerPage from "../routes/CompareViewerPage";
 
@@ -23,6 +39,19 @@ beforeEach(() => {
 		jumpToOrgan: vi.fn(),
 		refit: vi.fn(),
 		resetView: vi.fn(),
+		setFocusedViewport: vi.fn(),
+		setReferenceLines: vi.fn(),
+		flipFocused: vi.fn(),
+		rotateFocused90: vi.fn(),
+		startCine: vi.fn(() => true),
+		stopCine: vi.fn(),
+		setActiveMeasurementTool: vi.fn(),
+		clearMeasurements: vi.fn(),
+		getMeasurementSummaries: vi.fn(() => []),
+		renameMeasurement: vi.fn(),
+		removeMeasurement: vi.fn(),
+		jumpToMeasurement: vi.fn(),
+		subscribeToMeasurementChanges: vi.fn(() => vi.fn()),
 		destroy: vi.fn(),
 	});
 	// resolveCtUrl does a HEAD probe; return not-ok so it falls back to the HF url.
@@ -44,7 +73,13 @@ describe("CompareViewerPage", () => {
 		renderAt("/compare-viewer?a=1&b=2");
 		expect(await screen.findByText("Case 1")).toBeTruthy();
 		expect(await screen.findByText("Case 2")).toBeTruthy();
+
+		// The toolbar (and its Sync group) is hidden by default, like the single viewer's
+		// top toolbar — reveal it via the floating gear, then open the Sync flyout.
+		fireEvent.click(await screen.findByRole("button", { name: /toggle toolbar/i }));
+		fireEvent.click(screen.getByRole("button", { name: /^sync$/i }));
 		expect(screen.getByText(/Link scroll/i)).toBeTruthy();
+
 		// The isolated Cornerstone setup is invoked once with both viewport elements.
 		await vi.waitFor(() => expect(setupCompare).toHaveBeenCalledTimes(1));
 	});

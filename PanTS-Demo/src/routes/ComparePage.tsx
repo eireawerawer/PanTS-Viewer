@@ -76,7 +76,9 @@ function useCaseData(id: string): CaseData {
 
 // Preview thumbnail: local endpoint first, HuggingFace proxy fallback, then a placeholder
 // (mirrors the dashboard Preview's chain). In dev/demo both endpoints 404 → placeholder.
-function Thumbnail({ id }: { id: string }) {
+// `size` picks the CSS modifier — "sm" for the compact chip in the top bar, "lg" (default)
+// for the hero card that's now the page's main content.
+function Thumbnail({ id, size = "lg" }: { id: string; size?: "sm" | "lg" }) {
 	const local = `${API_BASE}/api/get_image_preview/${id}`;
 	const caseIdStr = `PanTS_${id.toString().padStart(8, "0")}`;
 	const hf = `${API_BASE}/api/proxy-image?url=${encodeURIComponent(
@@ -84,10 +86,10 @@ function Thumbnail({ id }: { id: string }) {
 	)}`;
 	const [stage, setStage] = useState<0 | 1 | 2>(0);
 	useEffect(() => setStage(0), [id]);
-	if (stage === 2) return <div className="cmp-thumb cmp-thumb--empty">No preview</div>;
+	if (stage === 2) return <div className={`cmp-thumb cmp-thumb--${size} cmp-thumb--empty`}>No preview</div>;
 	return (
 		<img
-			className="cmp-thumb"
+			className={`cmp-thumb cmp-thumb--${size}`}
 			src={stage === 0 ? local : hf}
 			alt={`Case ${id} preview`}
 			onError={() => setStage((s) => (s === 0 ? 1 : 2))}
@@ -98,6 +100,21 @@ function Thumbnail({ id }: { id: string }) {
 const fmtSex = (s: string | null) => (s === "M" ? "Male" : s === "F" ? "Female" : "Unknown");
 const fmtAge = (a: number | null) => (a === null ? "Age n/a" : `${Math.round(a)} y`);
 const fmtTumor = (t: number | null) => (t === 1 ? "Tumor" : t === 0 ? "No tumor" : "Tumor n/a");
+
+// Compact case identity shown in the top bar, next to that case's id input — lets the bar
+// itself carry the "which case is A/B" context instead of relying on a separate case row.
+function BarChip({ id, data }: { id: string; data: CaseData }) {
+	if (!id.trim()) return null;
+	return (
+		<span className="cmp__chip">
+			<Thumbnail id={id} size="sm" />
+			<span className="cmp__chip-meta">
+				#{id}
+				{data.demographics && ` · ${fmtSex(data.demographics.sex)} · ${fmtAge(data.demographics.age)}`}
+			</span>
+		</span>
+	);
+}
 
 function CaseHeader({ id, data }: { id: string; data: CaseData }) {
 	if (!id.trim()) return <div className="cmp-case cmp-case--empty">No case selected</div>;
@@ -182,6 +199,20 @@ export default function ComparePage() {
 	// same as the single-case viewer's Organ Statistics panel — keeps the table compact by default.
 	const [expandedRow, setExpandedRow] = useState<number | null>(null);
 
+	// The organ-stats table is heavy (many rows, each expandable) — it opens in a popup on
+	// demand instead of always occupying the page, so the page itself stays focused on the
+	// two scans. Closed automatically if the case ids change out from under it.
+	const [showStatsModal, setShowStatsModal] = useState(false);
+	useEffect(() => setShowStatsModal(false), [idA, idB]);
+	useEffect(() => {
+		if (!showStatsModal) return;
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape") setShowStatsModal(false);
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [showStatsModal]);
+
 	const setId = (key: "a" | "b", value: string) => {
 		const next = new URLSearchParams(params);
 		if (value.trim()) next.set(key, value.trim());
@@ -206,6 +237,7 @@ export default function ComparePage() {
 				</Link>
 				<h1 className="cmp__title">Compare Cases</h1>
 				<div className="cmp__inputs">
+					<BarChip id={idA} data={a} />
 					<input
 						className="cmp__input"
 						value={idA}
@@ -223,6 +255,7 @@ export default function ComparePage() {
 						placeholder="Case B id"
 						aria-label="Case B id"
 					/>
+					<BarChip id={idB} data={b} />
 					{idA && idB && (
 						<Link
 							className="cmp__viewerlink"
@@ -244,128 +277,10 @@ export default function ComparePage() {
 			{!idA || !idB ? (
 				<div className="cmp__msg">Enter two case ids above to compare their organ statistics.</div>
 			) : bothLoaded ? (
-				<div className="cmp__table">
-					<div className="cmp__row cmp__row--head">
-						<span>Organ</span>
-						<span>Case {idA}</span>
-						<span>Case {idB}</span>
-						<span>Δ (B − A)</span>
-					</div>
-					{compareRows.map((r, i) => {
-						const expanded = expandedRow === i;
-						const truncated = Boolean(r.a?.truncated || r.b?.truncated);
-						const toggle = () => setExpandedRow(expanded ? null : i);
-						const deltaMeanHu = delta(r.a?.mean_hu, r.b?.mean_hu);
-						const deltaMedian = delta(r.a?.median, r.b?.median);
-						const deltaStdDev = delta(r.a?.standard_deviation, r.b?.standard_deviation);
-						const deltaMin = delta(r.a?.min_value, r.b?.min_value);
-						const deltaMax = delta(r.a?.max_value, r.b?.max_value);
-						const deltaSkew = delta(r.a?.skewness, r.b?.skewness);
-						const deltaKurt = delta(r.a?.kurtosis, r.b?.kurtosis);
-						return (
-							<div className="cmp__rowgroup" key={`${r.organ_name}-${i}`}>
-								<div
-									className="cmp__row cmp__row--expandable"
-									role="button"
-									tabIndex={0}
-									aria-expanded={expanded}
-									onClick={toggle}
-									onKeyDown={(e) => {
-										if (e.key === "Enter" || e.key === " ") {
-											e.preventDefault();
-											toggle();
-										}
-									}}
-								>
-									<span className="cmp__organ">
-										<span className={`cmp__chevron${expanded ? " cmp__chevron--open" : ""}`}>›</span>
-										{r.label}
-										{truncated && (
-											<span className="cmp__truncated-flag" title="Mask reaches the volume edge in at least one case — metrics may be clipped">
-												⚠
-											</span>
-										)}
-									</span>
-									<span className="cmp__cell">
-										<span className="cmp__cell-line">
-											<span className="cmp__vol">{fmtVol(r.a?.volume_cm3 ?? null)}</span>
-											{r.a?.percentile != null && <span className="cmp__pct">{fmtPct(r.a.percentile)}</span>}
-										</span>
-										{r.a?.mean_hu != null && <span className="cmp__meanhu">{Math.round(r.a.mean_hu)} HU mean</span>}
-									</span>
-									<span className="cmp__cell">
-										<span className="cmp__cell-line">
-											<span className="cmp__vol">{fmtVol(r.b?.volume_cm3 ?? null)}</span>
-											{r.b?.percentile != null && <span className="cmp__pct">{fmtPct(r.b.percentile)}</span>}
-										</span>
-										{r.b?.mean_hu != null && <span className="cmp__meanhu">{Math.round(r.b.mean_hu)} HU mean</span>}
-									</span>
-									<span className="cmp__cell">
-										<span className={`cmp__cell-line${deltaDir(r.deltaVolume)}`}>
-											<span className="cmp__vol">{fmtDeltaVol(r.deltaVolume)}</span>
-											{r.deltaPercentile != null && (
-												<span className="cmp__pct">
-													{r.deltaPercentile > 0 ? "+" : ""}
-													{Math.round(r.deltaPercentile)} pts
-												</span>
-											)}
-										</span>
-										{deltaMeanHu != null && (
-											<span className={`cmp__meanhu${deltaDir(deltaMeanHu)}`}>{fmtDelta(deltaMeanHu, 0, " HU mean")}</span>
-										)}
-									</span>
-								</div>
-								{expanded && (
-									<div className="cmp__detail">
-										<div className="cmp__detail-row cmp__detail-row--head">
-											<span>Distribution</span>
-											<span>Case {idA}</span>
-											<span>Case {idB}</span>
-											<span>Δ</span>
-										</div>
-										<div className="cmp__detail-row">
-											<span>Median HU</span>
-											<span>{fmtStat(r.a?.median)}</span>
-											<span>{fmtStat(r.b?.median)}</span>
-											<span className={`cmp__detail-delta${deltaDir(deltaMedian)}`}>{fmtDelta(deltaMedian)}</span>
-										</div>
-										<div className="cmp__detail-row">
-											<span>Std Dev HU</span>
-											<span>{fmtStat(r.a?.standard_deviation)}</span>
-											<span>{fmtStat(r.b?.standard_deviation)}</span>
-											<span className={`cmp__detail-delta${deltaDir(deltaStdDev)}`}>{fmtDelta(deltaStdDev)}</span>
-										</div>
-										<div className="cmp__detail-row">
-											<span>Min HU</span>
-											<span>{fmtStat(r.a?.min_value)}</span>
-											<span>{fmtStat(r.b?.min_value)}</span>
-											<span className={`cmp__detail-delta${deltaDir(deltaMin)}`}>{fmtDelta(deltaMin)}</span>
-										</div>
-										<div className="cmp__detail-row">
-											<span>Max HU</span>
-											<span>{fmtStat(r.a?.max_value)}</span>
-											<span>{fmtStat(r.b?.max_value)}</span>
-											<span className={`cmp__detail-delta${deltaDir(deltaMax)}`}>{fmtDelta(deltaMax)}</span>
-										</div>
-										<div className="cmp__detail-row">
-											<span>Skewness</span>
-											<span>{fmtStat(r.a?.skewness, 2)}</span>
-											<span>{fmtStat(r.b?.skewness, 2)}</span>
-											<span className={`cmp__detail-delta${deltaDir(deltaSkew)}`}>{fmtDelta(deltaSkew, 2)}</span>
-										</div>
-										<div className="cmp__detail-row">
-											<span className="cmp__tooltip-label" title={KURTOSIS_TOOLTIP}>
-												Kurtosis
-											</span>
-											<span>{fmtStat(r.a?.kurtosis, 2)}</span>
-											<span>{fmtStat(r.b?.kurtosis, 2)}</span>
-											<span className={`cmp__detail-delta${deltaDir(deltaKurt)}`}>{fmtDelta(deltaKurt, 2)}</span>
-										</div>
-									</div>
-								)}
-							</div>
-						);
-					})}
+				<div className="cmp__statsPrompt">
+					<button className="cmp__statsPromptBtn" onClick={() => setShowStatsModal(true)}>
+						View organ statistics ({compareRows.length} organs) →
+					</button>
 				</div>
 			) : anyError ? (
 				<div className="cmp__msg">
@@ -377,6 +292,150 @@ export default function ComparePage() {
 				</div>
 			) : (
 				<div className="cmp__msg">Loading…</div>
+			)}
+
+			{showStatsModal && bothLoaded && (
+				<div className="cmp__modalOverlay" onClick={() => setShowStatsModal(false)}>
+					<div
+						className="cmp__modal"
+						role="dialog"
+						aria-modal="true"
+						aria-label="Organ statistics"
+						onClick={(e) => e.stopPropagation()}
+					>
+						<div className="cmp__modalHead">
+							<h2 className="cmp__modalTitle">Organ Statistics</h2>
+							<button className="cmp__modalClose" onClick={() => setShowStatsModal(false)} aria-label="Close">
+								×
+							</button>
+						</div>
+						<div className="cmp__modalBody">
+							<div className="cmp__table">
+								<div className="cmp__row cmp__row--head">
+									<span>Organ</span>
+									<span>Case {idA}</span>
+									<span>Case {idB}</span>
+									<span>Δ (B − A)</span>
+								</div>
+								{compareRows.map((r, i) => {
+									const expanded = expandedRow === i;
+									const truncated = Boolean(r.a?.truncated || r.b?.truncated);
+									const toggle = () => setExpandedRow(expanded ? null : i);
+									const deltaMeanHu = delta(r.a?.mean_hu, r.b?.mean_hu);
+									const deltaMedian = delta(r.a?.median, r.b?.median);
+									const deltaStdDev = delta(r.a?.standard_deviation, r.b?.standard_deviation);
+									const deltaMin = delta(r.a?.min_value, r.b?.min_value);
+									const deltaMax = delta(r.a?.max_value, r.b?.max_value);
+									const deltaSkew = delta(r.a?.skewness, r.b?.skewness);
+									const deltaKurt = delta(r.a?.kurtosis, r.b?.kurtosis);
+									return (
+										<div className="cmp__rowgroup" key={`${r.organ_name}-${i}`}>
+											<div
+												className="cmp__row cmp__row--expandable"
+												role="button"
+												tabIndex={0}
+												aria-expanded={expanded}
+												onClick={toggle}
+												onKeyDown={(e) => {
+													if (e.key === "Enter" || e.key === " ") {
+														e.preventDefault();
+														toggle();
+													}
+												}}
+											>
+												<span className="cmp__organ">
+													<span className={`cmp__chevron${expanded ? " cmp__chevron--open" : ""}`}>›</span>
+													{r.label}
+													{truncated && (
+														<span className="cmp__truncated-flag" title="Mask reaches the volume edge in at least one case — metrics may be clipped">
+															⚠
+														</span>
+													)}
+												</span>
+												<span className="cmp__cell">
+													<span className="cmp__cell-line">
+														<span className="cmp__vol">{fmtVol(r.a?.volume_cm3 ?? null)}</span>
+														{r.a?.percentile != null && <span className="cmp__pct">{fmtPct(r.a.percentile)}</span>}
+													</span>
+													{r.a?.mean_hu != null && <span className="cmp__meanhu">{Math.round(r.a.mean_hu)} HU mean</span>}
+												</span>
+												<span className="cmp__cell">
+													<span className="cmp__cell-line">
+														<span className="cmp__vol">{fmtVol(r.b?.volume_cm3 ?? null)}</span>
+														{r.b?.percentile != null && <span className="cmp__pct">{fmtPct(r.b.percentile)}</span>}
+													</span>
+													{r.b?.mean_hu != null && <span className="cmp__meanhu">{Math.round(r.b.mean_hu)} HU mean</span>}
+												</span>
+												<span className="cmp__cell">
+													<span className={`cmp__cell-line${deltaDir(r.deltaVolume)}`}>
+														<span className="cmp__vol">{fmtDeltaVol(r.deltaVolume)}</span>
+														{r.deltaPercentile != null && (
+															<span className="cmp__pct">
+																{r.deltaPercentile > 0 ? "+" : ""}
+																{Math.round(r.deltaPercentile)} pts
+															</span>
+														)}
+													</span>
+													{deltaMeanHu != null && (
+														<span className={`cmp__meanhu${deltaDir(deltaMeanHu)}`}>{fmtDelta(deltaMeanHu, 0, " HU mean")}</span>
+													)}
+												</span>
+											</div>
+											{expanded && (
+												<div className="cmp__detail">
+													<div className="cmp__detail-row cmp__detail-row--head">
+														<span>Distribution</span>
+														<span>Case {idA}</span>
+														<span>Case {idB}</span>
+														<span>Δ</span>
+													</div>
+													<div className="cmp__detail-row">
+														<span>Median HU</span>
+														<span>{fmtStat(r.a?.median)}</span>
+														<span>{fmtStat(r.b?.median)}</span>
+														<span className={`cmp__detail-delta${deltaDir(deltaMedian)}`}>{fmtDelta(deltaMedian)}</span>
+													</div>
+													<div className="cmp__detail-row">
+														<span>Std Dev HU</span>
+														<span>{fmtStat(r.a?.standard_deviation)}</span>
+														<span>{fmtStat(r.b?.standard_deviation)}</span>
+														<span className={`cmp__detail-delta${deltaDir(deltaStdDev)}`}>{fmtDelta(deltaStdDev)}</span>
+													</div>
+													<div className="cmp__detail-row">
+														<span>Min HU</span>
+														<span>{fmtStat(r.a?.min_value)}</span>
+														<span>{fmtStat(r.b?.min_value)}</span>
+														<span className={`cmp__detail-delta${deltaDir(deltaMin)}`}>{fmtDelta(deltaMin)}</span>
+													</div>
+													<div className="cmp__detail-row">
+														<span>Max HU</span>
+														<span>{fmtStat(r.a?.max_value)}</span>
+														<span>{fmtStat(r.b?.max_value)}</span>
+														<span className={`cmp__detail-delta${deltaDir(deltaMax)}`}>{fmtDelta(deltaMax)}</span>
+													</div>
+													<div className="cmp__detail-row">
+														<span>Skewness</span>
+														<span>{fmtStat(r.a?.skewness, 2)}</span>
+														<span>{fmtStat(r.b?.skewness, 2)}</span>
+														<span className={`cmp__detail-delta${deltaDir(deltaSkew)}`}>{fmtDelta(deltaSkew, 2)}</span>
+													</div>
+													<div className="cmp__detail-row">
+														<span className="cmp__tooltip-label" title={KURTOSIS_TOOLTIP}>
+															Kurtosis
+														</span>
+														<span>{fmtStat(r.a?.kurtosis, 2)}</span>
+														<span>{fmtStat(r.b?.kurtosis, 2)}</span>
+														<span className={`cmp__detail-delta${deltaDir(deltaKurt)}`}>{fmtDelta(deltaKurt, 2)}</span>
+													</div>
+												</div>
+											)}
+										</div>
+									);
+								})}
+							</div>
+						</div>
+					</div>
+				</div>
 			)}
 		</div>
 	);
