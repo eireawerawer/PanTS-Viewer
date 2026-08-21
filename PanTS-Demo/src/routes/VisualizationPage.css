@@ -593,6 +593,39 @@
   color: var(--vp-text);
 }
 
+.vp-tb-id__val-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.vp-tb-id__rename-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 2px;
+  margin: 0;
+  line-height: 0;
+  color: var(--vp-text-faint);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.vp-tb-id__rename-btn:hover {
+  color: var(--vp-text);
+}
+
+.vp-tb-id__rename-input {
+  background: transparent;
+  border: 1px solid var(--vp-border);
+  border-radius: 4px;
+  padding: 1px 4px;
+  max-width: 220px;
+  outline: none;
+}
+
 .vp-tb-divider {
   width: 1px;
   align-self: stretch;

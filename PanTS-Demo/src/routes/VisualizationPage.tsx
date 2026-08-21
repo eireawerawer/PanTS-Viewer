@@ -68,6 +68,7 @@ import HollowFlyout from "../components/segmentation/HollowFlyout";
 import LevelTracingFlyout from "../components/segmentation/LevelTracingFlyout";
 import { useScissorsTool } from "../helpers/viewer/useScissorsTool";
 import { useInteractivePromptTool } from "../helpers/viewer/useInteractivePromptTool";
+import { loadRecentUploads, renameRecentUpload } from "../helpers/recentUploads";
 import {
   applyMargin, getActualMarginMm,
   applyIslandsOperation, applyLogicalOperator, applySmoothing,
@@ -1428,6 +1429,27 @@ function VisualizationPage() {
 	const [sessionStarting, setSessionStarting] = useState(false);
 	const [sessionResult, setSessionResult] = useState<SessionResult | null>(null);
 	const [sessionMeasurements, setSessionMeasurements] = useState<ReportMeasurement[]>([]);
+	// Friendly name shown in the toolbar in place of the raw session UUID. Reads
+	// from the SAME localStorage record the Upload page's "Completed Uploads"
+	// list renders and renames, so the two are always in sync by construction
+	// (one store, one label field) rather than two names that can drift apart.
+	// null when this session has no local record (e.g. opened on a different
+	// browser) -- falls back to the raw id in that case, same as before.
+	const [scanLabel, setScanLabel] = useState<string | null>(null);
+	const [renamingScan, setRenamingScan] = useState(false);
+	const [scanRenameDraft, setScanRenameDraft] = useState("");
+	useEffect(() => {
+		if (!sessionId) { setScanLabel(null); return; }
+		const match = loadRecentUploads().find((u) => u.sessionId === sessionId);
+		setScanLabel(match?.label ?? null);
+	}, [sessionId]);
+	const commitScanRename = () => {
+		if (!sessionId) return;
+		renameRecentUpload(sessionId, scanRenameDraft);
+		const match = loadRecentUploads().find((u) => u.sessionId === sessionId);
+		setScanLabel(match?.label ?? null);
+		setRenamingScan(false);
+	};
 	const [showMeasurePanel, setShowMeasurePanel] = useState(false);
 	// Shareable-link state: brief "copied" confirmation, and a guard so a deep-link's view
 	// state is applied exactly once after the volume finishes loading.
@@ -2965,10 +2987,39 @@ const aiAvailableOrgans = useMemo(() => {
 
 					<span className="vp-tb-divider" />
 
-					{/* Case / session identity */}
+					{/* Case / session identity. For a personal upload with a local record,
+					    show + edit the same friendly name the Upload page shows -- both
+					    read/write recentUploads, so renaming here updates it there too. */}
 					<div className="vp-tb-id">
 						<span className="vp-tb-id__eyebrow">{sessionId ? "Session" : "Case"}</span>
-						<span className="vp-tb-id__val">{caseId}</span>
+						{renamingScan ? (
+							<input
+								autoFocus
+								value={scanRenameDraft}
+								onChange={(e) => setScanRenameDraft(e.target.value)}
+								onBlur={commitScanRename}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") commitScanRename();
+									else if (e.key === "Escape") setRenamingScan(false);
+								}}
+								className="vp-tb-id__val vp-tb-id__rename-input"
+							/>
+						) : (
+							<span className="vp-tb-id__val-row">
+								<span className="vp-tb-id__val">{sessionId && scanLabel ? scanLabel : caseId}</span>
+								{sessionId && scanLabel && (
+									<button
+										type="button"
+										className="vp-tb-id__rename-btn"
+										title="Rename scan"
+										aria-label="Rename scan"
+										onClick={() => { setScanRenameDraft(scanLabel); setRenamingScan(true); }}
+									>
+										<IconPencil size={12} />
+									</button>
+								)}
+							</span>
+						)}
 					</div>
 
 					<span className="vp-tb-divider" />
