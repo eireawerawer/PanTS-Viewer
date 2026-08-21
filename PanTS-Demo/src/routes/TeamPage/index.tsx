@@ -31,7 +31,11 @@ const MEMBERS: Member[] = [
     role: "PhD Student",
     photo: "/headshots/pedro-bassi.webp",
   },
-  { name: "Jaeden Pangaribuan", role: "Core Contributor" },
+  {
+    name: "Jaeden Pangaribuan",
+    role: "Core Contributor",
+    photo: "/headshots/jaeden-pangaribuan.webp"
+  },
   {
     name: "Lucy Wu",
     role: "Core Contributor",
