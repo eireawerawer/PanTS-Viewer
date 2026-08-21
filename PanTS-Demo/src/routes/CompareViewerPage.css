@@ -70,8 +70,8 @@
   cursor: pointer;
 }
 .cmv__gear:hover { background: rgba(255, 255, 255, 0.1); }
-/* Active = subtle blue tint (not a white fill) so the light icon stays visible. */
-.cmv__gear.is-active { background: rgba(37, 99, 235, 0.3); border-color: #2563eb; }
+/* Active = subtle accent tint (not a white fill) so the light icon stays visible. */
+.cmv__gear.is-active { background: rgba(231, 111, 81, 0.3); border-color: var(--accent); }
 
 /* Body = settings sidebar + the viewport grid. */
 .cmv__body { flex: 1; display: flex; min-height: 0; }
@@ -95,7 +95,7 @@
   cursor: pointer;
   user-select: none;
 }
-.cmv__toggle input { accent-color: #2563eb; width: 15px; height: 15px; }
+.cmv__toggle input { accent-color: var(--accent); width: 15px; height: 15px; }
 
 .cmv__msg { margin: auto; color: rgba(255, 255, 255, 0.55); font-size: 14px; }
 .cmv__msg code {
@@ -154,6 +154,9 @@
   pointer-events: none;
 }
 .cmv__viewport { width: 100%; height: 100%; }
+/* "Hover to identify" active: a distinct cursor hints the pane now reports the organ
+   under the pointer instead of just navigating — same treatment as the single viewer. */
+.cmv__viewport--hover-identify { cursor: help; }
 
 .cmv__overlay {
   position: absolute;

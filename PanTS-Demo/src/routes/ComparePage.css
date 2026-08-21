@@ -38,6 +38,21 @@
   gap: 8px;
   margin-left: auto;
 }
+.cmp__chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.cmp__chip-meta {
+  font-size: 11px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  color: rgba(255, 255, 255, 0.7);
+  white-space: nowrap;
+}
 .cmp__input {
   width: 120px;
   padding: 8px 10px;
@@ -71,17 +86,20 @@
 }
 .cmp__viewerlink:hover { background: #1d4ed8; }
 
+/* Now the page's main content (the stats table moved into a popup) — the two cases get
+   room to be a real "hero" section instead of a cramped strip above a giant table. */
 .cmp__cases {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  margin-bottom: 20px;
+  gap: 20px;
+  max-width: 900px;
+  margin: 8px auto 28px;
 }
 .cmp-case {
   display: flex;
-  gap: 14px;
-  padding: 14px;
-  border-radius: 14px;
+  gap: 18px;
+  padding: 20px;
+  border-radius: 16px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -93,13 +111,13 @@
   min-height: 96px;
 }
 .cmp-thumb {
-  width: 84px;
-  height: 84px;
-  border-radius: 10px;
+  border-radius: 12px;
   object-fit: cover;
   background: #111318;
   flex-shrink: 0;
 }
+.cmp-thumb--lg { width: 160px; height: 160px; }
+.cmp-thumb--sm { width: 26px; height: 26px; border-radius: 7px; }
 .cmp-thumb--empty {
   display: flex;
   align-items: center;
@@ -107,11 +125,13 @@
   font-size: 10px;
   color: rgba(255, 255, 255, 0.35);
   font-family: "IBM Plex Mono", ui-monospace, monospace;
+  text-align: center;
 }
-.cmp-case__meta { display: flex; flex-direction: column; gap: 6px; }
-.cmp-case__id { font-size: 15px; font-weight: 600; }
+.cmp-thumb--sm.cmp-thumb--empty { font-size: 7px; }
+.cmp-case__meta { display: flex; flex-direction: column; gap: 8px; }
+.cmp-case__id { font-size: 18px; font-weight: 600; }
 .cmp-case__demo {
-  font-size: 12px;
+  font-size: 13px;
   color: rgba(255, 255, 255, 0.62);
   font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
@@ -122,6 +142,73 @@
   text-decoration: none;
 }
 .cmp-case__open:hover { text-decoration: underline; }
+
+/* CTA that replaces the always-open table — the stats live in a popup (.cmp__modal) opened
+   from here, so the page stays focused on the two scans above. */
+.cmp__statsPrompt {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 40px;
+}
+.cmp__statsPromptBtn {
+  padding: 12px 22px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #f4f5f7;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.cmp__statsPromptBtn:hover { background: rgba(255, 255, 255, 0.1); border-color: var(--accent-tint); }
+
+.cmp__modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 5, 7, 0.72);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 100;
+}
+.cmp__modal {
+  width: min(920px, 100%);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  background: #111318;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  box-shadow: 0 24px 64px -16px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.cmp__modalHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+.cmp__modalTitle { margin: 0; font-size: 16px; font-weight: 600; }
+.cmp__modalClose {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+.cmp__modalClose:hover { background: rgba(255, 255, 255, 0.08); color: #f4f5f7; }
+.cmp__modalBody {
+  overflow-y: auto;
+  padding: 16px 20px 20px;
+}
 
 .cmp__msg {
   padding: 40px 16px;
