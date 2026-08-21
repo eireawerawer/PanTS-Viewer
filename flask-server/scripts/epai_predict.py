@@ -57,7 +57,8 @@ import urllib.error
 import urllib.request
 
 
-def _warm_predict(case_id, input_dir, output_dir, output_csv, step_size, disable_tta, url, timeout):
+def _warm_predict(case_id, input_dir, output_dir, output_csv, step_size, disable_tta, tta_axes,
+                  url, timeout):
     """Try the persistent predictor. Returns True if it produced the output.
 
     Mirrors lesionseg_predict.py's _warm_predict: any failure returns False so
@@ -73,11 +74,15 @@ def _warm_predict(case_id, input_dir, output_dir, output_csv, step_size, disable
         print(f"[warm] health check failed ({e}); using cold path", flush=True)
         return False
 
+    health_axes = health.get("tta_axes")
     if abs(float(health.get("step_size", -1)) - float(step_size)) > 1e-9 \
-            or bool(health.get("disable_tta")) != bool(disable_tta):
+            or bool(health.get("disable_tta")) != bool(disable_tta) \
+            or (health_axes is not None) != (tta_axes is not None) \
+            or (tta_axes is not None and list(health_axes or []) != list(tta_axes)):
         print(f"[warm] config mismatch (server step={health.get('step_size')} "
-              f"disable_tta={health.get('disable_tta')}; requested step={step_size} "
-              f"disable_tta={disable_tta}); using cold path", flush=True)
+              f"disable_tta={health.get('disable_tta')} tta_axes={health_axes}; "
+              f"requested step={step_size} disable_tta={disable_tta} tta_axes={tta_axes}); "
+              f"using cold path", flush=True)
         return False
 
     root = health.get("allowed_root")
@@ -103,6 +108,7 @@ def _warm_predict(case_id, input_dir, output_dir, output_csv, step_size, disable
         "output_csv_rel": rel_csv.replace(os.sep, "/"),
         "step_size": float(step_size),
         "disable_tta": bool(disable_tta),
+        "tta_axes": list(tta_axes) if tta_axes is not None else None,
     }).encode()
     req = urllib.request.Request(f"{base}/predict", data=body,
                                  headers={"Content-Type": "application/json"})
@@ -166,9 +172,10 @@ def _cold_predict(case_id, input_dir, save_dir, output_csv, ckpt_path):
 
     _apply_fork_fixes()
 
+    disable_tta = os.getenv("EPAI_DISABLE_TTA", "0").strip().lower() in {"1", "true", "yes", "on"}
     predictor = nnUNetPredictor(
         tile_step_size=float(os.getenv("EPAI_STEP_SIZE", "0.5")),
-        use_mirroring=os.getenv("EPAI_DISABLE_TTA", "0").strip().lower() not in {"1", "true", "yes", "on"},
+        use_mirroring=not disable_tta,
         perform_everything_on_device=True,
         device=torch.device("cuda"),
         allow_tqdm=False,
@@ -178,6 +185,9 @@ def _cold_predict(case_id, input_dir, save_dir, output_csv, ckpt_path):
         ckpt_path, use_folds=("all",),
         checkpoint_name=os.getenv("EPAI_CHECKPOINT_NAME", "checkpoint_final.pth"),
     )
+    tta_axes_raw = os.getenv("EPAI_TTA_AXES", "").strip()
+    if tta_axes_raw and not disable_tta:
+        predictor.allowed_mirroring_axes = tuple(int(x) for x in tta_axes_raw.split(","))
 
     pp = DefaultPreprocessor(verbose=False)
     pm, cm = predictor.plans_manager, predictor.configuration_manager
@@ -216,12 +226,14 @@ def main():
 
     step_size = float(os.getenv("EPAI_STEP_SIZE", "0.5"))
     disable_tta = os.getenv("EPAI_DISABLE_TTA", "0").strip().lower() in {"1", "true", "yes", "on"}
+    tta_axes_raw = os.getenv("EPAI_TTA_AXES", "").strip()
+    tta_axes = tuple(int(x) for x in tta_axes_raw.split(",")) if tta_axes_raw else None
 
     warm_url = os.getenv("EPAI_WARM_URL", "").strip()
     if warm_url:
         timeout = int(os.getenv("EPAI_WARM_TIMEOUT", "3600"))
         if _warm_predict(case_id, input_dir, save_dir, output_csv, step_size, disable_tta,
-                         warm_url, timeout):
+                         tta_axes, warm_url, timeout):
             return
 
     _cold_predict(case_id, input_dir, save_dir, output_csv, ckpt_path)

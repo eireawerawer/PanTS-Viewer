@@ -11,10 +11,16 @@ Deliberately stdlib-only for the HTTP layer, binds 127.0.0.1 only -- see
 lesionseg_warm_server.py's docstring for the full rationale, unchanged here.
 
 Inference settings mirror the validated configuration:
-  - EPAI_DISABLE_TTA -- validated on 366 cases across two independent case
-    populations (lesion-focused + general pool): dropping TTA does not cost
-    detection (recall and detection rate were HIGHER without it in both
-    samples), at ~2.1x the speed. See epai_step_tta_val.py results.
+  - EPAI_TTA_AXES -- which mirroring axes to average over test-time. Real-GT
+    frontier data (n=475 step/TTA sweep + n=332 independent axis sweep, both
+    against real pancreatic_lesion ground truth, not fidelity) shows full
+    no-TTA (EPAI_DISABLE_TTA) carries a small but real accuracy cost (mean
+    delta dice -0.014, 95% CI excludes 0; more whole-lesion misses than full
+    TTA). In-plane-only mirroring ("1,2") gets nearly the same speedup
+    (1.48x vs no-TTA's ~2.2x) with NO measurable cost (95% CI includes 0,
+    zero whole-lesion misses vs full 8x TTA) -- the better trade. Set both
+    this and EPAI_DISABLE_TTA=false to run it; leave both unset for the old
+    full-8x-TTA behavior.
   - GPU export-resident resampling -- validated at 500-case scale, ~51-55x on
     the export stage, voxel agreement 0.99996+ (see epai_export_bench.py).
   - tile_step_size is NOT overridden from the nnU-Net default (0.5) here --
@@ -72,6 +78,17 @@ CHECKPOINT = os.environ.get("EPAI_CHECKPOINT_NAME", "checkpoint_final.pth")
 STEP_SIZE = float(os.environ.get("EPAI_STEP_SIZE", "0.5"))
 DISABLE_TTA = os.environ.get("EPAI_DISABLE_TTA", "0").strip().lower() in {"1", "true", "yes", "on"}
 LOCK_TIMEOUT = int(os.environ.get("LOCK_TIMEOUT", "1800"))
+
+
+def _parse_axes(raw):
+    """"1,2" -> (1, 2); "" / unset -> None (nnU-Net's own default: all 3 axes)."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    return tuple(int(x) for x in raw.split(","))
+
+
+TTA_AXES = _parse_axes(os.environ.get("EPAI_TTA_AXES"))
 
 
 def _default_root():
@@ -143,6 +160,8 @@ predictor = nnUNetPredictor(
 predictor.initialize_from_trained_model_folder(
     MODEL, use_folds=("all",), checkpoint_name=CHECKPOINT
 )
+if TTA_AXES is not None and not DISABLE_TTA:
+    predictor.allowed_mirroring_axes = TTA_AXES
 preprocessor = DefaultPreprocessor(verbose=False)
 # Must match the writer export_prediction_from_logits uses internally (see
 # module docstring, fix 2) -- this model's plans specify NibabelIOWithReorient.
@@ -150,7 +169,8 @@ reader_writer = predictor.plans_manager.image_reader_writer_class()
 
 _load_seconds = time.time() - _t0
 print(f"[warm] model loaded in {_load_seconds:.1f}s "
-      f"(step_size={STEP_SIZE}, disable_tta={DISABLE_TTA}), ready on 127.0.0.1:{PORT}",
+      f"(step_size={STEP_SIZE}, disable_tta={DISABLE_TTA}, tta_axes={TTA_AXES}), "
+      f"ready on 127.0.0.1:{PORT}",
       flush=True)
 
 _lock = threading.Lock()
@@ -236,6 +256,7 @@ class Handler(BaseHTTPRequestHandler):
             "checkpoint": CHECKPOINT,
             "step_size": STEP_SIZE,
             "disable_tta": DISABLE_TTA,
+            "tta_axes": list(TTA_AXES) if TTA_AXES is not None else None,
             "model_load_seconds": round(_load_seconds, 1),
             "busy": _lock.locked(),
             **_stats,
@@ -268,11 +289,16 @@ class Handler(BaseHTTPRequestHandler):
 
         want_step = req.get("step_size")
         want_no_tta = req.get("disable_tta")
+        want_axes = req.get("tta_axes")
+        want_axes = tuple(want_axes) if want_axes is not None else None
         mismatch = []
         if want_step is not None and abs(float(want_step) - STEP_SIZE) > 1e-9:
             mismatch.append(f"step_size: requested {want_step}, server {STEP_SIZE}")
         if want_no_tta is not None and bool(want_no_tta) != DISABLE_TTA:
             mismatch.append(f"disable_tta: requested {bool(want_no_tta)}, server {DISABLE_TTA}")
+        if want_axes is not None and want_axes != TTA_AXES:
+            mismatch.append(f"tta_axes: requested {list(want_axes)}, server "
+                             f"{list(TTA_AXES) if TTA_AXES else None}")
         if mismatch:
             self._json(409, {"error": "configuration mismatch", "details": mismatch})
             return
