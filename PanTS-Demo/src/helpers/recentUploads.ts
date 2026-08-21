@@ -5,7 +5,12 @@ export type RecentUploadStatus = "Processing" | "Completed" | "Failed" | "Cancel
 
 export type RecentUpload = {
 	sessionId: string;
+	// User-facing name. Defaults to a friendly "<model> · <date>" (see
+	// friendlyScanName) rather than the raw upload filename, and is renameable.
 	label: string;
+	// The original filename, kept for reference (shown as a tooltip) even after
+	// the label is renamed. Optional so older localStorage entries still parse.
+	sourceName?: string;
 	model: string;
 	status: RecentUploadStatus;
 	timestamp: number;
@@ -126,6 +131,40 @@ export const updateRecentUploadStatus = (
 	const list = loadRecentUploads().map((u) => (u.sessionId === sessionId ? { ...u, status } : u));
 	persistRecentUploads(list);
 	return list;
+};
+
+// Rename a scan. Empty/whitespace input falls back to a sensible default so a
+// scan is never left nameless.
+export const renameRecentUpload = (
+	sessionId: string,
+	label: string
+): RecentUpload[] => {
+	const list = loadRecentUploads().map((u) => {
+		if (u.sessionId !== sessionId) return u;
+		const next = label.trim();
+		return { ...u, label: next || friendlyScanName(u.model, u.timestamp) };
+	});
+	persistRecentUploads(list);
+	return list;
+};
+
+// A meaningful default name for a scan: the model it was run with plus the date,
+// e.g. "ePAI · Aug 13, 2026". Far more useful in the history list than the raw
+// upload filename (often "ct.nii.gz" or a cryptic export name). The user can
+// rename it afterwards.
+export const friendlyScanName = (model: string, timestamp: number): string => {
+	const who = model && model !== "None" ? model : "Scan";
+	let date: string;
+	try {
+		date = new Date(timestamp).toLocaleDateString(undefined, {
+			year: "numeric",
+			month: "short",
+			day: "numeric",
+		});
+	} catch {
+		date = new Date(timestamp).toISOString().slice(0, 10);
+	}
+	return `${who} · ${date}`;
 };
 
 export const formatRelativeTime = (ts: number): string => {

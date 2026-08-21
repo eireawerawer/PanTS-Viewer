@@ -2,6 +2,7 @@ import { IconCheck } from "@tabler/icons-react";
 import React, { useState } from "react";
 import { useAuth } from "../../contexts/authContext";
 import { PLANS, planLabel, type PlanGroup, type PlanId } from "../../helpers/accountProfile";
+import { track } from "../../helpers/analytics";
 import { useSettings } from "./context";
 
 /** "in 6 hrs" / "in 24 min" from an ISO timestamp, or null once it's passed. */
@@ -65,6 +66,7 @@ const PlanSettings: React.FC = () => {
 
 	const choose = (id: PlanId) =>
 		run(async () => {
+			track("account_change_plan");
 			await setPlan(id);
 			await refreshUsage();
 			notify(`You're on ${planLabel(id)}.`);

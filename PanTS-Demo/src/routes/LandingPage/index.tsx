@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { segmentation_categories } from "../../helpers/constants";
+import { segmentation_categories, API_BASE } from "../../helpers/constants";
 import Header from "../../components/Header";
+import SiteFooter from "../../components/SiteFooter";
 import styles from "./LandingPage.module.css";
 
 const TARGETS = {
-  ctVolumes: 36_390,
+  // Fallback only (the live count is fetched from /api/search?dataset=all).
+  ctVolumes: 32_768,
   medicalCenters: 145,
   annotatedStructures: 993_000,
   organClasses: segmentation_categories.length,
@@ -30,8 +31,25 @@ const easeOutCubic = (progress: number): number => {
 };
 
 export default function LandingPage() {
-  const navigate = useNavigate();
   const [animationProgress, setAnimationProgress] = useState(0);
+  // Pull the live CT-volume count so the hero stat reflects the real library size
+  // (PanTS + CancerVerse) instead of a hardcoded figure. Falls back to TARGETS.
+  const [ctVolumes, setCtVolumes] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/search?per_page=1&dataset=all`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d && typeof d.total === "number") setCtVolumes(d.total);
+      })
+      .catch(() => {
+        /* keep the fallback target on any failure */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const prefersReducedMotion = window.matchMedia(
@@ -67,7 +85,9 @@ export default function LandingPage() {
 
   const stats = [
     {
-      value: getAnimatedValue(TARGETS.ctVolumes).toLocaleString("en-US"),
+      value: getAnimatedValue(ctVolumes ?? TARGETS.ctVolumes).toLocaleString(
+        "en-US",
+      ),
       label: "CT Volumes",
     },
     {
@@ -108,23 +128,8 @@ export default function LandingPage() {
             </div>
           ))}
         </div>
-        <div className={styles.heroActions}>
-          <button
-            type="button"
-            className={styles.btnPrimary}
-            onClick={() => navigate("/dashboard")}
-          >
-            Browse Dataset
-          </button>
-          <button
-            type="button"
-            className={styles.btnSecondary}
-            onClick={() => navigate("/upload")}
-          >
-            Upload Dataset
-          </button>
-        </div>
       </main>
+      <SiteFooter />
     </div>
   );
 }

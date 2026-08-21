@@ -1,7 +1,8 @@
 /* ===== UploadPage.css =====
-   Redesigned to match the BodyMaps landing page aesthetic.
-   Color palette: #ffffff / #f5f5f5 / #111111 (monochrome)
-   Fonts: Space Grotesk, JetBrains Mono
+   DEFERRED pre-brand surface: still monochrome + Space Grotesk while
+   in-flight PRs on this file land. Do not copy this vocabulary — new
+   styling uses the BodyMaps tokens (ink/paper/accent, IBM Plex); see
+   BRANDING.md at the repo root.
 */
 
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
@@ -15,6 +16,8 @@
   font-family: 'Space Grotesk', sans-serif;
   position: relative;
   overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ── Ambient glow orbs ── */
@@ -46,6 +49,9 @@
 
 /* ── Main content area ── */
 .upload-main {
+  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
   max-width: 1152px;
   margin: 0 auto;
   padding: 36px 24px 60px;
@@ -152,34 +158,57 @@
   letter-spacing: 0.04em;
 }
 
-/* ── File chips ── */
+/* ── Selected-file cards (was a row of small pills; now matches the
+   icon+name+subtext row treatment used by Completed Uploads below) ── */
 .file-chips {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 8px;
   margin-bottom: 20px;
 }
 .file-chip {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 14px;
-  background: rgba(0,0,0,.06);
-  border: 1px solid rgba(0,0,0,.12);
-  border-radius: 20px;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #f5f5f5;
+  border: 1px solid rgba(0,0,0,.08);
+  border-radius: 10px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.file-chip-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  flex-shrink: 0;
+  background: rgba(0,0,0,.05);
+  border: 1px solid rgba(0,0,0,.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: #111111;
+}
+.file-chip-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.file-chip-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: #8f8f8f;
+  margin-top: 1px;
   letter-spacing: 0.02em;
 }
 .file-chip-remove {
-  width: 16px;
-  height: 16px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
-  background: rgba(0,0,0,.08);
+  background: rgba(0,0,0,.06);
   border: none;
   color: #8f8f8f;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1;
   cursor: pointer;
   display: flex;
@@ -188,9 +217,10 @@
   transition: all 0.15s;
   padding: 0;
   font-family: inherit;
+  flex-shrink: 0;
 }
 .file-chip-remove:hover {
-  background: rgba(239,68,68,.2);
+  background: rgba(239,68,68,.15);
   color: #ef4444;
 }
 
@@ -215,7 +245,7 @@
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: #002D72;
+  background: #002d72;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -504,6 +534,10 @@
   align-items: center;
   justify-content: space-between;
   padding: 10px 14px;
+  /* Shared row height so the (2-line) model rows and the (1-line) submenu rows
+     line up at the same height instead of the parent looking taller. */
+  min-height: 48px;
+  box-sizing: border-box;
   cursor: pointer;
   transition: background 0.1s;
 }
@@ -511,7 +545,7 @@
   background: rgba(0,0,0,.04);
 }
 .model-dropdown-item.selected {
-  background: rgba(0,45,114,.05);
+  background: rgba(0, 45, 114, .05);
 }
 .model-dropdown-item-content {
   display: flex;
@@ -528,7 +562,7 @@
   color: #111111;
 }
 .model-dropdown-item.selected .model-dropdown-item-name {
-  color: #002D72;
+  color: #002d72;
 }
 .model-dropdown-item-desc {
   font-family: 'Space Grotesk', sans-serif;
@@ -536,7 +570,7 @@
   color: #8f8f8f;
 }
 .model-dropdown-check {
-  color: #002D72;
+  color: #002d72;
   flex-shrink: 0;
 }
 .model-dropdown-item-side {
@@ -600,8 +634,8 @@
   flex-shrink: 0;
   margin-left: 12px;
   padding: 10px 32px;
-  background: #002D72;
-  border: 1px solid #002D72;
+  background: #002d72;
+  border: 1px solid #002d72;
   border-radius: 8px;
   color: #ffffff;
   font-family: 'Space Grotesk', sans-serif;
@@ -612,8 +646,8 @@
   letter-spacing: 0.02em;
 }
 .run-btn:hover:not(:disabled) {
-  background: #00399a;
-  border-color: #00399a;
+  background: #1B2436;
+  border-color: #1B2436;
   color: #ffffff;
 }
 .run-btn:disabled {
@@ -709,10 +743,23 @@
   transition: width 0.4s cubic-bezier(.2,.8,.2,1);
 }
 .progress-fill-upload {
-  background: linear-gradient(90deg, #8f8f8f, #002D72);
+  background: linear-gradient(90deg, #8f8f8f, #002d72);
 }
 .progress-fill-inference {
-  background: linear-gradient(90deg, #6a6a6a, #00399a);
+  background: linear-gradient(90deg, #6a6a6a, #002d72);
+}
+
+/* Indeterminate variant: inference has no real percent-complete signal (nnU-Net
+   doesn't report progress mid-run), so a sweeping segment communicates "still
+   working" honestly instead of faking a percentage. */
+.progress-fill--indeterminate {
+  width: 40% !important;
+  background: linear-gradient(90deg, #6a6a6a, #002d72);
+  animation: progress-indeterminate-sweep 1.4s ease-in-out infinite;
+}
+@keyframes progress-indeterminate-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
 }
 
 /* ── Result actions ── */
@@ -755,13 +802,13 @@
   color: #111111;
 }
 .result-btn-primary {
-  background: #002D72;
-  border-color: #002D72;
+  background: #002d72;
+  border-color: #002d72;
   color: #ffffff;
 }
 .result-btn-primary:hover {
-  background: #00399a;
-  border-color: #00399a;
+  background: #1B2436;
+  border-color: #1B2436;
   color: #ffffff;
 }
 
@@ -796,7 +843,7 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #002D72;
+  background: #002d72;
   animation: upload-pulse 1.6s ease-in-out infinite;
   flex-shrink: 0;
 }
@@ -846,20 +893,22 @@
 
 /* ── File chip internals ── */
 .file-chip-name {
-  flex: 1;
-  min-width: 0;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: #111111;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .file-chip-preview {
-  padding: 2px 8px;
-  background: rgba(0,45,114,.1);
-  border: 1px solid rgba(0,45,114,.2);
-  border-radius: 10px;
-  color: #002D72;
+  padding: 5px 12px;
+  background: rgba(0, 45, 114, .1);
+  border: 1px solid rgba(0, 45, 114, .2);
+  border-radius: 8px;
+  color: #002d72;
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   letter-spacing: 0.04em;
@@ -867,11 +916,11 @@
   flex-shrink: 0;
 }
 .file-chip-preview:hover {
-  background: rgba(0,45,114,.18);
+  background: rgba(0, 45, 114, .18);
 }
 .file-chip--active {
-  border-color: rgba(0,45,114,.3);
-  background: rgba(0,45,114,.06);
+  border-color: rgba(0, 45, 114, .3);
+  background: rgba(0, 45, 114, .06);
 }
 
 /* ── Pending CT preview panel ── */
@@ -941,10 +990,10 @@
   transition: width 0.35s cubic-bezier(.2,.8,.2,1);
 }
 .upload-progress-fill--upload {
-  background: linear-gradient(90deg, #8f8f8f, #002D72);
+  background: linear-gradient(90deg, #8f8f8f, #002d72);
 }
 .upload-progress-fill--inference {
-  background: linear-gradient(90deg, #6a6a6a, #00399a);
+  background: linear-gradient(90deg, #6a6a6a, #002d72);
 }
 .upload-progress-pct {
   font-family: 'JetBrains Mono', monospace;
@@ -1068,7 +1117,7 @@
   height: 18px;
   border-radius: 50%;
   border: 2px solid rgba(0, 45, 114, 0.12);
-  border-top-color: #002D72;
+  border-top-color: #002d72;
   animation: upload-spin 0.75s linear infinite;
 }
 
@@ -1245,6 +1294,9 @@
   align-items: center;
   gap: 8px;
   padding: 8px 14px 8px 8px;
+  /* Match .model-dropdown-item so every row in the menu is the same height. */
+  min-height: 48px;
+  box-sizing: border-box;
   cursor: pointer;
   transition: background 0.1s;
 }
@@ -1260,7 +1312,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #002D72;
+  color: #002d72;
 }
 .model-submenu-label {
   display: flex;
@@ -1272,7 +1324,7 @@
   color: #111111;
 }
 .model-submenu-item.selected .model-submenu-label {
-  color: #002D72;
+  color: #002d72;
 }
 .model-submenu-exp {
   font-family: 'JetBrains Mono', monospace;

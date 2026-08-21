@@ -1,19 +1,25 @@
-from flask import Blueprint, send_file, make_response, request, jsonify, Response, stream_with_context
+from flask import Blueprint, send_file, make_response, request, jsonify, Response, current_app, stream_with_context
 from werkzeug.utils import secure_filename
-from services.nifti_processor import NiftiProcessor
 from services.session_manager import SessionManager, generate_uuid
 from services.auto_segmentor import run_auto_segmentation, cancel_session, cancel_all_inference
-from services.mesh_generation import generate_mesh_manifest, generate_organ_glb_bytes, LABELS as MESH_LABELS
+from services.mesh_generation import bake_case_meshes, generate_mesh_manifest, generate_organ_glb_bytes, LABELS as MESH_LABELS
 from services.inference_job_queue import InferenceJobQueue
 from services.intent_parser import parse_intent
 from services.ollama_client import (
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_VISION_MODEL,
+    OLLAMA_THINK,
+    OllamaModelMissing,
     OllamaUnavailable,
     chat_json,
     chat_stream,
+    chat_with_tools,
+    is_reasoning_model,
     list_ollama_models,
+    resolve_text_model,
+    resolve_vision_model,
 )
+from services import ai_reasoning
 from services.segmentation_metrics import calculate_session_metrics
 from services.search_ranking import rank_quality_results, select_balanced_tumor_results
 from services.site_normalization import site_country_label, split_site_codes
@@ -35,6 +41,7 @@ from reportlab.lib.units import cm
 from sqlalchemy.orm import aliased
 import os
 import io
+import re
 import tempfile
 from dotenv import load_dotenv
 
@@ -60,6 +67,7 @@ last_session_check = datetime.now()
 LOWRES_ROOT = os.environ.get("PANTS_LOWRES_PATH", "/home/visitor/pants_lowres")
 
 import hmac
+from itsdangerous import URLSafeSerializer, BadSignature
 import threading
 
 # Session/case ids come straight from client requests and are joined into
@@ -76,12 +84,17 @@ def _metadata_xlsx_path():
     # metadata.xlsx ships either at the root of PANTS_PATH or under data/
     # depending on the checkout/deployment; use whichever exists.
     for candidate in (
-        os.path.join(Constants.PANTS_PATH, "metadata.xlsx"),
         os.path.join(Constants.PANTS_PATH, "data", "metadata.xlsx"),
+        os.path.join(Constants.PANTS_PATH, "metadata.xlsx"),
     ):
         if os.path.exists(candidate):
             return candidate
     return None
+
+
+def _norm_colname(s):
+    import re
+    return re.sub(r'[^a-z0-9]', '', str(s).lower())
 
 
 def _load_metadata_cache():
@@ -90,19 +103,34 @@ def _load_metadata_cache():
         if not xlsx_path:
             return {}
         df = pd.read_excel(xlsx_path, engine="openpyxl")
+        # Column-NAME lookup instead of position. This used to be
+        # row.iloc[0]/[4]/[5]/[13], which reads whatever happens to sit in
+        # those positions — silently wrong if the sheet's column order ever
+        # changes, same failure mode as OncoKit's hardcoded iloc indices.
+        # Matches by normalized name (case/whitespace/punctuation-insensitive)
+        # against the real header: "PanTS ID", "sex", "age", "tumor?".
+        col_map = {_norm_colname(c): c for c in df.columns}
+        pid_col = col_map.get(_norm_colname("PanTS ID")) or df.columns[0]
+        sex_col = col_map.get(_norm_colname("sex"))
+        age_col = col_map.get(_norm_colname("age"))
+        tumor_col = col_map.get(_norm_colname("tumor"))  # matches "tumor?" too
+
         cache = {}
         for _, row in df.iterrows():
-            pid = str(row.iloc[0])
+            pid = str(row[pid_col])
             cache[pid] = {
-                "sex": row.iloc[4] if pd.notna(row.iloc[4]) else "",
-                "age": row.iloc[5] if pd.notna(row.iloc[5]) else "",
-                "tumor": int(row.iloc[13]) if pd.notna(row.iloc[13]) else 0,
+                "sex": row[sex_col] if sex_col and pd.notna(row[sex_col]) else "",
+                "age": row[age_col] if age_col and pd.notna(row[age_col]) else "",
+                "tumor": int(row[tumor_col]) if tumor_col and pd.notna(row[tumor_col]) else 0,
             }
         return cache
     except Exception:
         return {}
 
 _METADATA_CACHE = _load_metadata_cache()
+_REPORT_DATA_CACHE = {}  # {case_id: report_data_dict} — avoids reloading/recomputing
+                          # the full CT+mask volume on every report/PDF request
+progress_tracker = {}  # {session_id: (start_time, expected_total_seconds)}
 
 # Lazy cache of {PanTS id: (contrast, study_detail)} for /get-report-data.
 # The old code re-loaded the entire ~10k-row workbook (non-read-only!) on
@@ -119,12 +147,28 @@ def _report_study_meta(pid):
             if xlsx_path:
                 wb = load_workbook(xlsx_path, read_only=True, data_only=True)
                 sheet = wb["PanTS_metadata"] if "PanTS_metadata" in wb.sheetnames else wb.active
-                for row in sheet.iter_rows(min_row=2, values_only=True):
+                rows_iter = sheet.iter_rows(min_row=1, values_only=True)
+                header = next(rows_iter, None) or ()
+                # Derived from the real header row ("ct phase", "study type")
+                # rather than hardcoded row[3]/row[8] — if columns get
+                # reordered upstream, this re-resolves correctly on next load
+                # instead of silently reading the wrong field.
+                header_map = {_norm_colname(h): i for i, h in enumerate(header) if h is not None}
+                ct_phase_idx = header_map.get(_norm_colname("ct phase"))
+                study_type_idx = header_map.get(_norm_colname("study type"))
+                for row in rows_iter:
                     if row and row[0]:
-                        cache[str(row[0])] = (
-                            row[3] if len(row) > 3 and row[3] is not None else "",
-                            row[8] if len(row) > 8 and row[8] is not None else "",
+                        contrast = (
+                            row[ct_phase_idx]
+                            if ct_phase_idx is not None and ct_phase_idx < len(row) and row[ct_phase_idx] is not None
+                            else ""
                         )
+                        study_detail = (
+                            row[study_type_idx]
+                            if study_type_idx is not None and study_type_idx < len(row) and row[study_type_idx] is not None
+                            else ""
+                        )
+                        cache[str(row[0])] = (contrast, study_detail)
                 wb.close()
         except Exception as e:
             print(f"[report meta] metadata load failed: {e}")
@@ -263,12 +307,18 @@ def get_image_preview(clabel_id):
     path = os.path.join(Constants.PANTS_PATH, "profile_only", get_panTS_id(secure_filename(clabel_id)), "profile.jpg")
     if not os.path.exists(path):
         return jsonify({"error": f"File not found: {path} "}), 404
-    return send_file(
+    resp = send_file(
         path,
-        mimetype="image/jpg",   
+        mimetype="image/jpg",
         as_attachment=False,
-        download_name=f"{clabel_id}_slice.jpg"
+        download_name=f"{clabel_id}_slice.jpg",
+        max_age=31536000,
     )
+    # Profile thumbnails are content-stable (regenerated only by an offline batch),
+    # so let the browser cache them hard — repeat visits / shuffle / back-nav then
+    # render instantly with zero network instead of revalidating every card.
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -276,17 +326,72 @@ def get_image_preview(clabel_id):
 # preprocess_meshes.py; these endpoints serve them.
 # ---------------------------------------------------------------------------
 
+# One bake at a time per case: two tabs opening the same un-baked case must
+# not both load the labelmap and mesh every organ. The dict maps a case id to
+# its lock; _MESH_BAKE_DICT_LOCK guards the dict itself.
+_MESH_BAKE_LOCKS: dict = {}
+_MESH_BAKE_DICT_LOCK = threading.Lock()
+
+
+def _mesh_bake_lock(pants_id):
+    with _MESH_BAKE_DICT_LOCK:
+        lock = _MESH_BAKE_LOCKS.get(pants_id)
+        if lock is None:
+            lock = threading.Lock()
+            _MESH_BAKE_LOCKS[pants_id] = lock
+        return lock
+
+
+def _read_manifest_or_none(manifest_path):
+    """Parse a cached manifest; on corruption remove it so it gets rebaked."""
+    if not os.path.exists(manifest_path):
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError) as error:
+        print("[mesh-manifest] corrupt cache, rebaking:", str(error))
+        try:
+            os.remove(manifest_path)
+        except OSError:
+            pass
+        return None
+
+
 @api_blueprint.route("/cases/<case_id>/mesh-manifest")
 def get_mesh_manifest(case_id):
     if not _is_safe_id(case_id):
         return jsonify({"error": "Invalid id"}), 400
-    manifest_path = os.path.join(Constants.MESH_PATH, get_panTS_id(secure_filename(case_id)), "manifest.json")
+    pants_id = get_panTS_id(secure_filename(case_id))
+    case_dir = os.path.join(Constants.MESH_PATH, pants_id)
+    manifest_path = os.path.join(case_dir, "manifest.json")
 
-    if not os.path.exists(manifest_path):
-        return jsonify({"error": f"File not found: {manifest_path} "}), 404
+    manifest = _read_manifest_or_none(manifest_path)
+    if manifest is not None:
+        return jsonify(manifest)
 
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        manifest = json.load(f)
+    # No pre-baked meshes for this case: bake manifest AND every organ GLB in
+    # one pass over the labelmap (single volume load), exactly matching what
+    # the pre-bake scripts produce, then cache it all so the next load is
+    # instant. The labelmap comes from the local dataset when present, else
+    # the HuggingFace mirror (cached).
+    mask_digits = "".join(ch for ch in str(case_id) if ch.isdigit())
+    seg_path = _ai_local_mask_path(mask_digits) if mask_digits else None
+    if not seg_path:
+        return jsonify({
+            "error": f"No labelmap available for case {case_id} (local dataset "
+                     "and HuggingFace mirror both unavailable)."
+        }), 404
+
+    with _mesh_bake_lock(pants_id):
+        # Another request may have finished the bake while we waited.
+        manifest = _read_manifest_or_none(manifest_path)
+        if manifest is not None:
+            return jsonify(manifest)
+        try:
+            manifest = bake_case_meshes(pants_id, seg_path, case_dir, route_base="cases")
+        except Exception as error:
+            return jsonify({"error": f"Mesh generation failed: {error}"}), 500
 
     return jsonify(manifest)
 
@@ -297,6 +402,36 @@ def get_mesh_file(display_id, filename):
     if not _is_safe_id(display_id):
         return jsonify({"error": "Invalid id"}), 400
     mesh_path = os.path.join(Constants.MESH_PATH, secure_filename(display_id), secure_filename(filename))
+
+    if not os.path.exists(mesh_path):
+        # Safety net only — the manifest route bakes every organ GLB up front,
+        # so this fires just when a cached file was deleted out from under a
+        # live manifest. Generation failure is a 500; a failed cache write is
+        # NOT (the bytes are in memory — serve them anyway).
+        safe_name = secure_filename(filename)
+        organ_key = safe_name[:-4] if safe_name.endswith(".glb") else safe_name
+        mask_digits = "".join(ch for ch in str(display_id) if ch.isdigit())
+        seg_path = _ai_local_mask_path(mask_digits) if mask_digits else None
+        if seg_path is None:
+            return jsonify({"error": f"No labelmap available for {display_id}"}), 404
+        try:
+            glb_bytes = generate_organ_glb_bytes(organ_key, seg_path)
+        except Exception as e:
+            return jsonify({"error": f"Error generating GLB: {str(e)}"}), 500
+        try:
+            os.makedirs(os.path.dirname(mesh_path), exist_ok=True)
+            tmp_path = f"{mesh_path}.part"
+            with open(tmp_path, "wb") as f:
+                f.write(glb_bytes)
+            os.replace(tmp_path, mesh_path)
+        except OSError as e:
+            print("[mesh cache]", type(e).__name__, str(e))
+            return send_file(
+                BytesIO(glb_bytes),
+                mimetype="model/gltf-binary",
+                conditional=False,
+            )
+
     try:
         response = send_file(
             mesh_path,
@@ -555,19 +690,22 @@ def define_term():
     }), 200
  
  
-@api_blueprint.route('/get-report-data/<id>', methods=['GET'])
-def get_report_data(id):
-    # CancerVerse has no masks/RadGPT report yet — respond gracefully.
+def _build_report_data(id):
+    """Gathers everything the report needs (RadGPT text, organ volumes/status/
+    centroid/dimensions, lesions) into a plain dict. Shared by the JSON
+    endpoint and the PDF-generation endpoint so both show identical data."""
+    # CancerVerse has no masks/RadGPT report yet -- respond gracefully.
     if get_dataset_from_case_id(secure_filename(str(id))) == "CancerVerse":
-        return jsonify({"masks_available": False}), 200
+        return {"masks_available": False}
     if id is None or not str(id).isdigit():
-        return jsonify({"error": "Invalid id parameter"}), 400
+        return {"error": "Invalid id parameter"}
     case_id = int(id)
+    id = str(case_id)
+
+    if id in _REPORT_DATA_CACHE:
+        return _REPORT_DATA_CACHE[id]
+    
     try:
-        id = str(case_id)
-        # ── Try RadGPT structured report from metadata.xlsx first ─────────────
-        # This uses Zongwei Zhou's own RadGPT model output — more accurate
-        # than Ollama-generated impressions. Falls back to Ollama if not found.
         radgpt_comments = None
         radgpt_impression = None
         try:
@@ -585,9 +723,7 @@ def get_report_data(id):
                         row_id = str(row[id_col] or '').strip()
                         if row_id == pants_id:
                             raw = str(row[report_col] or '')
-                            # Clean Windows carriage return artifacts
                             raw = raw.replace('_x000D_', '\n').replace('\r\n', '\n').replace('\r', '\n')
-                            # Collapse multiple blank lines
                             import re as _re
                             raw = _re.sub(r'\n{3,}', '\n\n', raw)
                             findings_match = re.search(r'FINDINGS:(.*?)(?=IMPRESSION:|$)', raw, re.DOTALL)
@@ -596,7 +732,6 @@ def get_report_data(id):
                                 radgpt_comments = findings_match.group(1).strip()
                             if impression_match:
                                 imp_text = impression_match.group(1).strip()
-                                # Keep full impression, split into sentences
                                 sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', imp_text) if s.strip()]
                                 radgpt_impression = sentences if sentences else [imp_text]
                             print(f"[RadGPT] Found report for case {id}: {radgpt_impression}")
@@ -604,26 +739,23 @@ def get_report_data(id):
                 wb.close()
         except Exception as e:
             print(f"[RadGPT] metadata lookup failed: {e}")
-        # ─────────────────────────────────────────────────────────────────────
+
         subfolder = "ImageTr" if case_id < 9000 else "ImageTe"
         label_subfolder = "LabelTr" if case_id < 9000 else "LabelTe"
-        # Check image_only first (new structure), fall back to data/ImageTr
         image_only_path = f"{Constants.PANTS_PATH}/image_only/{get_panTS_id(case_id)}/{Constants.MAIN_NIFTI_FILENAME}"
         data_ct_path = f"{Constants.PANTS_PATH}/data/{subfolder}/{get_panTS_id(case_id)}/{Constants.MAIN_NIFTI_FILENAME}"
         ct_path = image_only_path if os.path.exists(image_only_path) else data_ct_path
-        # Check mask_only first (new structure), fall back to data/LabelTe
         mask_only_path = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(case_id)}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
         data_mask_path = f"{Constants.PANTS_PATH}/data/{label_subfolder}/{get_panTS_id(case_id)}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
         mask_path = mask_only_path if os.path.exists(mask_only_path) else data_mask_path
-        seg_dir = f"{Constants.PANTS_PATH}/data/{label_subfolder}/{get_panTS_id(case_id)}/segmentations"
- 
+        seg_dir = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(case_id)}/segmentations"        
         pid = get_panTS_id(case_id)
         meta = _METADATA_CACHE.get(pid, {})
         age = meta.get("age", "N/A")
         sex = meta.get("sex", "N/A")
- 
+
         contrast, study_detail = _report_study_meta(pid)
- 
+
         # If local files don't exist, download from HuggingFace
         if not os.path.exists(ct_path) or not os.path.exists(mask_path):
             import requests, tempfile
@@ -646,46 +778,27 @@ def get_report_data(id):
                 with open(mask_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
- 
+
         ct_nii = nib.load(ct_path)
         spacing = ct_nii.header.get_zooms()
         shape = ct_nii.shape
         ct_array = ct_nii.get_fdata()
         mask_nii = nib.load(mask_path)
         mask_array = mask_nii.get_fdata().astype(np.uint8)
-        # Crop both arrays to the minimum shape along each axis
-        # to handle slight size mismatches between CT and mask
         min_shape = tuple(min(c, m) for c, m in zip(ct_array.shape, mask_array.shape))
         ct_array = ct_array[:min_shape[0], :min_shape[1], :min_shape[2]]
         mask_array = mask_array[:min_shape[0], :min_shape[1], :min_shape[2]]
         voxel_volume = np.prod(mask_nii.header.get_zooms()) / 1000
-        # World-space affine - converts a voxel index (i, j, k) to real
-        # millimeter coordinates. This is what makes the centroid below a
-        # REAL position usable by moveCornerstoneCrosshairToMm, rather
-        # than a placeholder.
         affine = mask_nii.affine
- 
+
         LABELS = {v: k for k, v in Constants.PREDEFINED_LABELS.items()}
- 
-        # Soft physiological sanity ranges per organ type, used only to
-        # flag "this needs review" vs "looks normal" internally. NOT
-        # shown to the user as raw numbers - the frontend only ever sees
-        # the `status` field. This is a stopgap for a known upstream
-        # segmentation/data issue where some organs read in the air range;
-        # rather than silently showing a wrong number as fact, or trying
-        # to "correct" the data here, we flag it so the UI can say
-        # "needs review" instead of presenting a confident wrong reading.
-        SOLID_ORGAN_HU_RANGE = (-20, 150)      # liver, spleen, kidney, pancreas, etc.
-        GI_HOLLOW_ORGAN_HU_RANGE = (-300, 200)  # colon, stomach, intestine, duodenum - tightened from
-                                                 # -1000 so a mean this close to pure air (e.g. -756 for
-                                                 # colon) correctly flags "check" instead of "normal" -
-                                                 # a real colon has enough wall/stool tissue that a mean
-                                                 # in the deep-air range usually signals a segmentation
-                                                 # issue, not a genuinely normal reading.
-        LUNG_HU_RANGE = (-1000, -200)            # lungs are genuinely air-filled - this range is correct as-is
+
+        SOLID_ORGAN_HU_RANGE = (-20, 150)
+        GI_HOLLOW_ORGAN_HU_RANGE = (-300, 200)
+        LUNG_HU_RANGE = (-1000, -200)
         GI_HOLLOW_ORGANS = {"colon", "stomach", "intestine", "duodenum"}
         LUNG_ORGANS = {"lung_left", "lung_right"}
- 
+
         organ_volumes = {}
         NO_FLAG_ORGANS = {
             "femur_left", "femur_right", "aorta", "postcava", "veins",
@@ -700,7 +813,7 @@ def get_report_data(id):
                 continue
             volume = float(np.sum(mask) * voxel_volume)
             mean_hu = float(np.mean(ct_array[mask]))
- 
+
             if organ in LUNG_ORGANS:
                 lo, hi = LUNG_HU_RANGE
             elif organ in GI_HOLLOW_ORGANS:
@@ -708,85 +821,107 @@ def get_report_data(id):
             else:
                 lo, hi = SOLID_ORGAN_HU_RANGE
             status = "normal" if organ in NO_FLAG_ORGANS else ("check" if (mean_hu < lo or mean_hu > hi) else "normal")
- 
-            # Real centroid: voxel-space center of mass, converted to mm
-            # via the affine. This is genuine anatomical position - not a
-            # placeholder - and feeds the same crosshair-navigation
-            # plumbing already used elsewhere (moveCornerstoneCrosshairToMm
-            # / moveNiiVueCrosshairToMm) for click-to-jump.
+
             voxel_coords = np.argwhere(mask)
-            centroid_voxel = voxel_coords.mean(axis=0)  # (i, j, k) in voxel space
+            centroid_voxel = voxel_coords.mean(axis=0)
             centroid_world = nib.affines.apply_affine(affine, centroid_voxel)
- 
-            # Bounding box dimensions in cm (real physical size of the organ)
+
             bbox_min = voxel_coords.min(axis=0)
             bbox_max = voxel_coords.max(axis=0)
             bbox_voxels = bbox_max - bbox_min + 1
-            # Convert voxel counts to mm using spacing, then to cm
             spacing_mm = np.abs([affine[0,0], affine[1,1], affine[2,2]])
             dims_mm = bbox_voxels * spacing_mm
             dims_cm = [round(float(d)/10, 1) for d in dims_mm]
- 
+
             organ_volumes[organ] = {
-                "volume": round(volume, 2),
-                "mean_hu": round(mean_hu, 1),
+                "volume": round(float(volume), 2),
+                "mean_hu": round(float(mean_hu), 1),
                 "status": status,
                 "centroid_mm": [round(float(c), 2) for c in centroid_world],
                 "dimensions": dims_cm,
             }
- 
+
         lesions = {}
         lesion_files = {
-            "pancreas": "pancreatic_lesion.npz",
-            "liver": "liver_lesion.npz",
-            "kidney": "kidney_lesion.npz",
+            "pancreas": "pancreatic_lesion.nii.gz",
+            "liver": "liver_lesion.nii.gz",
+            "kidney": "kidney_lesion.nii.gz",
         }
         for organ, filename in lesion_files.items():
             path = os.path.join(seg_dir, filename)
             if os.path.exists(path):
-                data = np.load(path)["data"]
-                voxels = int(np.sum(data > 0))
+                lesion_data = nib.load(path).get_fdata()
+                voxels = int(np.sum(lesion_data > 0))
                 if voxels > 0:
                     lesion_volume = round(voxels * voxel_volume, 2)
-                    lesions[organ] = {"voxels": voxels, "volume": lesion_volume}
- 
-        organ_data_str = ""
-        for organ, vals in organ_volumes.items():
-            organ_data_str += f"{organ.replace('_', ' ')}: volume={vals['volume']}cc, mean HU={vals['mean_hu']}\n"
- 
-        # If we have a RadGPT report, it is the authoritative source for organ status.
-        # Reset everything to normal first, then flag only what RadGPT calls abnormal.
+                    lesions[organ] = {"voxels": voxels, "volume": round(float(lesion_volume), 2)}
+
+        print(f"[DEBUG] seg_dir={seg_dir}")
+        print(f"[DEBUG] lesions found: {lesions}")
+
         if radgpt_comments:
             for organ in list(organ_volumes.keys()):
                 organ_volumes[organ]['status'] = 'normal'
+            # NOTE: 'hypoattenuating'/'hyperattenuating' added — RadGPT's actual
+            # enhancement-description vocabulary ("Enhancement relative to
+            # pancreas: Hypoattenuating...") wasn't covered by the old list,
+            # which only had the unrelated words 'hypodense'/'hyperdense'.
             abnormal_keywords = ['enlarged', 'mass', 'lesion', 'tumor', 'abnormal',
                                  'dilated', 'obstruction', 'isoattenuating', 'hypodense',
-                                 'hyperdense', 'cyst', 'nodule', 'atrophy', 'bilateral']
-            # Build stripped root for flexible matching
-            organ_roots = {}
+                                 'hyperdense', 'hypoattenuating', 'hyperattenuating',
+                                 'cyst', 'nodule', 'atrophy', 'bilateral']
+            subtype_suffixes = ('_body', '_head', '_tail', '_left', '_right')
+
+            def _base_root(organ_name):
+                r = organ_name
+                for suf in ('_left', '_right', '_body', '_head', '_tail', '_gland', '_duct', '_lesion'):
+                    r = r.replace(suf, '')
+                return r.replace('_', '').lower()
+
+            organs_by_root = {}
             for organ in organ_volumes.keys():
-                root = organ.replace('_left','').replace('_right','').replace('_body','') \
-                            .replace('_head','').replace('_tail','').replace('_gland','') \
-                            .replace('_duct','').replace('_lesion','').replace('_','')
-                organ_roots[organ] = root.lower()
-            for line in radgpt_comments.split('\n'):
-                line_stripped = line.lower().replace(' ','').replace('_','')
-                if any(kw in line.lower() for kw in abnormal_keywords):
-                    for organ, root in organ_roots.items():
-                        # Skip subtypes unless explicitly mentioned
-                        # e.g. "pancreas enlarged" shouldn't flag pancreas_body/head/tail
-                        if '_body' in organ or '_head' in organ or '_tail' in organ or '_duct' in organ:
-                            # Only flag subtype if the subtype word is in the line
-                            subtype = organ.split('_')[-1]
-                            if root in line_stripped and subtype in line.lower():
-                                organ_volumes[organ]['status'] = 'check'
-                        else:
-                            if root in line_stripped:
-                                organ_volumes[organ]['status'] = 'check'
+                organs_by_root.setdefault(_base_root(organ), []).append(organ)
+
+            # Find each organ-heading line (a line that IS, after stripping a
+            # trailing ':', one of the known organ roots or "<root>s") — same
+            # rule the frontend uses to scope report text per organ — then
+            # scan the WHOLE block between consecutive headings for both the
+            # abnormal keyword and the subtype word, rather than requiring
+            # both on one line. A lesion's location ("Location: pancreas
+            # tail.") is routinely on a different line than the keyword that
+            # flags it ("Pancreas lesions:"), so the old per-line check could
+            # never flag a sub-label organ even when its own block clearly
+            # documented a finding there.
+            lines = radgpt_comments.split('\n')
+            heading_idx = []
+            for i, line in enumerate(lines):
+                cleaned = line.strip().rstrip(':').lower()
+                for root in organs_by_root:
+                    if root and (cleaned == root or cleaned == f'{root}s'):
+                        heading_idx.append((i, root))
+                        break
+
+            for pos, (start, root) in enumerate(heading_idx):
+                end = heading_idx[pos + 1][0] if pos + 1 < len(heading_idx) else len(lines)
+                block_lower = '\n'.join(lines[start:end]).lower()
+                if not any(kw in block_lower for kw in abnormal_keywords):
+                    continue
+                for organ in organs_by_root.get(root, []):
+                    has_subtype = organ.endswith(subtype_suffixes)
+                    if not has_subtype:
+                        # Generic/base organ label (no left/right/body/head/tail
+                        # subtype) — any abnormal keyword anywhere in its block
+                        # flags it, same as before.
+                        organ_volumes[organ]['status'] = 'check'
+                    elif organ.rsplit('_', 1)[-1] in block_lower:
+                        # Sub-label organ — only flag it if ITS specific
+                        # subtype word (e.g. "tail") appears anywhere in the
+                        # block, not just on the same line as the keyword.
+                        organ_volumes[organ]['status'] = 'check'
+
         comments = radgpt_comments or "Clinical comments unavailable."
         impression_items = radgpt_impression or ["No impression available for this case."]
- 
-        return jsonify({
+        result = {
             "case_id": id,
             "patient": {"age": age, "sex": sex},
             "imaging": {
@@ -799,14 +934,982 @@ def get_report_data(id):
             "lesions": lesions,
             "comments": comments,
             "impression": impression_items,
+        }
+        _REPORT_DATA_CACHE[id] = result
+        return result
+    except Exception:
+        return {"error": "Failed to build report data for the given id."}
+
+
+@api_blueprint.route('/get-report-data/<id>', methods=['GET'])
+def get_report_data(id):
+    data = _build_report_data(id)
+    if "error" in data:
+        status = 400 if data["error"] == "Invalid id parameter" else 500
+        return jsonify(data), status
+    return jsonify(data)
+
+
+@api_blueprint.route('/report/<id>', methods=['GET'])
+def report_html(id):
+    """Shareable Apple-Health-style HTML report for a case -- same underlying
+    data as get_report_data/generate_report_pdf (_build_report_data), just
+    rendered as an interactive patient/clinician-toggle page instead of JSON
+    or a static PDF. This is a live server-rendered page (not a static file
+    a client fetches data into), so the same auth/session that already
+    protects case access here protects this route too -- no new data-exposure
+    surface. The 'Download radiology report' button on the clinician side
+    links to the existing /generate-report-pdf/<id> route."""
+    resolved = _resolve_case_id_or_token(id)
+    if resolved is None:
+        return jsonify({"error": "Invalid or expired link"}), 404
+    data = _build_report_data(resolved)
+    if "error" in data:
+        status = 400 if data["error"] == "Invalid id parameter" else 500
+        return jsonify(data), status
+    html_out = _build_report_html(data)
+    return Response(html_out, mimetype="text/html")
+ 
+
+import html as _html_mod
+import json as _json_mod
+
+
+def _plain_organ_name(root):
+    return root
+
+
+_SUBREGION_PLAIN = {
+    ("pancreas", "tail"): "the tail of your pancreas (the end farthest from your stomach)",
+    ("pancreas", "body"): "the body of your pancreas (the middle section)",
+    ("pancreas", "head"): "the head of your pancreas (the end closest to your small intestine)",
+}
+
+_FINDING_WORD = [
+    ("cyst", "fluid-filled spot"),
+    ("nodule", "small bump"),
+    ("mass", "growth"),
+    ("tumor", "growth"),
+    ("enlarged", "enlarged area"),
+    ("dilated", "widened area"),
+    ("lesion", "spot"),
+]
+
+
+def _finding_word(detail_text):
+    d = (detail_text or "").lower()
+    for keyword, word in _FINDING_WORD:
+        if keyword in d:
+            return word
+    return None
+
+
+def _where_phrase(root, location_word):
+    name = _plain_organ_name(root)
+    if not location_word:
+        return f"your {name}"
+    if location_word in ("left", "right"):
+        return f"your {location_word} {name}"
+    if (root, location_word) in _SUBREGION_PLAIN:
+        return _SUBREGION_PLAIN[(root, location_word)]
+    # Unknown or compound locator (e.g. "segment 4", parsed straight from the
+    # report text) — forcing this into "the X of your Y" reads wrong for
+    # anything that isn't a short single anatomical word. This construction
+    # stays grammatically correct for any locator string.
+    return f"your {name} ({location_word})"
+
+
+def _organ_base_stats(root, organ_volumes):
+    """Looks up an organ's baseline volume/HU. Some organs (kidney, lung,
+    adrenal gland) have no bare aggregate key in organ_volumes — only
+    <root>_left/<root>_right — in which case this sums volume and averages
+    HU across both sides instead of returning nothing."""
+    if root in organ_volumes:
+        return organ_volumes[root]
+    parts = [organ_volumes[k] for k in (f"{root}_left", f"{root}_right") if k in organ_volumes]
+    if not parts:
+        return {}
+    vols = [p.get("volume") for p in parts if p.get("volume") is not None]
+    hus = [p.get("mean_hu") for p in parts if p.get("mean_hu") is not None]
+    return {
+        "volume": sum(vols) if vols else None,
+        "mean_hu": (sum(hus) / len(hus)) if hus else None,
+    }
+
+
+def _patient_lesion_sentence(root, lesion, location_word, detail_text):
+    where = _where_phrase(root, location_word)
+    size = lesion.get("size")
+    word = _finding_word(detail_text) or "spot"
+    size_part = f" measuring {size} cm" if size else ""
+    return f"Your scan found a {word}{size_part} in {where}."
+
+
+def _patient_no_lesion_sentence(root):
+    name = _plain_organ_name(root)
+    return (f"Your {name} was flagged for your doctor to review, but the report "
+            f"doesn't describe a specific spot or growth \u2014 your doctor can "
+            f"tell you exactly what stood out.")
+
+
+def _doctor_lesion_sentence(root, lesion, location_word):
+    loc = f" ({location_word})" if location_word else ""
+    return (f"{root.title()}{loc} lesion, {lesion.get('size', 'N/A')} cm, "
+            f"volume {lesion.get('volume', 0):.1f} cc. "
+            f"{lesion.get('enhancement', '')} relative to {root}, "
+            f"HU {lesion.get('hu', 0):.1f} \u00b1 {lesion.get('hu_sd', 0):.1f}.").strip()
+
+
+def _base_root(organ):
+    r = organ
+    for suf in ('_left', '_right', '_body', '_head', '_tail', '_gland', '_duct', '_lesion'):
+        r = r.replace(suf, '')
+    return r.replace('_', '').lower()
+
+
+def _e(s):
+    """HTML-escape any real data before it goes in the page — this is a
+    document assembled from case data, not a trusted template string."""
+    return _html_mod.escape(str(s), quote=True)
+
+
+def _build_report_html(report_data):
+    """Builds the full Apple-Health-inspired shareable HTML report from a
+    real report_data dict (same shape _draw_report_pdf and the JSON API use:
+    case_id, patient, imaging, organ_volumes, lesions, comments, impression).
+    No placeholder content — every value is pulled from report_data itself,
+    and the layout adapts to however many findings/organs actually exist.
+    """
+    case_id = report_data.get("case_id", "N/A")
+    patient = report_data.get("patient", {})
+    imaging = report_data.get("imaging", {})
+    organ_volumes = report_data.get("organ_volumes", {})
+    lesions = report_data.get("lesions", {})
+    comments = str(report_data.get("comments", ""))
+
+    roots_present = sorted(set(_base_root(o) for o in organ_volumes.keys()))
+    parsed_organs = _parse_findings(comments, roots_present)
+    organ_lookup = {o['root']: o for o in parsed_organs}
+
+    # ---- Build one "finding" entry per flagged organ (0, 1, or many) ----
+    flagged_roots = sorted(set(
+        _base_root(o) for o, v in organ_volumes.items() if v.get("status") == "check"
+    ))
+    findings = []
+    for root in flagged_roots:
+        entry = organ_lookup.get(root, {"baseline_lines": [], "lesions": []})
+        detail_text = " ".join(entry.get("baseline_lines", []))
+        organ_base = _organ_base_stats(root, organ_volumes)
+
+        if entry.get("lesions"):
+            for lesion in entry["lesions"]:
+                loc_word = lesion["location"].replace(root, "").strip() or None
+                findings.append({
+                    "title": f"{root.title()}" + (f" \u2014 {loc_word.title()}" if loc_word else ""),
+                    "patient_html": _e(_patient_lesion_sentence(root, lesion, loc_word, detail_text)),
+                    "doctor_html": _e(_doctor_lesion_sentence(root, lesion, loc_word)),
+                    "metrics": [
+                        {"label": "Organ volume", "value": f"{organ_base.get('volume', 0):.1f} cc" if organ_base.get('volume') is not None else "N/A"},
+                        {"label": "Lesion volume", "value": f"{lesion.get('volume', 0):.1f} cc"},
+                        {"label": "Mean HU (organ)", "value": f"{organ_base.get('mean_hu', 0):.1f}" if organ_base.get('mean_hu') is not None else "N/A"},
+                        {"label": "Lesion count", "value": str(len(entry["lesions"]))},
+                    ],
+                })
+        else:
+            findings.append({
+                "title": root.title(),
+                "patient_html": _e(_patient_no_lesion_sentence(root)),
+                "doctor_html": _e(detail_text or f"{root.title()} flagged; no lesion described in report text."),
+                "metrics": [
+                    {"label": "Organ volume", "value": f"{organ_base.get('volume', 0):.1f} cc" if organ_base.get('volume') is not None else "N/A"},
+                    {"label": "Mean HU (organ)", "value": f"{organ_base.get('mean_hu', 0):.1f}" if organ_base.get('mean_hu') is not None else "N/A"},
+                ],
+            })
+
+    # ---- "Everything else looked normal" — organs RadGPT actually commented
+    # on that are NOT flagged (real prose-covered organs only, not every
+    # unrelated bone/vessel) ----
+    clean_cards = []
+    for organ in parsed_organs:
+        root = organ["root"]
+        if root in flagged_roots:
+            continue
+        base = _organ_base_stats(root, organ_volumes)
+        clean_cards.append({
+            "name": root.title(),
+            "volume": f"{base.get('volume', 0):.0f}" if base.get("volume") is not None else "\u2014",
+            "hu": f"Mean HU {base.get('mean_hu', 0):.1f}" if base.get("mean_hu") is not None else "",
         })
- 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": "An internal error occurred."}), 500
- 
- 
+
+    # ---- Full organs-reviewed checklist (every organ in this case) ----
+    organ_rows = sorted(
+        (organ.replace("_", " ").title(), vals.get("status", "normal"))
+        for organ, vals in organ_volumes.items()
+    )
+    flagged_rows = [r for r in organ_rows if r[1] == "check"]
+    normal_rows = [r for r in organ_rows if r[1] != "check"]
+    visible_rows = flagged_rows + normal_rows[:max(0, 3 - len(flagged_rows))]
+    hidden_rows = normal_rows[len(visible_rows) - len(flagged_rows):]
+
+    def _row_html(name, status):
+        cls = "row flagged" if status == "check" else "row"
+        icon = '<span class="exclaim">!</span>' if status == "check" else '<span class="check">&#10003;</span>'
+        name_cls = ' class="name"' if status != "check" else ' class="name"'
+        return f'<div class="{cls}"><span{name_cls}>{_e(name)}</span>{icon}</div>'
+
+    visible_rows_html = "\n".join(_row_html(n, s) for n, s in visible_rows)
+    hidden_rows_html = "\n".join(_row_html(n, s) for n, s in hidden_rows)
+
+    clean_grid_html = "\n".join(
+        f'''<div class="clean-card"><div class="name">{_e(c['name'])}</div>
+        <div class="num">{_e(c['volume'])}<span class="unit"> cc</span></div>
+        <div class="hu">{_e(c['hu'])}</div></div>'''
+        for c in clean_cards
+    ) or '<p style="font-size:13.5px;color:var(--muted);">No additional measured organs for this case.</p>'
+
+    age = patient.get("age", "N/A")
+    sex = patient.get("sex", "N/A")
+    study = imaging.get("study_type", "N/A")
+    contrast = imaging.get("contrast", "N/A")
+
+    findings_json = _json_mod.dumps(findings)
+    pdf_url = f"/api/generate-report-pdf/{case_id}"
+
+    findings_count = len(findings)
+    flagged_summary = (
+        f"{findings_count} finding{'s' if findings_count != 1 else ''} need{'s' if findings_count == 1 else ''} review"
+        if findings_count else "No findings flagged for review"
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CT Scan Report \u2014 Case {_e(case_id)}</title>
+<style>
+{_REPORT_CSS}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="toggle">
+    <button id="btn-patient" class="active" onclick="setView('patient')">For me / family</button>
+    <button id="btn-doctor" onclick="setView('doctor')">For clinicians</button>
+  </div>
+
+  <div class="disclaimer" id="disclaimer"></div>
+
+  <div class="header">
+    <h1>CT scan results</h1>
+    <div class="sub">Case {_e(case_id)} &middot; {_e(study)} &middot; {_e(age)}y, {_e(sex)} &middot; {_e(contrast)}</div>
+  </div>
+
+  <div id="download-row" style="display:none; margin-bottom:16px;">
+    <a href="{_e(pdf_url)}" class="download-btn"><i>&#8681;</i> Download radiology report (PDF)</a>
+  </div>
+
+  <div class="top-grid">
+    <div id="findings-container"></div>
+    <div>
+      <div class="section-label" style="margin-top:0;">Everything else looked normal</div>
+      <div class="clean-grid">
+        {clean_grid_html}
+      </div>
+    </div>
+  </div>
+
+  <div class="section-label">Organs reviewed &middot; {len(organ_rows)} total</div>
+  <div class="checklist">
+    {visible_rows_html}
+  </div>
+  {f'<div id="more-organs" class="checklist" style="margin-top:8px;">{hidden_rows_html}</div><button class="show-more" onclick="toggleMore()" id="more-btn">Show all {len(organ_rows)} organs</button>' if hidden_rows else ''}
+
+</div>
+
+<script>
+const findings = {findings_json};
+const disclaimers = {{
+  patient: "This is an easy-to-read summary of your CT scan, generated automatically. It has not been reviewed by a doctor yet \\u2014 your care team will go over the full results with you.",
+  doctor: "AI-generated report (RadGPT findings + automated segmentation measurements). Not reviewed by a radiologist. For research use only \\u2014 not for clinical decision-making.",
+}};
+
+function renderFindings(view) {{
+  const container = document.getElementById('findings-container');
+  if (findings.length === 0) {{
+    container.innerHTML = '<div class="card" style="background:var(--green-bg);"><div class="body-text">No findings were flagged in this scan.</div></div>';
+    return;
+  }}
+  container.innerHTML = findings.map(f => {{
+    const body = view === 'patient' ? f.patient_html : f.doctor_html;
+    const metricsHtml = (view === 'doctor' && f.metrics.length)
+      ? '<div class="metrics-grid">' + f.metrics.map(m =>
+          '<div class="metric"><div class="label">' + m.label + '</div><div class="value">' + m.value + '</div></div>'
+        ).join('') + '</div>'
+      : '';
+    const badge = view === 'doctor' ? '<div class="badge">Needs review</div>' : '';
+    return '<div class="card flag">' +
+      '<div class="flag-label"><span class="dot"></span> Needs a closer look</div>' +
+      '<div class="organ-title">' + f.title + '</div>' +
+      '<div class="body-text">' + body + '</div>' +
+      metricsHtml + badge +
+      '</div>';
+  }}).join('');
+}}
+
+function setView(view) {{
+  document.getElementById('disclaimer').textContent = disclaimers[view];
+  renderFindings(view);
+  document.getElementById('btn-patient').classList.toggle('active', view === 'patient');
+  document.getElementById('btn-doctor').classList.toggle('active', view === 'doctor');
+  document.getElementById('download-row').style.display = view === 'doctor' ? 'block' : 'none';
+}}
+
+function toggleMore() {{
+  const el = document.getElementById('more-organs');
+  const btn = document.getElementById('more-btn');
+  if (!el) return;
+  el.classList.toggle('open');
+  btn.textContent = el.classList.contains('open') ? 'Show fewer' : 'Show all {len(organ_rows)} organs';
+}}
+
+setView('patient');
+</script>
+</body>
+</html>"""
+
+
+# ============================================================
+# DROP-IN REPLACEMENT for _REPORT_CSS in api_blueprint.py
+# ============================================================
+
+_REPORT_CSS = """
+  :root {
+    --jhu-heritage: #002D72;
+    --jhu-spirit:   #68ACE5;
+    --jhu-white:    #FFFFFF;
+
+    --ink: #071C3C; --muted: #4C6584; --faint: #7C93AE;
+    --surface: #F2F6FB; --card: #ffffff; --line: #D6E4F2;
+    --accent: var(--jhu-heritage); --accent-bg: #E7EFFA;
+    --green: #1C7C4F; --green-bg: #EAF7EF;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--surface); color: var(--ink); }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 20px 18px 60px; }
+  @media (min-width: 720px) {
+    .wrap { max-width: 900px; padding: 32px 32px 80px; }
+    .top-grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: 20px; align-items: start; }
+    .clean-grid { grid-template-columns: repeat(3, 1fr); }
+    .metrics-grid { grid-template-columns: repeat(4, 1fr); }
+  }
+  @media (min-width: 1080px) {
+    .wrap { max-width: 1080px; }
+    .clean-grid { grid-template-columns: repeat(4, 1fr); }
+  }
+  .toggle { display: flex; background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 4px; margin-bottom: 18px; position: sticky; top: 12px; z-index: 10; box-shadow: 0 2px 10px rgba(0,45,114,0.08); }
+  .toggle button { flex: 1; border: none; background: transparent; border-radius: 999px; padding: 10px; font-size: 14px; font-weight: 600; color: var(--muted); cursor: pointer; }
+  .toggle button.active { background: var(--jhu-heritage); color: var(--jhu-white); }
+  .disclaimer { font-size: 11.5px; color: var(--faint); font-style: italic; margin: 0 2px 18px; line-height: 1.5; }
+  .header { margin-bottom: 18px; border-bottom: 3px solid var(--jhu-spirit); padding-bottom: 14px; }
+  .header h1 { font-size: 22px; font-weight: 700; margin: 0 0 2px; color: var(--jhu-heritage); }
+  .header .sub { font-size: 13px; color: var(--muted); }
+  .download-btn { display: inline-flex; align-items: center; gap: 8px; background: var(--jhu-heritage); color: var(--jhu-white); text-decoration: none; font-size: 14px; font-weight: 600; padding: 10px 16px; border-radius: 10px; }
+  .download-btn:hover { background: #001F52; }
+  .card { background: var(--card); border-radius: 16px; padding: 16px 18px; margin-bottom: 12px; border: 1px solid var(--line); box-shadow: 0 2px 8px rgba(0,45,114,0.05); }
+  .card.flag { background: var(--accent-bg); border-color: var(--jhu-spirit); border-left: 4px solid var(--jhu-heritage); }
+  .flag-label { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; color: var(--jhu-heritage); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 8px; }
+  .flag-label .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--jhu-heritage); }
+  .organ-title { font-size: 17px; font-weight: 700; margin-bottom: 6px; color: var(--jhu-heritage); }
+  .body-text { font-size: 15.5px; line-height: 1.55; color: var(--ink); }
+  .metrics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+  .metric { background: var(--jhu-white); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .metric .label { font-size: 11.5px; color: var(--jhu-heritage); font-weight: 600; text-transform: uppercase; }
+  .metric .value { font-size: 17px; font-weight: 700; margin-top: 2px; color: var(--ink); }
+  .badge { display: inline-flex; align-items: center; gap: 6px; background: var(--jhu-heritage); color: var(--jhu-white); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; padding: 4px 10px; border-radius: 999px; margin-top: 10px; }
+  .section-label { font-size: 12.5px; font-weight: 700; color: var(--jhu-heritage); text-transform: uppercase; letter-spacing: 0.03em; margin: 20px 4px 10px; }
+  .clean-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+  .clean-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+  .clean-card .name { font-size: 13px; color: var(--muted); }
+  .clean-card .num { font-size: 19px; font-weight: 700; margin-top: 2px; color: var(--jhu-heritage); }
+  .clean-card .num .unit { font-size: 12px; font-weight: 500; color: var(--muted); }
+  .clean-card .hu { font-size: 11.5px; color: var(--faint); margin-top: 2px; }
+  .checklist { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .row { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 14.5px; }
+  .row:last-child { border-bottom: none; }
+  .row.flagged { background: var(--accent-bg); }
+  .row.flagged span.name { color: var(--jhu-heritage); font-weight: 600; }
+  .check { color: var(--green); font-weight: 700; }
+  .exclaim { color: var(--jhu-heritage); font-weight: 700; }
+  .show-more { width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; font-size: 14px; font-weight: 600; color: var(--jhu-heritage); margin-top: 8px; cursor: pointer; }
+  #more-organs { display: none; }
+  #more-organs.open { display: block; }
+
+  .bm-footer { margin-top: 32px; padding: 22px 24px; border-radius: 16px; background: var(--jhu-heritage); display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+  .bm-footer__text { color: var(--jhu-white); }
+  .bm-footer__title { font-size: 15px; font-weight: 700; margin: 0 0 4px; }
+  .bm-footer__sub { font-size: 12.5px; color: var(--jhu-spirit); margin: 0; }
+  .bm-footer__cta { display: inline-flex; align-items: center; gap: 8px; background: var(--jhu-white); color: var(--jhu-heritage); text-decoration: none; font-size: 13.5px; font-weight: 700; padding: 10px 18px; border-radius: 999px; white-space: nowrap; }
+  .bm-footer__cta:hover { background: var(--jhu-spirit); }
+"""
+
+
+# ============================================================
+# In _build_report_html, add this block right before the
+# closing "</div>" of <div class="wrap"> (i.e. right after the
+# checklist / #more-organs block, before the final </div>\n\n<script>)
+# ============================================================
+
+BODYMAPS_FOOTER_HTML = """
+  <div class="bm-footer">
+    <div class="bm-footer__text">
+      <p class="bm-footer__title">Generated by BodyMaps &middot; Johns Hopkins University</p>
+      <p class="bm-footer__sub">AI-powered CT segmentation and tumor detection. Explore your own scans.</p>
+    </div>
+    <a href="https://bodymaps.wse.jhu.edu/dashboard" class="bm-footer__cta" target="_blank" rel="noopener">
+      Visit BodyMaps &rarr;
+    </a>
+  </div>
+"""
+
+
+def _parse_findings(comments, organ_roots):
+    """Groups the RadGPT comments text into per-organ blocks (same heading-
+    boundary rule used for status flagging: a line that IS, after stripping a
+    trailing ':', one of the known organ roots or "<root>s"), and within each
+    block splits out any lesion sub-entries with their structured fields
+    (location, size, volume, enhancement, HU). Returns a list of dicts in the
+    order organs appear in the report:
+      {"root": "pancreas", "baseline_lines": [...], "lesions": [{...}, ...]}
+    This is what lets the PDF render "Pancreas" as its own header with plain
+    stat lines, and its lesion as a separate highlighted callout — instead of
+    one long undifferentiated paragraph.
+    """
+    import re
+    if not comments:
+        return []
+    lines = comments.split('\n')
+    heading_idx = []
+    for i, line in enumerate(lines):
+        cleaned = line.strip().rstrip(':').lower()
+        for root in organ_roots:
+            if cleaned == root or cleaned == f'{root}s':
+                heading_idx.append((i, root))
+                break
+
+    organs = []
+    for pos, (start, root) in enumerate(heading_idx):
+        end = heading_idx[pos + 1][0] if pos + 1 < len(heading_idx) else len(lines)
+        block_lines = [l.strip() for l in lines[start + 1:end] if l.strip()]
+
+        lesion_start = None
+        for i, l in enumerate(block_lines):
+            if re.match(rf'^{re.escape(root)}\s+lesions:?$', l, re.I):
+                lesion_start = i
+                break
+
+        baseline_lines = block_lines if lesion_start is None else block_lines[:lesion_start]
+        lesion_text = ' '.join(block_lines[lesion_start:]) if lesion_start is not None else ''
+
+        lesions = []
+        for m in re.finditer(
+            rf'{re.escape(root)}\s+lesion\s+(\d+):\s*'
+            rf'Location:\s*([^.]+)\.\s*'
+            rf'Size:\s*([^()]+?)\s*cm[^.]*\.\s*'
+            rf'Volume:\s*([\d.]+)\s*cc\.\s*'
+            rf'Enhancement relative to [^:]+:\s*([^(]+?)\s*\(HU value is\s*(-?[\d.]+)\s*\+/-\s*([\d.]+)\)\.',
+            lesion_text, re.I
+        ):
+            num, location, size, volume, enh, hu, husd = m.groups()
+            lesions.append({
+                'num': num, 'location': location.strip(), 'size': size.strip(),
+                'volume': float(volume), 'enhancement': enh.strip(),
+                'hu': float(hu), 'hu_sd': float(husd),
+            })
+
+        organs.append({'root': root, 'baseline_lines': baseline_lines, 'lesions': lesions})
+    return organs
+
+
+def _draw_report_pdf(report_data, temp_pdf_path, output_pdf_path):
+    """Lays out report_data onto the report_template_3.pdf template using reportlab."""
+    import re as _re
+    from reportlab.pdfgen import canvas as _canvas
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.colors import HexColor
+    from PyPDF2 import PdfReader, PdfWriter
+    from PyPDF2._page import PageObject
+
+    # ---- Palette ----
+    INK = HexColor("#111827")
+    MUTED = HexColor("#6b7280")
+    LINE = HexColor("#e5e7eb")
+    ACCENT = HexColor("#c2410c")       # flagged / impression / lesion accent
+    ACCENT_BG = HexColor("#fff7ed")
+    GREEN = HexColor("#16a34a")        # normal-status check
+    ROW_ALT = HexColor("#f9fafb")
+
+    pdf = _canvas.Canvas(temp_pdf_path, pagesize=letter)
+    width, height = letter
+    left_margin, right_margin, top_margin = 50, 50, 90
+    content_width = width - left_margin - right_margin
+    line_height, section_spacing = 13, 22
+    y_position = height - top_margin
+
+    def reset_page():
+        nonlocal y_position
+        pdf.showPage()
+        y_position = height - 110
+        pdf.setFont("Helvetica", 10)
+        pdf.setFillColor(INK)
+
+    def check_and_reset_page(space_needed):
+        nonlocal y_position
+        if y_position - space_needed < 60:
+            reset_page()
+
+    def section_label(label, y):
+        pdf.setFillColor(MUTED)
+        pdf.setFont("Helvetica-Bold", 9)
+        pdf.drawString(left_margin, y, label.upper())
+        return y - 16
+
+    def write_wrapped_text(x, y, content, font_size=10, max_width=None, color=INK, bold=False):
+        pdf.setFillColor(color)
+        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", font_size)
+        words = str(content).split()
+        current_line = ""
+        max_width = max_width or content_width
+        for word in words:
+            font_name = "Helvetica-Bold" if bold else "Helvetica"
+            if pdf.stringWidth(current_line + word + " ", font_name, font_size) > max_width:
+                pdf.drawString(x, y, current_line.strip())
+                y -= line_height
+                current_line = f"{word} "
+                if y < 60:
+                    reset_page()
+                    y = height - top_margin
+            else:
+                current_line += f"{word} "
+        if current_line:
+            pdf.drawString(x, y, current_line.strip())
+            y -= line_height
+        pdf.setFillColor(INK)
+        return y
+
+    # ==================== HEADER ====================
+    pdf.setFillColor(INK)
+    pdf.setFont("Helvetica-Bold", 22)
+    pdf.drawString(left_margin, height - 55, "CT Radiology Report")
+    pdf.setFont("Helvetica", 10)
+    pdf.setFillColor(MUTED)
+    pdf.drawRightString(width - right_margin, height - 52, "BodyMaps")
+    pdf.setStrokeColor(LINE)
+    pdf.setLineWidth(1)
+    pdf.line(left_margin, height - 70, width - right_margin, height - 70)
+
+    # AI-generation disclaimer — the findings/impression text below originates
+    # from RadGPT (an AI model), and organ measurements from automated
+    # segmentation, not a radiologist's read. This has to be visible before
+    # any clinical content, not buried in a footer, given this could otherwise
+    # read as an authoritative signed report.
+    disclaimer_y = write_wrapped_text(
+        left_margin, height - 82,
+        "AI-generated report (RadGPT findings + automated segmentation measurements). "
+        "Not reviewed by a radiologist. For research use only \u2014 not for clinical decision-making.",
+        font_size=8,
+        color=MUTED,
+    )
+    pdf.setFillColor(INK)
+    y_position = disclaimer_y - 10
+
+    # ==================== PATIENT / IMAGING (single row, 6 columns) ====================
+    patient = report_data.get("patient", {})
+    imaging = report_data.get("imaging", {})
+    spacing = imaging.get("spacing") or []
+    fields = [
+        ("CASE ID", str(report_data.get("case_id", "N/A"))),
+        ("AGE", str(patient.get("age", "N/A"))),
+        ("SEX", str(patient.get("sex", "N/A"))),
+        ("STUDY", str(imaging.get("study_type", "N/A"))),
+        ("CONTRAST", str(imaging.get("contrast", "N/A"))),
+        ("SPACING", (", ".join(str(s) for s in spacing) + " mm") if spacing else "N/A"),
+    ]
+    col_w = content_width / len(fields)
+    for i, (label, value) in enumerate(fields):
+        x = left_margin + i * col_w
+        pdf.setFillColor(MUTED)
+        pdf.setFont("Helvetica", 8)
+        pdf.drawString(x, y_position, label)
+        pdf.setFillColor(INK)
+        pdf.setFont("Helvetica-Bold", 11)
+        pdf.drawString(x, y_position - 15, value)
+    y_position -= 40
+
+    # ==================== IMPRESSION callout ====================
+    impression_items = report_data.get("impression", [])
+    impression_text = " ".join(
+        _re.sub(r'^\d+\.\s*', '', str(t)).strip() for t in impression_items if str(t).strip()
+    ) or "No impression available for this case."
+
+    box_top = y_position
+    pdf.setFont("Helvetica", 10)
+    # Measure wrapped height first so the box can be sized to fit.
+    words = impression_text.split()
+    test_lines, cur = [], ""
+    for w in words:
+        if pdf.stringWidth(cur + w + " ", "Helvetica", 10) > content_width - 40:
+            test_lines.append(cur.strip())
+            cur = f"{w} "
+        else:
+            cur += f"{w} "
+    if cur:
+        test_lines.append(cur.strip())
+    box_h = 20 + len(test_lines) * line_height + 10
+    check_and_reset_page(box_h + 10)
+    box_top = y_position
+
+    pdf.setFillColor(ACCENT_BG)
+    pdf.rect(left_margin, box_top - box_h, content_width, box_h, fill=1, stroke=0)
+    pdf.setFillColor(ACCENT)
+    pdf.rect(left_margin, box_top - box_h, 3, box_h, fill=1, stroke=0)
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.setFillColor(ACCENT)
+    pdf.drawString(left_margin + 14, box_top - 16, "IMPRESSION")
+    ty = box_top - 32
+    for line in test_lines:
+        pdf.setFillColor(INK)
+        pdf.setFont("Helvetica", 10)
+        pdf.drawString(left_margin + 14, ty, line)
+        ty -= line_height
+    y_position = box_top - box_h - section_spacing
+
+    # ==================== ORGANS REVIEWED (3-column) ====================
+    check_and_reset_page(160)
+    y_position = section_label("Organs Reviewed", y_position)
+    pdf.setStrokeColor(LINE)
+    pdf.line(left_margin, y_position + 8, width - right_margin, y_position + 8)
+    y_position -= 6
+
+    organ_volumes = report_data.get("organ_volumes", {})
+    organ_rows = sorted(
+        (organ.replace("_", " ").title(), vals.get("status", "normal"))
+        for organ, vals in organ_volumes.items()
+    )
+    num_cols = 3
+    col_w2 = content_width / num_cols
+    row_h = 22
+
+    col_i = 0
+    row_top = y_position
+    for name, status in organ_rows:
+        if col_i == 0:
+            check_and_reset_page(row_h + 4)
+            row_top = y_position
+        x = left_margin + col_i * col_w2
+        is_flagged = status == "check"
+        pdf.setFillColor(ACCENT if is_flagged else GREEN)
+        pdf.setFont("Helvetica-Bold", 10)
+        pdf.drawString(x, row_top - 14, "!" if is_flagged else u"\u2713")
+        pdf.setFillColor(ACCENT if is_flagged else INK)
+        pdf.setFont("Helvetica-Bold" if is_flagged else "Helvetica", 9.5)
+        pdf.drawString(x + 14, row_top - 14, name)
+        col_i += 1
+        if col_i >= num_cols:
+            col_i = 0
+            y_position = row_top - row_h
+    if col_i != 0:
+        y_position = row_top - row_h
+    y_position -= section_spacing
+
+    # ==================== FINDINGS (per-organ blocks + lesion callouts) ====================
+    check_and_reset_page(100)
+    y_position = section_label("Findings", y_position)
+    pdf.setStrokeColor(LINE)
+    pdf.line(left_margin, y_position + 8, width - right_margin, y_position + 8)
+    y_position -= 10
+
+    comments = str(report_data.get("comments", ""))
+    # Roots to look for = every base organ this case actually has (dedup by
+    # base root the same way status-flagging does), so Findings only shows
+    # organs that exist for this case rather than a hardcoded list.
+    def _base_root(o):
+        r = o
+        for suf in ('_left', '_right', '_body', '_head', '_tail', '_gland', '_duct', '_lesion'):
+            r = r.replace(suf, '')
+        return r.replace('_', '').lower()
+    roots_present = sorted(set(_base_root(o) for o in organ_volumes.keys()))
+    parsed_organs = _parse_findings(comments, roots_present)
+
+    for organ in parsed_organs:
+        check_and_reset_page(40)
+        pdf.setFillColor(INK)
+        pdf.setFont("Helvetica-Bold", 11)
+        pdf.drawString(left_margin, y_position, organ['root'].title())
+        y_position -= line_height + 2
+
+        for line in organ['baseline_lines']:
+            check_and_reset_page(line_height + 4)
+            y_position = write_wrapped_text(left_margin, y_position, line, color=MUTED)
+
+        for lesion in organ['lesions']:
+            # Location is typically "<root> tail" / "<root> body" — take just
+            # the location word after the root for the callout title.
+            loc_word = lesion['location'].replace(organ['root'], '').strip() or lesion['location']
+            title = f"{organ['root'].title()} Lesion \u2014 {loc_word.title()}"
+            detail_lines = [
+                f"Size: {lesion['size']} cm (image) \u00b7 Volume: {lesion['volume']:.1f} cc",
+                f"{lesion['enhancement']} relative to {organ['root']}",
+                f"HU {lesion['hu']:.1f} \u00b1 {lesion['hu_sd']:.1f}",
+            ]
+            box_h = 18 + len(detail_lines) * line_height + 8
+            check_and_reset_page(box_h + 6)
+            box_top = y_position
+            pdf.setFillColor(ACCENT_BG)
+            pdf.rect(left_margin, box_top - box_h, content_width, box_h, fill=1, stroke=0)
+            pdf.setFillColor(ACCENT)
+            pdf.rect(left_margin, box_top - box_h, 3, box_h, fill=1, stroke=0)
+            pdf.setFont("Helvetica-Bold", 10)
+            pdf.drawString(left_margin + 14, box_top - 15, title)
+            ty = box_top - 30
+            for dl in detail_lines:
+                pdf.setFillColor(INK)
+                pdf.setFont("Helvetica", 9)
+                pdf.drawString(left_margin + 14, ty, dl)
+                ty -= line_height
+            y_position = box_top - box_h - 6
+
+        y_position -= 10
+
+    # ==================== KEY IMAGES ====================
+    lesions = report_data.get("lesions", {})
+    case_id = report_data.get("case_id")
+    pants_id = get_panTS_id(case_id)
+    ct_path = f"{Constants.PANTS_PATH}/image_only/{pants_id}/{Constants.MAIN_NIFTI_FILENAME}"
+    mask_path_combined = f"{Constants.PANTS_PATH}/mask_only/{pants_id}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
+    seg_dir = f"{Constants.PANTS_PATH}/mask_only/{pants_id}/segmentations"
+
+    if os.path.exists(ct_path) and os.path.exists(mask_path_combined):
+        lesion_files = {
+            "pancreas": "pancreatic_lesion.nii.gz",
+            "liver": "liver_lesion.nii.gz",
+            "kidney": "kidney_lesion.nii.gz",
+        }
+        organ_lookup = {o['root']: o for o in parsed_organs}
+        for organ_root_key in lesions.keys():
+            mask_filename = lesion_files.get(organ_root_key)
+            if not mask_filename:
+                continue
+            lesion_mask_path = os.path.join(seg_dir, mask_filename)
+            if not os.path.exists(lesion_mask_path):
+                continue
+
+            reset_page()
+            y_position = section_label(f"Key Image \u2014 {organ_root_key.title()} Lesion", y_position)
+            pdf.setStrokeColor(LINE)
+            pdf.line(left_margin, y_position + 8, width - right_margin, y_position + 8)
+            y_position -= 20
+
+            img_size = 220
+            overlay_path = f"/tmp/report_{case_id}_{organ_root_key}_lesion.png"
+            if _create_lesion_overlay_image(ct_path, lesion_mask_path, overlay_path):
+                pdf.drawImage(overlay_path, left_margin, y_position - img_size, width=img_size, height=img_size)
+                if os.path.exists(overlay_path):
+                    os.remove(overlay_path)
+
+            detail_x = left_margin + img_size + 30
+            dy = y_position - 8
+            lesion_detail = None
+            organ_entry = organ_lookup.get(organ_root_key)
+            if organ_entry and organ_entry['lesions']:
+                lesion_detail = organ_entry['lesions'][0]
+            if lesion_detail:
+                loc_word = lesion_detail['location'].replace(organ_root_key, '').strip() or lesion_detail['location']
+                pdf.setFillColor(ACCENT)
+                pdf.setFont("Helvetica-Bold", 11)
+                pdf.drawString(detail_x, dy, f"Lesion 1 \u2014 {organ_root_key.title()} {loc_word.title()}")
+                dy -= 20
+                for dl in [
+                    f"Size: {lesion_detail['size']} cm \u00b7 Volume: {lesion_detail['volume']:.1f} cc",
+                    f"Enhancement: {lesion_detail['enhancement']} relative to {organ_root_key}",
+                    f"HU {lesion_detail['hu']:.1f} \u00b1 {lesion_detail['hu_sd']:.1f}",
+                ]:
+                    pdf.setFillColor(INK)
+                    pdf.setFont("Helvetica", 10)
+                    pdf.drawString(detail_x, dy, dl)
+                    dy -= 16
+            y_position -= (img_size + section_spacing)
+
+        # ---- All Organs Reviewed thumbnail grid ----
+        reset_page()
+        y_position = section_label("All Organs Reviewed", y_position)
+        pdf.setStrokeColor(LINE)
+        pdf.line(left_margin, y_position + 8, width - right_margin, y_position + 8)
+        y_position -= 20
+
+        ct_nii = nib.load(ct_path)
+        mask_nii = nib.load(mask_path_combined)
+        ct_array = ct_nii.get_fdata()
+        mask_array = mask_nii.get_fdata().astype(np.uint8)
+        min_shape = tuple(min(c, m) for c, m in zip(ct_array.shape, mask_array.shape))
+        ct_array = ct_array[:min_shape[0], :min_shape[1], :min_shape[2]]
+        mask_array = mask_array[:min_shape[0], :min_shape[1], :min_shape[2]]
+
+        num_cols = 5
+        col_gap, row_gap = 14, 26
+        img_w = (content_width - col_gap * (num_cols - 1)) / num_cols
+        img_h = img_w
+        col_x = [left_margin + i * (img_w + col_gap) for i in range(num_cols)]
+        col_i = 0
+
+        organ_label_map = {v: k for k, v in Constants.PREDEFINED_LABELS.items()}
+        for organ, label_id in organ_label_map.items():
+            if label_id == 0:
+                continue
+            check_and_reset_page(img_h + row_gap + 20)
+            x = col_x[col_i]
+            overlay_path = f"/tmp/report_{case_id}_{organ}_overview.png"
+            if _create_organ_overview_image(ct_array, mask_array, label_id, overlay_path):
+                pdf.drawImage(overlay_path, x, y_position - img_h, width=img_w, height=img_h)
+                if os.path.exists(overlay_path):
+                    os.remove(overlay_path)
+                pdf.setFont("Helvetica", 8)
+                pdf.setFillColor(MUTED)
+                pdf.drawCentredString(x + img_w / 2, y_position - img_h - 12, organ.replace("_", " ").title())
+                col_i += 1
+                if col_i >= num_cols:
+                    col_i = 0
+                    y_position -= (img_h + row_gap)
+
+    pdf.save()
+
+    # ---- Merge onto branded template ----
+    template_pdf_path = os.getenv("TEMPLATE_PATH", "report_template_3.pdf")
+    template_reader = PdfReader(template_pdf_path)
+    content_reader = PdfReader(temp_pdf_path)
+    writer = PdfWriter()
+    for page in content_reader.pages:
+        template_page = template_reader.pages[0]
+        merged_page = PageObject.create_blank_page(
+            width=template_page.mediabox.width,
+            height=template_page.mediabox.height,
+        )
+        merged_page.merge_page(template_page)
+        merged_page.merge_page(page)
+        writer.add_page(merged_page)
+    with open(output_pdf_path, "wb") as f:
+        writer.write(f)
+
+
+def _create_lesion_overlay_image(ct_path, mask_path, output_path):
+    """Finds the most-labeled slice and saves a red-contour overlay PNG.
+    Same technique as Zongwei\'s get_most_labeled_slice, using SimpleITK
+    for consistent RAS reorientation. Returns False (never raises) on
+    any failure so a bad/missing lesion file just skips that image."""
+    try:
+        import SimpleITK as sitk
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        ct_img = sitk.ReadImage(ct_path)
+        mask_img = sitk.ReadImage(mask_path)
+        ct_img = sitk.DICOMOrient(ct_img, "RAS")
+        mask_img = sitk.DICOMOrient(mask_img, "RAS")
+
+        ct_array = sitk.GetArrayFromImage(ct_img)
+        mask_array = sitk.GetArrayFromImage(mask_img)
+        if ct_array.shape != mask_array.shape:
+            return False
+
+        slice_sums = np.sum(mask_array, axis=(1, 2))
+        idx = int(np.argmax(slice_sums))
+        if slice_sums[idx] == 0:
+            return False
+
+        ct_slice = np.fliplr(ct_array[idx])
+        mask_slice = np.fliplr(mask_array[idx])
+        ct_slice = np.clip(ct_slice, -150, 250)
+        ct_slice = ((ct_slice + 150) / 400 * 255).astype(np.uint8)
+
+        plt.figure(figsize=(6, 6))
+        plt.imshow(ct_slice, cmap="gray", origin="lower")
+        plt.contour(mask_slice, colors="red", linewidths=1)
+        plt.axis("off")
+        plt.savefig(output_path, bbox_inches="tight", pad_inches=0)
+        plt.close()
+        return True
+    except Exception:
+        return False
+
+
+def _create_organ_overview_image(ct_array, mask_array, label_id, output_path, contour_color="cyan"):
+    """Same slice-finding + contour-overlay technique as the lesion function,
+    but works from already-loaded ct/mask numpy arrays and a single label id
+    from combined_labels.nii.gz -- so it does not need a separate per-organ
+    file. Used to build a full per-organ Key Images gallery, matching
+    Zongwei\'s oncokit report generator."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        organ_mask = (mask_array == label_id)
+        if not np.any(organ_mask):
+            return False
+
+        slice_sums = np.sum(organ_mask, axis=(1, 2))
+        idx = int(np.argmax(slice_sums))
+        if slice_sums[idx] == 0:
+            return False
+
+        ct_slice = np.fliplr(ct_array[idx])
+        mask_slice = np.fliplr(organ_mask[idx])
+        ct_slice = np.clip(ct_slice, -150, 250)
+        ct_slice = ((ct_slice + 150) / 400 * 255).astype(np.uint8)
+
+        plt.figure(figsize=(4, 4))
+        plt.imshow(ct_slice, cmap="gray", origin="lower")
+        plt.contour(mask_slice, colors=contour_color, linewidths=1)
+        plt.axis("off")
+        plt.savefig(output_path, bbox_inches="tight", pad_inches=0)
+        plt.close()
+        return True
+    except Exception:
+        return False
+
+
+@api_blueprint.route('/generate-report-pdf/<id>', methods=['GET'])
+def generate_report_pdf(id):
+    if not _is_safe_id(id):
+        return jsonify({"error": "Invalid id"}), 400
+    temp_pdf_path = f"{PDF_DIR}/temp_report_{id}.pdf"
+    output_pdf_path = f"{PDF_DIR}/report_{id}.pdf"
+    try:
+        resolved = _resolve_case_id_or_token(id)
+        if resolved is None:
+            return jsonify({"error": "Invalid or expired link"}), 404
+        report_data = _build_report_data(resolved)
+        if "error" in report_data:
+            status = 400 if report_data["error"] == "Invalid id parameter" else 500
+            return jsonify(report_data), status
+
+        _draw_report_pdf(report_data, temp_pdf_path, output_pdf_path)
+
+        return send_file(
+            output_pdf_path,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"case_{id}_report.pdf",
+        )
+    except Exception:
+        current_app.logger.exception("Error generating report PDF for case_id=%s", id)
+        return jsonify({"error": "An internal error has occurred."}), 500
+    finally:
+        if os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+
 @api_blueprint.route('/get-specific-segmentations/<combined_labels_id>', methods=['POST'])
 async def get_specific_segmentations(combined_labels_id):
     if get_dataset_from_case_id(combined_labels_id) == "CancerVerse":
@@ -2128,6 +3231,35 @@ def _all_dataset_df() -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if len(frames) > 1 else DF
 
 
+from functools import lru_cache as _lru_cache
+
+
+@_lru_cache(maxsize=1)
+def _all_dataset_prepared() -> pd.DataFrame:
+    """Concat + sort-cols for the full (scope=all) dataset. DF/DF_CV are loaded once
+    at startup, so this is deterministic — cache it. /api/random was rebuilding it on
+    every shuffle. Callers must .copy() before mutating (the cached frame is shared)."""
+    frames = [DF]
+    if DF_CV is not None:
+        frames.append(DF_CV)
+    base = pd.concat(frames, ignore_index=True) if len(frames) > 1 else DF.copy()
+    return ensure_sort_cols(base)
+
+
+@_lru_cache(maxsize=8)
+def _ranked_all(n: int) -> pd.DataFrame:
+    """Quality-ranked full scope=all frame for pick-size n. This is the expensive part
+    of /api/random for scope=all (rank over the whole ~32k-row library) and it's
+    deterministic for a given n, so cache it. The caller applies recent-exclusion and
+    the rotating offset on top per request. Reproduces the route's df_full selection."""
+    base = _all_dataset_prepared().copy()
+    complete = base[base["__complete"]] if "__complete" in base.columns else base
+    base_cap = _has_tumor_capacity(base, n)
+    complete_cap = _has_tumor_capacity(complete, n)
+    df_full = complete if (len(complete) >= n and (not base_cap or complete_cap)) else base
+    return rank_quality_results(df_full, balance_sex=True, balance_age=True)
+
+
 def _has_both_tumor_cohorts(df: pd.DataFrame) -> bool:
     if "__tumor01" not in df.columns:
         return False
@@ -2177,54 +3309,62 @@ def api_random_topk_rotate_norand():
     """Select quality-ranked, tumor-balanced recommendations in random order."""
     try:
         scope = (request.args.get("scope", "filtered") or "filtered").strip().lower()
-        base_df = (
-            _all_dataset_df().copy()
-            if scope == "all"
-            else apply_filters(select_dataset_df()).copy()
-        )
-        base_df = ensure_sort_cols(base_df)
-
         try:
             n = int(request.args.get("n") or 3)
         except Exception:
             n = 3
-        n = max(1, min(n, len(base_df))) if len(base_df) else 1
-
-        complete_df = (
-            base_df[base_df["__complete"]]
-            if "__complete" in base_df.columns
-            else base_df
-        )
-        base_can_balance = _has_tumor_capacity(base_df, n)
-        complete_can_balance = _has_tumor_capacity(complete_df, n)
-        df_full = (
-            complete_df
-            if len(complete_df) >= n and (not base_can_balance or complete_can_balance)
-            else base_df
-        )
 
         recent_ids = [
             value.strip()
             for value in (request.args.get("recent") or "").split(",")
             if value.strip()
         ]
-        df_full, used_recent = _exclude_recent_cases(df_full, recent_ids, n)
 
-        has_sex_filter = scope != "all" and any(
-            key in request.args for key in ("sex", "sex[]", "sex_is_null")
-        )
-        has_age_filter = scope != "all" and any(
-            key in request.args
-            for key in ("age_bin", "age_bin[]", "age_from", "age_to", "age_is_null")
-        )
-        has_tumor_filter = scope != "all" and any(
-            key in request.args for key in ("tumor", "tumor_is_null")
-        )
-        df = rank_quality_results(
-            df_full,
-            balance_sex=not has_sex_filter,
-            balance_age=not has_age_filter,
-        )
+        if scope == "all":
+            # Cached fast path: the quality-ranked full library is deterministic for a
+            # given n, so rank once (cached) and reuse it. recent-exclusion and the
+            # rotating offset are applied per request on top. This removes the
+            # per-shuffle concat + sort + full re-rank of ~32k rows that made it slow.
+            total_len = len(_all_dataset_prepared())
+            n = max(1, min(n, total_len)) if total_len else 1
+            df = _ranked_all(n)
+            df, used_recent = _exclude_recent_cases(df, recent_ids, n)
+            # Defensive copy: downstream (select_balanced_tumor_results / iloc) must not
+            # mutate the shared cached frame. A ~32k-row copy is negligible next to the
+            # ranking we just avoided recomputing.
+            df = df.copy()
+            has_tumor_filter = False
+        else:
+            base_df = ensure_sort_cols(apply_filters(select_dataset_df()).copy())
+            n = max(1, min(n, len(base_df))) if len(base_df) else 1
+            complete_df = (
+                base_df[base_df["__complete"]]
+                if "__complete" in base_df.columns
+                else base_df
+            )
+            base_can_balance = _has_tumor_capacity(base_df, n)
+            complete_can_balance = _has_tumor_capacity(complete_df, n)
+            df_full = (
+                complete_df
+                if len(complete_df) >= n and (not base_can_balance or complete_can_balance)
+                else base_df
+            )
+            df_full, used_recent = _exclude_recent_cases(df_full, recent_ids, n)
+            has_sex_filter = any(
+                key in request.args for key in ("sex", "sex[]", "sex_is_null")
+            )
+            has_age_filter = any(
+                key in request.args
+                for key in ("age_bin", "age_bin[]", "age_from", "age_to", "age_is_null")
+            )
+            has_tumor_filter = any(
+                key in request.args for key in ("tumor", "tumor_is_null")
+            )
+            df = rank_quality_results(
+                df_full,
+                balance_sex=not has_sex_filter,
+                balance_age=not has_age_filter,
+            )
         if len(df) == 0:
             return jsonify({"items": [], "total": 0, "meta": {"k": 0, "used_recent": 0}}), 200
 
@@ -2492,6 +3632,21 @@ def _ai_load_metrics(case_id, supplied_metrics):
     if identifier and identifier in _AI_METRICS_CACHE:
         return _AI_METRICS_CACHE[identifier]
 
+    # Fast path: the browser already fetched these from THIS server's
+    # /api/mask-data, so they are the same numbers the block below would
+    # recompute — identical accuracy, minus a possible NIfTI download and a
+    # full voxel pass that can stall the first question about a case.
+    if isinstance(supplied_metrics, list) and supplied_metrics:
+        cleaned = [
+            _ai_public_metric(item)
+            for item in supplied_metrics
+            if isinstance(item, dict)
+        ]
+        if cleaned:
+            if identifier:
+                _AI_METRICS_CACHE[identifier] = (cleaned, "frontend_supplied_metrics")
+            return cleaned, "frontend_supplied_metrics"
+
     if identifier and _is_safe_id(identifier):
         try:
             if identifier.isdigit():
@@ -2591,21 +3746,270 @@ def _ai_legend_answer(message, mask_legend):
     return "In the segmentation overlay, " + "; ".join(parts) + "."
 
 
-def _ai_strip_think(text):
-    """Remove any <think>...</think> reasoning blocks a model emits inline, so
-    only the actual answer is shown. Handles an unclosed trailing <think>."""
-    if not text or "<think>" not in text:
-        return text or ""
+def _ai_strip_think(text, orphan_closer=False):
+    """Remove model reasoning that leaks into the answer text.
+
+    Always handles:
+      - complete <think>...</think> blocks (possibly several),
+      - an unclosed trailing <think> (block still streaming).
+
+    With orphan_closer=True (pass ONLY for reasoning-family models) it also
+    treats everything before a bare closing </think> as reasoning — the shape
+    qwen3 leaks on some Ollama versions. Non-reasoning models keep a literal
+    </think> in their prose untouched (e.g. when the user asks about the tag),
+    which also keeps streamed deltas monotonic for them.
+    """
+    if not text:
+        return ""
     out = text
-    while "<think>" in out and "</think>" in out:
+    while "<think>" in out:
         start = out.find("<think>")
         end = out.find("</think>", start)
-        if end == -1:
+        if end == -1:  # unclosed block still streaming — drop the tail
+            out = out[:start]
             break
         out = out[:start] + out[end + len("</think>"):]
-    if "<think>" in out:  # unclosed block still streaming — drop the tail
-        out = out[:out.find("<think>")]
-    return out.replace("<think>", "").replace("</think>", "")
+    if orphan_closer and "</think>" in out:
+        out = out.rsplit("</think>", 1)[1]
+    return out.lstrip("\n")
+
+
+# Models whose output can carry a chain-of-thought. The stream endpoint holds
+# their text back until the reasoning is provably over (or the stream ends), so
+# thinking is never shown even when it leaks without an opening <think> tag.
+# qwen3-vl (instruct) is excluded — it does not reason and should stream live —
+# but any "*-thinking" variant is included.
+_AI_REASONING_MODEL_RE = re.compile(
+    r"qwen3(?!-vl)|deepseek-r1|-r1\b|qwq|marco-o1|thinking", re.IGNORECASE
+)
+
+
+# ---------------------------------------------------------------------------
+# Agent tool loop (BodyMaps AI's investigation step).
+#
+# For case-specific questions the model first runs a short bounded loop with
+# native Ollama tool calling: it can fetch exact measurements, look at patient
+# info, drive the viewer, or request live snapshots of the CT views, observing
+# each result before deciding the next step or writing the answer. Everything
+# here degrades to the plain single-shot path on ANY failure (old Ollama, a
+# model without tool support, a tool error), so the assistant never breaks.
+# ---------------------------------------------------------------------------
+
+# Each round is a full extra model call — on CPU that's seconds per round, so
+# the cap is the main speed lever. Two rounds covers the real patterns (gather
+# data -> answer, or gather -> gather -> answer); investigations that would
+# need more end with the data already collected feeding the normal answer path.
+_AI_AGENT_MAX_ROUNDS = 2          # tool-call rounds per message
+_AI_AGENT_MAX_CALLS_PER_ROUND = 4  # parallel tool calls honored per round
+
+_AI_AGENT_SYSTEM_PROMPT = (
+    "You are BodyMaps AI, a medical-imaging assistant inside a CT viewer, in "
+    "your INVESTIGATION step for a question about the currently open case. "
+    "Use the tools to gather exactly the data you need before answering: "
+    "measured organ values, patient info, the structure list. Use "
+    "show_in_viewer when displaying an organ helps, set_window_preset when a "
+    "different window would show the relevant tissue, and capture_views ONLY "
+    "when the question is about how something LOOKS in the images. Call only "
+    "the tools you need — often one is enough. When you have enough "
+    "information, write the final answer.\n"
+    "IMPORTANT: if the conversation shows the question is really about a "
+    "patient DESCRIBED IN THE CHAT (a typed case story) rather than the open "
+    "scan, do not use tools at all — answer from the conversation and your "
+    "medical knowledge, continuing the ongoing discussion.\n"
+    "FINAL ANSWER RULES: start directly with the answer (no reasoning, no "
+    "preamble); never mention tools, data blocks, or any internal machinery; "
+    "quote measured values verbatim with their units and never invent one; "
+    "answer the question that was asked and never substitute an unrelated "
+    "measurement for an answer; 1-3 sentences for a simple question, one short "
+    "readable paragraph for a clinical one; END with one short, specific "
+    "question — when the next useful step is something to LOOK at, ask for that "
+    "(a slice level, a plane, a window preset, a structure to isolate)."
+)
+
+
+def _ai_agent_tools(include_capture):
+    """Ollama tool schema for the agent loop — small on purpose: local 4B/8B
+    models pick correctly among few, explicitly described tools."""
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_organ_metric",
+                "description": (
+                    "Get the measured volume (cm3), mean attenuation (HU), and "
+                    "reference percentile for ONE segmented organ in this case."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "organ": {
+                            "type": "string",
+                            "description": "Organ name, e.g. 'liver' or 'left kidney'",
+                        }
+                    },
+                    "required": ["organ"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_structures",
+                "description": "List every segmented structure available in this case.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_patient_info",
+                "description": "Get this patient's known demographics (age, sex, BMI, height, weight).",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "show_in_viewer",
+                "description": "Isolate one or more organs in the CT viewer so the user sees them highlighted.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "organs": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Organ names to isolate",
+                        }
+                    },
+                    "required": ["organs"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_window_preset",
+                "description": "Change the CT display window: soft_tissue, bone, lung, or liver.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "preset": {
+                            "type": "string",
+                            "enum": ["soft_tissue", "bone", "lung", "liver"],
+                        }
+                    },
+                    "required": ["preset"],
+                },
+            },
+        },
+    ]
+    if include_capture:
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "capture_views",
+                    "description": (
+                        "Take live screenshots of the four CT views (axial, "
+                        "sagittal, coronal, 3D) and look at them. Use ONLY when "
+                        "the question is about visual appearance."
+                    ),
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        )
+    return tools
+
+
+def _ai_agent_execute(name, args, *, metrics, metadata, available_organs, references):
+    """Execute one agent tool server-side.
+
+    Returns (status_text, result_text, viewer_actions, is_data_fact).
+    result_text goes back to the model as the tool result; data facts are also
+    carried into the final answer's Facts so the safety net can verify them.
+    """
+    args = args if isinstance(args, dict) else {}
+
+    if name == "get_organ_metric":
+        organ_raw = str(args.get("organ") or "").strip()
+        resolved = _ai_resolve_organ(organ_raw, available_organs) or organ_raw
+        entry = _ai_metric_lookup(metrics, available_organs).get(_ai_norm(resolved))
+        display = _ai_display(resolved or organ_raw)
+        if not entry:
+            names = ", ".join(available_organs[:40]) or "none"
+            return (
+                f"Measuring the {display.lower()}",
+                f"No measurement for '{organ_raw}' in this case. Available structures: {names}.",
+                [],
+                False,
+            )
+        parts = []
+        volume = entry.get("volume_cm3")
+        mean_hu = entry.get("mean_hu")
+        if _ai_metric_valid(volume):
+            parts.append(f"The segmented {display} volume is **{float(volume):.2f} cm³**.")
+        if _ai_metric_valid(mean_hu) or mean_hu == 0:
+            parts.append(f"The segmented {display} mean attenuation is **{float(mean_hu):.1f} HU**.")
+        for ref in references or []:
+            if _ai_norm(ref.get("organ_name")) == _ai_norm(resolved):
+                pct = ref.get("percentile")
+                if isinstance(pct, (int, float)):
+                    basis = str(ref.get("basis") or "").strip()
+                    suffix = f" ({basis})" if basis else ""
+                    parts.append(
+                        f"That volume is at the **{float(pct):.0f}th percentile** of the reference cohort{suffix}."
+                    )
+                break
+        result = " ".join(parts) if parts else f"No valid measurements recorded for {display}."
+        return (f"Measuring the {display.lower()}", result, [], bool(parts))
+
+    if name == "list_structures":
+        names = ", ".join(available_organs) or "none"
+        return (
+            "Listing segmented structures",
+            f"This case has {len(available_organs)} segmented structures: {names}.",
+            [],
+            False,
+        )
+
+    if name == "get_patient_info":
+        if not metadata:
+            return (
+                "Checking patient information",
+                "No patient metadata (age, sex, BMI...) is available for this case.",
+                [],
+                False,
+            )
+        fields = ", ".join(f"{key}: {value}" for key, value in metadata.items())
+        return ("Checking patient information", f"Patient metadata — {fields}.", [], True)
+
+    if name == "show_in_viewer":
+        organs = args.get("organs")
+        organs = [str(o).strip() for o in organs if str(o).strip()] if isinstance(organs, list) else []
+        actions = _ai_sanitize_actions([{"type": "isolate_organs", "organs": organs}], available_organs)
+        if not actions:
+            return (
+                "Updating the viewer",
+                f"Could not match {organs or 'those organs'} to this case's structures.",
+                [],
+                False,
+            )
+        shown = ", ".join(_ai_display(o) for o in actions[0].get("organs", []))
+        return ("Updating the viewer", f"Done — isolated {shown} in the viewer.", actions, False)
+
+    if name == "set_window_preset":
+        preset = str(args.get("preset") or "").strip()
+        if preset not in {"soft_tissue", "bone", "lung", "liver"}:
+            return ("Adjusting the window", f"Unknown preset '{preset}'.", [], False)
+        actions = [{"type": "set_window_preset", "preset": preset}]
+        return (
+            "Adjusting the window",
+            f"Done — applied the {preset.replace('_', ' ')} window preset.",
+            actions,
+            False,
+        )
+
+    return ("", f"Unknown tool '{name}'.", [], False)
 
 
 def _ai_required_metric_facts(actions, metrics, available_organs):
@@ -3285,8 +4689,17 @@ def _ai_grounded_reply(
 
         return reply
 
-    # Deterministically ground exact case measurements.
-    for action in actions:
+    # Deterministically ground exact case measurements — but ONLY when the user
+    # asked for a measurement. The rule parser emits get_organ_metric whenever an
+    # organ name and a word like "size" appear anywhere in the message, which in
+    # a long clinical question is a coincidence. Returning the volume here threw
+    # away the model's actual answer and replied with an unrelated number.
+    wants_measurement = (
+        question_mode == "case_measurement"
+        or ai_reasoning.asks_for_measurement(message)
+    )
+
+    for action in (actions if wants_measurement else []):
         if action.get("type") != "get_organ_metric":
             continue
 
@@ -3537,6 +4950,12 @@ Examples:
 These questions do not require patient metadata. Answer them naturally,
 clearly, and conversationally.
 
+Exam-style vignettes and patient stories the user types or pastes ("A
+57-year-old man presents with...") are also general questions: answer them
+entirely from medical knowledge with the most likely answer and brief
+reasoning. Never refuse one, and never ask for scan data, case data, or a
+"Facts" block to answer one.
+
 CASE-SPECIFIC MEASUREMENTS
 When the user asks about this scan, this case, this patient, the current
 segmentation, or a measured structure, use the supplied case data.
@@ -3713,16 +5132,29 @@ def ai_models():
         models = list_ollama_models()
         model_names = [model["name"] for model in models]
         default_model = DEFAULT_OLLAMA_MODEL if DEFAULT_OLLAMA_MODEL in model_names else (model_names[0] if model_names else DEFAULT_OLLAMA_MODEL)
+        # Report the vision model that will ACTUALLY be used, not the one that
+        # happens to be configured. When they differ, the configured model was
+        # never pulled — the single most common reason image messages fail, and
+        # something worth being able to see from a browser before a demo.
+        active_vision_model = resolve_vision_model()
         return jsonify({
             "available": True,
             "models": models,
             "default_model": default_model,
+            # The model automatically used when a message carries images, so
+            # the UI can show the switch the moment snapshots are attached.
+            "vision_model": active_vision_model or DEFAULT_OLLAMA_VISION_MODEL,
+            "vision_available": bool(active_vision_model),
+            "configured_vision_model": DEFAULT_OLLAMA_VISION_MODEL,
         })
     except OllamaUnavailable as error:
         return jsonify({
             "available": False,
             "models": [],
             "default_model": DEFAULT_OLLAMA_MODEL,
+            "vision_model": DEFAULT_OLLAMA_VISION_MODEL,
+            "vision_available": False,
+            "configured_vision_model": DEFAULT_OLLAMA_VISION_MODEL,
             "error": f"Ollama is not reachable at the configured local endpoint: {error}",
         }), 200
 
@@ -3730,24 +5162,133 @@ def ai_models():
 def _ai_gate():
     """Whether this caller may send an assistant message. None means yes.
 
-    Two refusals, both shaped like an assistant reply so the sidebar can render
-    them in the thread rather than needing a special case:
-
-      401 — signed out. The assistant costs real compute, so it needs an
-            account, the same rule inference has. Leaving it open also made the
-            daily allowance pointless: signing out was an unlimited tier.
-      402 — signed in, but the plan's daily allowance is spent.
+    The assistant is open to everyone: no sign-in requirement and no daily
+    allowance. Usage is still recorded for signed-in users (see the guarded
+    record_ai_message calls at both endpoints).
     """
-    user = current_user()
-    blocked = plan_store.check_assistant(user["id"] if user else None)
-    if blocked is None:
-        return None
-    signed_out = blocked["reason"] == "auth_required"
-    code = "auth_required" if signed_out else "plan_limit"
+    return None
+
+
+def _ai_normalize_conversation(raw, limit=12, chars=2000):
+    """Defensively normalize client-supplied chat history."""
+    turns = []
+    if not isinstance(raw, list):
+        return turns
+    for turn in raw[-limit:]:
+        if not isinstance(turn, dict):
+            continue
+        role = str(turn.get("role") or "").strip()
+        content = str(turn.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            turns.append({"role": role, "content": content[:chars]})
+    return turns
+
+
+def _ai_normalize_legend(raw):
+    """Normalize the color→organ legend for the attached screenshots."""
+    legend = []
+    if not isinstance(raw, list):
+        return legend
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        organ = str(item.get("organ") or "").strip()
+        color = str(item.get("color") or "").strip()
+        if organ and color:
+            legend.append({"organ": organ, "color": color})
+    return legend
+
+
+def _ai_command_vision_reply(*, message, images, body, case_id, selected_model):
+    """Non-streaming answer for a message that carries CT screenshots.
+
+    The browser falls back to /ai-command whenever the streaming endpoint fails,
+    and a vision question is exactly the kind most likely to hit that fallback
+    (bigger payload, slower model). Answering it blind is worse than not
+    answering, so this path uses the same vision model, the same prompt, and the
+    same follow-up guarantee as the streaming endpoint — it just collects the
+    tokens into one string instead of forwarding them.
+    """
+    mask_legend = _ai_normalize_legend(body.get("mask_legend"))
+    conversation = _ai_normalize_conversation(body.get("conversation"))
+
+    vision_model = resolve_vision_model(selected_model)
+
+    if not vision_model:
+        return jsonify({
+            "reply": ai_reasoning.model_offline_reply(
+                has_images=True,
+                vision_model_missing=True,
+                configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+            ),
+            "actions": [],
+            "source": "vision_model_unavailable",
+            "model": None,
+            "intent": "read_images",
+        })
+
+    user_prompt = (
+        f"{len(images)} CT viewer screenshot(s) are attached to this message, "
+        "in the viewer's pane order (axial, sagittal, coronal, then the 3D "
+        "surface rendering when present). Look at them before answering.\n\n"
+        f"{message or 'Describe what is shown in the attached views.'}"
+    )
+
+    legend_fact = ai_reasoning.build_legend_fact(mask_legend)
+    if legend_fact:
+        user_prompt += f"\n\nFacts:\n- {legend_fact}"
+
+    collected = ""
+    try:
+        for kind, text in chat_stream(
+            model=vision_model,
+            system_prompt=ai_reasoning.build_system_prompt(
+                has_images=True,
+                has_case=bool(case_id),
+            ),
+            user_prompt=user_prompt,
+            images=images,
+            history=conversation[-6:],
+        ):
+            if kind == "content" and text:
+                collected += text
+    except OllamaModelMissing as error:
+        print(f"[ai_command vision] model '{vision_model}' not installed: {error}")
+        collected = ""
+    except (OllamaUnavailable, Exception) as error:
+        print("[ai_command vision]", type(error).__name__, str(error))
+        collected = ""
+
+    reply = _ai_strip_think(
+        collected,
+        orphan_closer=is_reasoning_model(vision_model),
+    ).strip()
+
+    if not reply:
+        return jsonify({
+            "reply": ai_reasoning.model_offline_reply(
+                has_images=True,
+                configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+            ),
+            "actions": [],
+            "source": "rule_fallback",
+            "model": None,
+            "intent": "read_images",
+        })
+
     return jsonify({
-        "reply": blocked["message"], "actions": [], "source": code,
-        "code": code, **blocked,
-    }), 401 if signed_out else 402
+        "reply": ai_reasoning.ensure_followup(
+            reply,
+            message,
+            has_images=True,
+            has_case=bool(case_id),
+            force=True,
+        ),
+        "actions": [],
+        "source": "ollama",
+        "model": vision_model,
+        "intent": "read_images",
+    })
 
 
 @api_blueprint.route("/ai-command", methods=["POST"])
@@ -3776,8 +5317,11 @@ def ai_command():
         blocked = _ai_gate()
         if blocked is not None:
             return blocked
-        # The gate guarantees a signed-in user past this point.
-        plan_store.record_ai_message(current_user()["id"])
+        # The assistant is open to anonymous users; only record usage when a
+        # signed-in account is attached to the request.
+        gate_user = current_user()
+        if gate_user:
+            plan_store.record_ai_message(gate_user["id"])
 
         available_organs = body.get(
             "available_organs"
@@ -3817,6 +5361,31 @@ def ai_command():
             and requested_model.strip()
             else DEFAULT_OLLAMA_MODEL
         )
+
+        # Attached CT screenshots. This endpoint is what the browser retries on
+        # when the streaming call fails, so it has to be able to read images
+        # too: previously it dropped them silently and answered from text alone,
+        # producing a confident description of views it had never looked at.
+        raw_images = body.get("images") if isinstance(body.get("images"), list) else []
+        images = []
+        for item in raw_images:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            value = item.strip()
+            if value.startswith("data:"):
+                comma = value.find(",")
+                if comma != -1:
+                    value = value[comma + 1:]
+            images.append(value)
+
+        if images:
+            return _ai_command_vision_reply(
+                message=message,
+                images=images,
+                body=body,
+                case_id=case_id,
+                selected_model=selected_model,
+            )
 
         metrics, metric_source = _ai_load_metrics(
             case_id,
@@ -3951,14 +5520,19 @@ def ai_command():
                 or question_mode
             )
 
-        reply = _ai_grounded_reply(
-            message=message,
-            actions=actions,
-            metrics=metrics,
-            available_organs=available_organs,
-            metadata=metadata,
-            candidate_reply=candidate_reply,
-            question_mode=question_mode,
+        reply = ai_reasoning.ensure_followup(
+            _ai_grounded_reply(
+                message=message,
+                actions=actions,
+                metrics=metrics,
+                available_organs=available_organs,
+                metadata=metadata,
+                candidate_reply=candidate_reply,
+                question_mode=question_mode,
+            ),
+            message,
+            has_images=False,
+            has_case=bool(case_id),
         )
 
         response = {
@@ -4011,79 +5585,20 @@ def ai_command():
         ), 500
 
 
-def _ai_stream_system_prompt(has_images: bool) -> str:
+def _ai_stream_system_prompt(has_images: bool, has_case: bool = False) -> str:
     """System prompt for the streaming endpoint.
 
-    Adapts the diagnostic-dialogue framework from the AMIE paper (Tu et al.,
-    Nature 2025, "Towards conversational diagnostic AI") into a single-pass
-    prompt: structured history-taking (ask for missing info), differential
-    reasoning, management/next-steps, escalation, and empathetic communication —
-    while keeping simple factual questions short. Kept focused (not a giant
-    JSON dump) so small local models answer instead of rambling; exact case
-    values are injected as a short "Facts:" block in the user message.
+    The text now lives in services/ai_reasoning.py so the vision instructions —
+    the ones that decide whether a captured pane is read correctly — can be
+    reviewed and unit-tested on their own instead of being buried in a request
+    handler. Exact case values are still injected as a short "Facts:" block in
+    the user message rather than a giant JSON payload, which is what keeps small
+    local models answering instead of rambling.
     """
-    prompt = (
-        "You are BodyMaps AI, a knowledgeable, empathetic medical-imaging "
-        "assistant inside a CT scan viewer. Talk like a thoughtful clinician "
-        "having a natural conversation.\n\n"
-        "OUTPUT ONLY THE FINAL ANSWER. Never write your reasoning, planning, "
-        "analysis, or thought process. Do NOT think out loud. Do NOT begin with "
-        "words like 'Okay', 'Let me', 'First', 'I need to', 'The user', or 'So' "
-        "— start directly with the answer itself.\n\n"
-        "HOW TO ANSWER\n"
-        "- Write ONLY the answer itself, as natural flowing prose. Never "
-        "describe what you are about to do, never number steps or label "
-        "sections, and never say things like 'let me explain', 'first', or 'as a "
-        "follow-up' — just say it.\n"
-        "- Be concise. Most answers are 1-3 sentences, a short paragraph at "
-        "most. Only a genuinely complex clinical question needs more, and even "
-        "then keep it tight.\n"
-        "- Answer every part of the question, and always finish completely — "
-        "never stop mid-sentence.\n\n"
-        "THIS APP ALREADY HAS THE DATA. The scan is measured for you — organ "
-        "volumes, mean HU, and any percentiles are in the 'Facts:' block. Your "
-        "value is INTERPRETING those numbers, not collecting them.\n\n"
-        "CLINICAL / HEALTH QUESTIONS (symptoms, 'could this be...', 'is this "
-        "normal', diagnosis, management): before answering, silently work out "
-        "what the numbers show, the most likely explanations, what information "
-        "is still missing, and whether anything is urgent — then give a short, "
-        "warm paragraph that states what the values suggest, the leading "
-        "possibilities and what would tell them apart, and sensible next steps "
-        "or when to seek in-person care. Clearly flag urgency / escalation if "
-        "anything sounds serious. Stay educational and NON-DIAGNOSTIC; never "
-        "give a definitive diagnosis.\n\n"
-        "CITE THE NUMBER. Tie every case-specific claim to a value from the "
-        "Facts — name the volume, mean HU, or percentile you rely on (e.g. 'the "
-        "liver volume of 1512 cm3 is above the typical range'). Never state a "
-        "fact about this case that you cannot tie to a provided value; if a "
-        "value you need is not in the Facts, say what's missing and ask for it "
-        "rather than guessing.\n\n"
-        "END EACH REPLY with one natural follow-up question (its own sentence) "
-        "that invites the user to continue — phrased conversationally, with NO "
-        "lead-in label. If you are missing something you genuinely need, make "
-        "that the question (for example, BMI needs height and weight). A pure "
-        "viewer command just needs a short confirmation.\n\n"
-        "Use any values in the 'Facts:' block verbatim (with units). Never "
-        "invent patient values or history. Never mention missing data, files, "
-        "or technical details."
+    return ai_reasoning.build_system_prompt(
+        has_images=has_images,
+        has_case=has_case,
     )
-    if has_images:
-        # HIDDEN PROMPT — SCREENSHOT ARTIFACTS (crosshairs + color segmentation).
-        # Tells the model how to read a captured CT screenshot: it WILL contain
-        # (1) semi-transparent colored segmentation masks and (2) thin crosshair
-        # reference lines. The model names organs by mask color (via the legend)
-        # and treats crosshairs as navigation, not anatomy.
-        prompt += (
-            "\n\nIMAGES\n"
-            "Screenshots of CT views are attached. They contain semi-transparent "
-            "COLORED SEGMENTATION MASKS (one color per organ) and thin CROSSHAIR "
-            "reference lines. Use the mask color list in the Facts to say which "
-            "color is which organ. The crosshair lines are just a navigation aid "
-            "marking the current slice — NOT anatomy, a wire, a catheter, or a "
-            "fracture. Describe the CT anatomy, keep it separate from these "
-            "overlays, and stay non-diagnostic."
-        )
-    return prompt
 
 
 @api_blueprint.route("/ai-command-stream", methods=["POST"])
@@ -4111,7 +5626,9 @@ def ai_command_stream():
     blocked = _ai_gate()
     if blocked is not None:
         return blocked
-    plan_store.record_ai_message(current_user()["id"])
+    stream_user = current_user()
+    if stream_user:
+        plan_store.record_ai_message(stream_user["id"])
 
     available_organs = body.get("available_organs") or []
     if not isinstance(available_organs, list):
@@ -4145,6 +5662,17 @@ def ai_command_stream():
 
     supplied_metrics = body.get("organ_metrics")
     supplied_demographics = body.get("demographics")
+
+    # Reference percentiles the frontend computed for this case's organs —
+    # exposed to the agent's get_organ_metric tool for cohort context.
+    raw_references = body.get("organ_references") if isinstance(body.get("organ_references"), list) else []
+    organ_references = [ref for ref in raw_references if isinstance(ref, dict)]
+
+    # Agent capture protocol: can_capture says the viewer can take snapshots;
+    # auto_captured marks the follow-up request after the browser obliged, so
+    # the loop can never request captures twice for one user turn.
+    can_capture = bool(body.get("can_capture"))
+    auto_captured = bool(body.get("auto_captured"))
 
     # Color legend for the segmentation overlays in attached screenshots:
     # [{"organ": "liver", "color": "brownish red"}, ...]. Lets the vision model
@@ -4185,6 +5713,32 @@ def ai_command_stream():
 
             metadata = _ai_metadata(case_id, supplied_demographics)
             references_case = _ai_has_case_reference(_ai_norm(message))
+
+            # A short reply to a question the ASSISTANT just asked (it asked
+            # for the patient's ethnicity; the user answered "he is Han
+            # Chinese") is a continuation of the conversation — NOT a new
+            # question about the open scan, even when it contains phrases like
+            # "this patient". Without this, vignette follow-ups were misrouted
+            # into the case-investigation path, which then reported that the
+            # open case lacks the data instead of continuing the conversation.
+            last_assistant_turn = next(
+                (t["content"] for t in reversed(conversation) if t["role"] == "assistant"),
+                "",
+            )
+            assistant_asked = "?" in last_assistant_turn[-240:]
+            _scan_words = (
+                "this scan", "this case", "this ct", "this segmentation",
+                "the segmentation", "current scan", "current case",
+                "currently loaded", "in the viewer", "in this image",
+                "in these images", "shown here",
+            )
+            _norm_message = _ai_norm(message)
+            explicitly_about_scan = any(w in _norm_message for w in _scan_words)
+            conversational_reply = (
+                assistant_asked and len(message) < 200 and not explicitly_about_scan
+            )
+            if conversational_reply:
+                references_case = False
 
             # Parse intent first (cheap, no I/O) so we can decide whether the
             # question actually needs the (potentially slow) case metrics.
@@ -4227,23 +5781,170 @@ def ai_command_stream():
             if fallback_actions:
                 yield sse({"type": "actions", "actions": fallback_actions})
 
-            exact_facts = _ai_case_facts(message, metrics, metadata) if references_case else []
-
             # Exact measurement sentences that MUST appear when the user asked
             # for an organ metric (guarantees the volume is always answered).
             required_facts = _ai_required_metric_facts(fallback_actions, metrics, available_organs)
-            for fact in required_facts:
-                if fact not in exact_facts:
-                    exact_facts.append(fact)
+
+            # Measured values for the open case are only allowed into the answer
+            # when the question is actually about them. Previously every fact
+            # that had been computed was appended, so a message carrying a
+            # patient's bilirubin and MRCP report came back with the open scan's
+            # liver volume and the patient's age — correct numbers, and a
+            # complete non-answer to what was asked.
+            conversation_text = " ".join(turn["content"] for turn in conversation[-4:])
+            candidate_facts = _ai_case_facts(message, metrics, metadata) if references_case else []
+            forced_facts = (
+                required_facts
+                if (
+                    question_mode == "case_measurement"
+                    or ai_reasoning.asks_for_measurement(message)
+                )
+                else []
+            )
+            exact_facts = ai_reasoning.relevant_facts(
+                candidate_facts + required_facts,
+                message,
+                conversation_text=conversation_text,
+                always_include=forced_facts,
+            )
+            required_facts = forced_facts
 
             # A clean, buttonless confirmation of any viewer action (never the
             # rule parser's "click below ..." text, which has no button here).
             action_confirmation = _ai_action_confirmation(fallback_actions)
 
-            # Fast path: "which color is the <organ>?" is answerable instantly
-            # and reliably from the mask legend — no (slow) vision call needed.
+            # ---- Agent tool loop (investigation step) -----------------------
+            # Only for case-specific questions with no images attached: general
+            # questions answer immediately, and image messages go straight to
+            # the vision path. Any failure falls through to the plain path.
+            agent_final = None
+            agent_facts = []
+            # Skip the (slow, multi-call) investigation when the rule parser
+            # already extracted the exact measurement the question asks for —
+            # the plain path answers from the identical numbers in ONE model
+            # call, so this costs nothing in accuracy and saves seconds.
+            rule_already_answered = bool(
+                required_facts and question_mode == "case_measurement"
+            )
+            run_agent = (
+                bool(case_id)
+                and bool(message)
+                and not images
+                and not conversational_reply
+                and not rule_already_answered
+                and (
+                    references_case
+                    or question_mode in {"case_measurement", "case_metadata", "case_health_context"}
+                )
+            )
+            if run_agent:
+                yield sse({"type": "status", "text": "Looking into this case"})
+                agent_prompt = message
+                if conversation:
+                    recent = conversation[-4:]
+                    convo_str = "\n".join(f"{t['role']}: {t['content'][:800]}" for t in recent)
+                    agent_prompt = f"Recent conversation:\n{convo_str}\n\nQuestion: {agent_prompt}"
+                agent_prompt += (
+                    f"\n\n(Open case: {case_id}. Segmented structures: "
+                    f"{', '.join(available_organs[:40]) or 'unknown'}.)"
+                )
+                if not OLLAMA_THINK and "qwen3" in selected_model.lower():
+                    agent_prompt += "\n\n/no_think"
+                agent_messages = [
+                    {"role": "system", "content": _AI_AGENT_SYSTEM_PROMPT},
+                    {"role": "user", "content": agent_prompt},
+                ]
+                agent_tools = _ai_agent_tools(can_capture and not auto_captured)
+                capture_requested = False
+                try:
+                    for _round in range(_AI_AGENT_MAX_ROUNDS):
+                        reply_msg = chat_with_tools(
+                            model=selected_model,
+                            messages=agent_messages,
+                            tools=agent_tools,
+                        )
+                        tool_calls = reply_msg.get("tool_calls") or []
+                        if not isinstance(tool_calls, list) or not tool_calls:
+                            content = _ai_strip_think(
+                                str(reply_msg.get("content") or ""),
+                                orphan_closer=bool(_AI_REASONING_MODEL_RE.search(selected_model)),
+                            ).strip()
+                            agent_final = content or None
+                            break
+                        agent_messages.append({
+                            "role": "assistant",
+                            "content": reply_msg.get("content") or "",
+                            "tool_calls": tool_calls,
+                        })
+                        for call in tool_calls[:_AI_AGENT_MAX_CALLS_PER_ROUND]:
+                            fn = call.get("function") if isinstance(call, dict) else None
+                            fname = str((fn or {}).get("name") or "").strip()
+                            fargs = (fn or {}).get("arguments") or {}
+                            if isinstance(fargs, str):
+                                try:
+                                    fargs = json.loads(fargs)
+                                except ValueError:
+                                    fargs = {}
+                            if fname == "capture_views":
+                                capture_requested = True
+                                break
+                            status_txt, result_txt, tool_actions, is_fact = _ai_agent_execute(
+                                fname,
+                                fargs,
+                                metrics=metrics,
+                                metadata=metadata,
+                                available_organs=available_organs,
+                                references=organ_references,
+                            )
+                            if status_txt:
+                                yield sse({"type": "status", "text": status_txt})
+                            if tool_actions:
+                                # Fire viewer actions immediately so the viewer
+                                # reacts while the agent keeps working.
+                                yield sse({"type": "actions", "actions": tool_actions})
+                                fallback_actions = _ai_merge_actions(fallback_actions, tool_actions)
+                            if is_fact and result_txt:
+                                agent_facts.append(result_txt)
+                            agent_messages.append({
+                                "role": "tool",
+                                "content": result_txt,
+                                "tool_name": fname,
+                            })
+                        if capture_requested:
+                            break
+                except (OllamaUnavailable, Exception) as error:
+                    # Old Ollama / model without tool support / anything else:
+                    # investigation is optional — the plain path still answers.
+                    print("[ai agent loop]", type(error).__name__, str(error))
+                    agent_final = None
+
+                if capture_requested:
+                    # Hand control to the browser: it captures the four views
+                    # and re-sends this message with the images attached.
+                    yield sse({"type": "status", "text": "Capturing the CT views"})
+                    yield sse({"type": "need_capture"})
+                    yield sse({"type": "done"})
+                    return
+
+                # Everything the agent measured becomes part of the Facts so
+                # the final answer (either path) can cite and be checked
+                # against the exact values.
+                for fact in agent_facts:
+                    if fact not in exact_facts:
+                        exact_facts.append(fact)
+
+            # Fast path: a SHORT, pure color question ("which color is the
+            # liver?") is answerable instantly and reliably from the mask
+            # legend — no (slow) vision call needed. It must be restricted to
+            # exactly that shape: merely MENTIONING colors (e.g. a long
+            # structured-read prompt saying "identify every organ by its mask
+            # color") must NOT hijack the message away from the vision model,
+            # which previously reduced a five-part read to a legend dump.
             norm_msg = _ai_norm(message)
-            asks_color = "color" in norm_msg or "colour" in norm_msg
+            asks_color = bool(
+                len(message) < 120
+                and re.search(r"\b(what|which)\s+colou?r\b|\bcolou?r\s+is\b", norm_msg)
+            )
             if images and mask_legend and asks_color:
                 legend_reply = _ai_legend_answer(message, mask_legend)
                 if legend_reply:
@@ -4260,20 +5961,30 @@ def ai_command_stream():
             # actually needs. (A giant JSON payload makes small models ramble.)
             facts_lines = list(dict.fromkeys([f for f in (exact_facts + required_facts) if f]))
             if images and mask_legend:
-                legend_str = ", ".join(
-                    f"{str(e['organ']).replace('_', ' ')}: {e['color']}" for e in mask_legend
-                )
-                facts_lines.append(f"Segmentation mask colors — {legend_str}.")
+                legend_fact = ai_reasoning.build_legend_fact(mask_legend)
+                if legend_fact:
+                    facts_lines.append(legend_fact)
 
-            user_prompt = message or "Describe what is shown."
-            if conversation:
-                recent = conversation[-2:]
-                convo_str = "\n".join(
-                    f"{t['role']}: {t['content'][:200]}" for t in recent
+            user_prompt = message or "Describe what is shown in the attached views."
+            if images:
+                # Name the attachments explicitly. Without this the model has to
+                # infer from the images alone which pane is which, and a request
+                # phrased "for each pane" gets answered as one blended image.
+                user_prompt = (
+                    f"{len(images)} CT viewer screenshot(s) are attached to this "
+                    "message, in the viewer's pane order (axial, sagittal, "
+                    "coronal, then the 3D surface rendering when present). Look "
+                    "at them before answering.\n\n"
+                    f"{user_prompt}"
                 )
-                user_prompt = f"Recent conversation:\n{convo_str}\n\nQuestion: {user_prompt}"
             if facts_lines:
                 user_prompt += "\n\nFacts:\n" + "\n".join(f"- {f}" for f in facts_lines)
+
+            # Prior turns are sent as real conversation messages instead of being
+            # flattened into the prompt text: a model that can see its own last
+            # reply continues the thread, which is what makes "here are the labs
+            # you asked for" attach to the question that asked for them.
+            history = conversation[-6:]
         except Exception as error:
             print("[ai_command_stream setup error]", type(error).__name__, str(error))
             yield sse({"type": "error", "message": "An internal error occurred while preparing the answer."})
@@ -4281,47 +5992,124 @@ def ai_command_stream():
             return
 
         # Stream the model answer.
-        vision_model = None
+        #
+        # Vision is the point of this product, so the model that reads images is
+        # resolved against what is actually installed rather than assumed. The
+        # old code sent the configured name blindly; when that model had never
+        # been pulled (qwen3-vl needs Ollama 0.12.7+), every image message failed
+        # at the first byte and the user was told the assistant was unavailable.
+        vision_missing = False
         if images:
-            vision_model = (
-                DEFAULT_OLLAMA_VISION_MODEL
-                if DEFAULT_OLLAMA_VISION_MODEL
-                else selected_model
-            )
+            vision_model = resolve_vision_model(selected_model)
+            if not vision_model:
+                vision_missing = True
+                model_for_call = None
+            else:
+                model_for_call = vision_model
+        else:
+            model_for_call = resolve_text_model(selected_model)
 
-        model_for_call = vision_model or selected_model
         model_ok = False
+
+        if vision_missing:
+            offline = ai_reasoning.model_offline_reply(
+                has_images=True,
+                vision_model_missing=True,
+                configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+            )
+            yield sse({"type": "reply", "delta": offline})
+            yield sse({
+                "type": "final",
+                "reply": offline,
+                "actions": fallback_actions,
+                "source": "vision_model_unavailable",
+                "model": None,
+                "intent": fallback.get("intent") or question_mode,
+            })
+            yield sse({"type": "done"})
+            return
 
         yield sse({"type": "status", "text": "Composing the answer"})
 
         raw_content = ""   # full model content so far (may contain <think> blocks)
         emitted = ""       # cleaned text already sent to the client
-        try:
-            for kind, text in chat_stream(
-                model=model_for_call,
-                system_prompt=_ai_stream_system_prompt(bool(images)),
-                user_prompt=user_prompt,
-                images=images or None,
-            ):
-                if not text:
-                    continue
-                # Drop the model's private reasoning entirely — the user only
-                # wants the answer, not the "steps".
-                if kind == "thinking":
-                    continue
-                raw_content += text
-                cleaned = _ai_strip_think(raw_content)
-                if len(cleaned) > len(emitted):
-                    delta = cleaned[len(emitted):]
-                    emitted = cleaned
-                    model_ok = True
-                    yield sse({"type": "reply", "delta": delta})
-        except OllamaUnavailable as error:
-            print("[ai_command_stream] Ollama unavailable:", str(error))
-        except Exception as error:
-            print("[ai_command_stream] stream error:", type(error).__name__, str(error))
+        # Reasoning models can leak their chain-of-thought as plain text with
+        # only a closing </think> at the end — impossible to distinguish from a
+        # real answer while it streams. For those models, hold the text back
+        # until a think tag proves where the reasoning ends (or the stream
+        # finishes); non-reasoning models (llama3.1, qwen3-vl) stream live.
+        hold_for_think = is_reasoning_model(model_for_call or "")
+        stream_error = False
+        stream_error_missing_model = False
+        if agent_final is not None:
+            # The agent loop already wrote the answer (and it is already
+            # think-stripped) — emit it directly instead of generating twice.
+            raw_content = agent_final
+            emitted = agent_final
+            model_ok = True
+            yield sse({"type": "reply", "delta": agent_final})
+        else:
+            try:
+                for kind, text in chat_stream(
+                    model=model_for_call,
+                    system_prompt=_ai_stream_system_prompt(
+                        bool(images),
+                        has_case=bool(case_id),
+                    ),
+                    user_prompt=user_prompt,
+                    images=images or None,
+                    history=history,
+                ):
+                    if not text:
+                        continue
+                    # Drop the model's private reasoning entirely — the user
+                    # only wants the answer, not the "steps".
+                    if kind == "thinking":
+                        continue
+                    raw_content += text
+                    if (
+                        hold_for_think
+                        and "<think>" not in raw_content
+                        and "</think>" not in raw_content
+                    ):
+                        continue
+                    cleaned = _ai_strip_think(raw_content, orphan_closer=hold_for_think)
+                    if len(cleaned) > len(emitted):
+                        delta = cleaned[len(emitted):]
+                        emitted = cleaned
+                        model_ok = True
+                        yield sse({"type": "reply", "delta": delta})
+            except OllamaModelMissing as error:
+                stream_error = True
+                stream_error_missing_model = True
+                print(
+                    f"[ai_command_stream] model '{model_for_call}' is not "
+                    f"installed on the Ollama host: {error}"
+                )
+            except OllamaUnavailable as error:
+                stream_error = True
+                print("[ai_command_stream] Ollama unavailable:", str(error))
+            except Exception as error:
+                stream_error = True
+                print("[ai_command_stream] stream error:", type(error).__name__, str(error))
 
-        streamed_reply = _ai_strip_think(raw_content).strip()
+        # A reasoning model's stream that DIED before any think tag appeared is
+        # indistinguishable from a chain-of-thought with the closer still to
+        # come — never promote that text to an answer. A stream that finished
+        # normally with no tags is a clean answer and is kept.
+        if (
+            hold_for_think
+            and stream_error
+            and "<think>" not in raw_content
+            and "</think>" not in raw_content
+        ):
+            raw_content = ""
+
+        streamed_reply = _ai_strip_think(raw_content, orphan_closer=hold_for_think).strip()
+        # A held-back reasoning stream may finish without ever emitting a
+        # delta; a non-empty cleaned reply still counts as a model answer.
+        if streamed_reply:
+            model_ok = True
 
         if model_ok and streamed_reply:
             # Trust the model's conversational answer: it was given the exact
@@ -4342,30 +6130,47 @@ def ai_command_stream():
                         final_reply += "\n\n" + fact
             except Exception as error:
                 print("[ai_command_stream fact-check]", type(error).__name__, str(error))
+
+            # Guarantee the closing question. The prompt asks for one, but small
+            # local models drop it exactly when it matters — right after saying
+            # something could not be determined. On vision turns it is always
+            # appended, because there is always a next thing worth looking at.
+            final_reply = ai_reasoning.ensure_followup(
+                final_reply,
+                message,
+                has_images=bool(images),
+                has_case=bool(case_id),
+                force=bool(images),
+            )
         else:
-            # Model offline/empty -> build a clean deterministic reply. Order:
-            # image color legend, then viewer-action confirmation + measured
-            # value(s), then a short friendly message. Never the rule parser's
-            # "click below ..." text or a scary "verify Ollama" string.
+            # No model answer. Say so honestly.
+            #
+            # This branch used to concatenate whatever measurements had been
+            # computed for the open case and present them as the reply, which is
+            # how a question about a patient's bilirubin was answered with
+            # "The liver volume is 1209.11 cm³ ... Age: 52.0". A viewer action
+            # the user asked for is still worth confirming, but a bare list of
+            # unrelated numbers is not an answer to anything.
             parts = []
-            if images and mask_legend:
+            if action_confirmation:
+                parts.append(action_confirmation)
+            if images and mask_legend and _ai_norm(message):
                 legend_reply = _ai_legend_answer(message, mask_legend)
                 if legend_reply:
                     parts.append(legend_reply)
-            if action_confirmation:
-                parts.append(action_confirmation)
-            parts.extend(required_facts)
-            if parts:
-                final_reply = " ".join(parts)
-            else:
-                final_reply = (
-                    "I couldn't get an answer just now — please try again in a moment."
+            parts.append(
+                ai_reasoning.model_offline_reply(
+                    has_images=bool(images),
+                    vision_model_missing=stream_error_missing_model and bool(images),
+                    configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
                 )
+            )
+            final_reply = " ".join(part for part in parts if part).strip()
 
         if not final_reply:
-            final_reply = (
-                "I could not generate a response. The local model may be "
-                "offline — viewer controls still work from the left panel."
+            final_reply = ai_reasoning.model_offline_reply(
+                has_images=bool(images),
+                configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
             )
 
         yield sse({
@@ -4514,6 +6319,39 @@ def _case_mask_path(case_id, low=False):
     return path
 
 
+# Single-slot CT cache for interactive_segment(). Without this, every single
+# click/box prompt re-reads the full CT off disk and re-converts it to
+# float32 from scratch — for a full-res volume that's the dominant cost of
+# the whole request, and it repeats identically even for the very next click
+# on the SAME case a moment later. `segment_from_prompt`/nnInteractive's own
+# remote session already avoids re-uploading the volume when `case_key`
+# matches (see nninteractive_predictor.py's _ensure_volume_loaded) — this
+# cache closes the matching gap on the Flask side, so consecutive prompts on
+# one case skip the disk read + dtype conversion entirely, not just the
+# upload-to-model step. Single-slot (not an LRU/dict) deliberately, matching
+# the same pattern already used in nninteractive_predictor.py, since gunicorn
+# here is a single worker process and one user is typically working one case
+# at a time; a dict cache would need eviction logic for little practical gain.
+_ct_cache_key = None
+_ct_cache_obj = None
+_ct_cache_array = None
+
+
+def _load_ct_cached(ct_path, cache_key):
+    global _ct_cache_key, _ct_cache_obj, _ct_cache_array
+    if _ct_cache_key == cache_key and _ct_cache_array is not None:
+        return _ct_cache_obj, _ct_cache_array
+    import numpy as np
+    ct_obj = nib.load(ct_path)
+    # float32: half the RAM of nibabel's float64 default — these are public
+    # endpoints and a full-res CT at float64 is multiple GB per request.
+    ct = ct_obj.get_fdata(dtype=np.float32)
+    _ct_cache_key = cache_key
+    _ct_cache_obj = ct_obj
+    _ct_cache_array = ct
+    return ct_obj, ct
+
+
 @api_blueprint.route('/interactive-segment/<case_id>', methods=['POST'])
 def interactive_segment(case_id):
     """Click-to-segment: seed prompt -> proposed mask (.nii.gz in CT geometry).
@@ -4533,11 +6371,9 @@ def interactive_segment(case_id):
         if not os.path.exists(ct_path):
             return jsonify({"error": "CT not found for this case on the server."}), 404
 
-        ct_obj = nib.load(ct_path)
-        # float32: half the RAM of nibabel's float64 default — these are public
-        # endpoints and a full-res CT at float64 is multiple GB per request.
-        ct = ct_obj.get_fdata(dtype=np.float32)
-        mask = segment_from_prompt(ct, ct_obj.affine, body)
+        case_key = f"{case_id}:{'low' if low else 'full'}"
+        ct_obj, ct = _load_ct_cached(ct_path, case_key)
+        mask = segment_from_prompt(ct, ct_obj.affine, body, case_key=case_key)
         if int(mask.sum()) == 0:
             return jsonify({"error": "Nothing grew from that point — try a different spot or a higher tolerance."}), 422
 
@@ -4630,4 +6466,50 @@ def vessel_cpr(case_id):
         print("[vessel_cpr error]", type(error).__name__, error)
         return jsonify({"error": "Vessel analysis failed."}), 500
     finally:
+
         _ANALYSIS_SLOTS.release()
+
+
+# --- share-token routes (auto-patched) ---
+def _share_serializer():
+    """Deterministic, stateless share tokens: same case_id always signs to
+    the same token (no DB row, no mapping file). Reuses whatever secret
+    Flask already has configured for sessions -- no new secret to manage.
+    NOTE: this makes share URLs opaque, it is NOT an access-control layer;
+    /api/get-report-data/<id> has no auth today regardless of this token."""
+    secret = current_app.secret_key or os.getenv("SECRET_KEY") or "dev-only-insecure-fallback"
+    return URLSafeSerializer(secret, salt="bodymaps-share-v1")
+
+
+@api_blueprint.route('/share/<case_id>/token', methods=['POST'])
+def create_share_token(case_id):
+    if not _is_safe_id(case_id):
+        return jsonify({"error": "Invalid id"}), 400
+    token = _share_serializer().dumps(str(case_id))
+    return jsonify({"share_id": token, "url": f"{_api_prefix_path()}/share/{token}"})
+
+
+@api_blueprint.route('/share/<token>', methods=['GET'])
+def get_shared_case(token):
+    try:
+        case_id = _share_serializer().loads(token)
+    except BadSignature:
+        return jsonify({"error": "Invalid or expired share link"}), 404
+    data = _build_report_data(case_id)
+    if "error" in data:
+        status = 400 if data["error"] == "Invalid id parameter" else 500
+        return jsonify(data), status
+    return jsonify(data)
+
+
+def _resolve_case_id_or_token(id_or_token: str):
+    """Accepts either a raw numeric case id (existing links keep working)
+    OR an opaque share token. Returns the real case_id, or None."""
+    if str(id_or_token).isdigit():
+        return str(id_or_token)
+    try:
+        case_id = _share_serializer().loads(id_or_token)
+        return str(case_id) if str(case_id).isdigit() else None
+    except BadSignature:
+        return None
+

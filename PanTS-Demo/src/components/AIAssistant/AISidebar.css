@@ -415,6 +415,44 @@
   font-size: 11px;
 }
 
+/* "Best for ..." line under each model name in the picker. */
+.ai-model-menu__desc {
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-model-menu__item:hover .ai-model-menu__desc,
+.ai-model-menu__item[data-selected="true"] .ai-model-menu__desc {
+  color: rgba(255, 255, 255, 0.56);
+}
+
+/* Notice shown in the menu when images are attached: the vision model takes
+   over for that message. Uses the sidebar's existing blue accent. */
+.ai-model-menu__note {
+  margin: 0 2px 5px;
+  padding: 7px 9px;
+  border: 1px solid rgba(110, 168, 254, 0.28);
+  border-radius: 8px;
+  background: rgba(110, 168, 254, 0.16);
+  color: #a8c8ff;
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+/* Picker button while the vision model is active for the pending message. */
+.ai-model-picker__button[data-vision="true"] {
+  border-color: rgba(110, 168, 254, 0.34);
+  color: #a8c8ff;
+}
+
+.ai-model-picker__button[data-vision="true"] .ai-model-picker__dot {
+  opacity: 1;
+}
+
 @keyframes ai-model-pulse {
   0%,
   100% {
@@ -725,6 +763,26 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- Composer warning (shown before send, e.g. no vision model) ---- */
+.ai-composer__warning {
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border: 1px solid rgba(240, 173, 78, 0.35);
+  border-radius: 9px;
+  background: rgba(240, 173, 78, 0.1);
+  color: var(--vp-text, rgba(255, 255, 255, 0.86));
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ai-composer__warning code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.28);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
 }
 
 /* ---- Composer attachment chips (pending, before send) ---- */

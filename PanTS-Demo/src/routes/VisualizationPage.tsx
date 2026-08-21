@@ -41,9 +41,12 @@ import { createPortal } from "react-dom";
 import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
 import { useLocation, useParams } from "react-router-dom";
 import AISidebar from "../components/AIAssistant/AISidebar";
+import { track } from "../helpers/analytics";
 import { buildViewerActions } from "../components/AIAssistant/assistantActions";
 import MeasurementPanel from "../components/MeasurementPanel/MeasurementPanel";
 import { SegmentationMeshViewer } from "../components/viewer/MeshViewer";
+import { cache as reportDataCache } from '../components/ReportScreen/ReportScreen';
+import { captureMeshCanvas } from "../helpers/viewer/meshCapture";
 import OrganCheckbox from "../components/OrganCheckbox";
 import PercentileBar from "../components/PercentileBar";
 import SessionHUD from "../components/ReadingSession/SessionHUD";
@@ -60,9 +63,12 @@ import SmoothingFlyout from "../components/segmentation/SmoothingFlyout";
 import GrowFromSeedsFlyout from "../components/segmentation/GrowFromSeedFlyout";
 import FillBetweenSlicesFlyout from "../components/segmentation/FillBetweenSlicesFlyout";
 import CopyAcrossSlicesFlyout from "../components/segmentation/CopyAcrossSlicesFlyout";
+import { GuidedStepModal } from "../components/segmentation/SliceAnchorPickerUI";
 import HollowFlyout from "../components/segmentation/HollowFlyout";
 import LevelTracingFlyout from "../components/segmentation/LevelTracingFlyout";
 import { useScissorsTool } from "../helpers/viewer/useScissorsTool";
+import { useInteractivePromptTool } from "../helpers/viewer/useInteractivePromptTool";
+import { loadRecentUploads, renameRecentUpload } from "../helpers/recentUploads";
 import {
   applyMargin, getActualMarginMm,
   applyIslandsOperation, applyLogicalOperator, applySmoothing,
@@ -126,6 +132,7 @@ import {
     toggleCrosshairTool,
     undoMaskEdit,
     upgradeCtVolume,
+    upgradeSegmentationVolume,
     VOLUME_3D_PRESETS,
     VOLUME_3D_PRESETS_MR,
     zoomToFit,
@@ -407,8 +414,102 @@ function useToolbarFlyout() {
 		};
 	}, [open]);
 
+	
+
 	return { open, pos, groupRef, btnRef, menuRef, toggle, close };
 }
+
+// One-time "click here to close" nudge shown next to the closing anchor
+// (the highlighted/red first point) on the Lasso/Scissors live-wire
+// overlay, the moment the cursor first gets close enough to actually close
+// the loop. Fades away automatically after a few seconds rather than
+// needing a dismiss click, since by the time it fades the person has
+// almost always already seen the highlighted anchor itself. Resets the
+// moment the loop is closed/cancelled (anchor goes away), so it can show
+// again on the next shape.
+const CLOSE_LOOP_HINT_VISIBLE_MS = 3000;
+const CLOSE_LOOP_HINT_FADE_MS = 300;
+function CloseLoopHint({ nearClose, anchor }: { nearClose: boolean; anchor: [number, number] | undefined }) {
+	const [visible, setVisible] = useState(false);
+	const [fading, setFading] = useState(false);
+	// Tracks whether this hint has already been shown for the CURRENT loop
+	// in progress, so it only ever fires once per shape rather than
+	// re-triggering every time the cursor wanders in and out of range.
+	const shownThisLoopRef = useRef(false);
+	const fadeTimerRef = useRef<number | null>(null);
+	const hideTimerRef = useRef<number | null>(null);
+
+	const clearTimers = () => {
+		if (fadeTimerRef.current) window.clearTimeout(fadeTimerRef.current);
+		if (hideTimerRef.current) window.clearTimeout(hideTimerRef.current);
+		fadeTimerRef.current = null;
+		hideTimerRef.current = null;
+	};
+
+	// No anchor means there's no shape in progress (just closed, cancelled,
+	// or not started yet) — reset so the next shape can show the hint again.
+	useEffect(() => {
+		if (anchor) return;
+		shownThisLoopRef.current = false;
+		setVisible(false);
+		setFading(false);
+		clearTimers();
+	}, [anchor]);
+
+	useEffect(() => {
+		if (!nearClose || !anchor || shownThisLoopRef.current) return;
+		shownThisLoopRef.current = true;
+		setFading(false);
+		setVisible(true);
+		fadeTimerRef.current = window.setTimeout(() => setFading(true), CLOSE_LOOP_HINT_VISIBLE_MS);
+		hideTimerRef.current = window.setTimeout(() => setVisible(false), CLOSE_LOOP_HINT_VISIBLE_MS + CLOSE_LOOP_HINT_FADE_MS);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [nearClose, anchor]);
+
+	useEffect(() => () => clearTimers(), []);
+
+	if (!visible || !anchor) return null;
+	return (
+		<div
+			aria-hidden="true"
+			style={{
+				position: "absolute",
+				left: anchor[0] + 14,
+				top: anchor[1],
+				transform: "translateY(-130%)",
+				background: "rgba(0, 45, 114, 0.55)",
+				border: "1px solid rgba(104, 172, 229, 0.55)",
+				borderRadius: 6,
+				color: "rgba(255, 255, 255, 0.9)",
+				fontFamily: "system-ui, sans-serif",
+				fontSize: 11,
+				fontWeight: 700,
+				padding: "5px 9px",
+				whiteSpace: "nowrap",
+				pointerEvents: "none",
+				zIndex: 40,
+				boxShadow: "0 6px 16px -6px rgba(0,0,0,0.35)",
+				backdropFilter: "blur(2px)",
+				opacity: fading ? 0 : 0.85,
+				transition: `opacity ${CLOSE_LOOP_HINT_FADE_MS}ms ease`,
+			}}
+		>
+			Click here to close the lasso
+		</div>
+	);
+}
+
+// The 3D surface pane is EXCLUDED from the assistant's snapshots.
+//
+// Its WebGL drawing buffer cannot be read back reliably across every
+// GPU/driver/browser combination: on some machines toDataURL returns the
+// cleared buffer no matter how the read is timed, producing a solid black
+// image. A black pane is worse than an absent one — the vision model receives
+// it as evidence and describes an empty scene. The three MPR views carry the
+// anatomy the model actually reasons about.
+//
+// Set this to true to send the 3D view again.
+const INCLUDE_3D_PANE_IN_SNAPSHOTS: boolean = false;
 
 function VisualizationPage() {
 	// References and state
@@ -443,6 +544,21 @@ function VisualizationPage() {
 		typeof window !== "undefined" &&
 		new URLSearchParams(window.location.search).get("hd") === "1";
 	
+	useEffect(() => {
+		if (isDicom || !caseId || reportDataCache[caseId]) return;
+		// Deferred ~2s so this doesn't compete with the CT/segmentation load for
+		// server CPU and disk I/O right when the viewer first opens — the scan
+		// is what the user needs immediately; the report data just needs to be
+		// warm in the cache well before anyone would actually click "Report."
+		const t = setTimeout(() => {
+			fetch(`${API_BASE}/api/get-report-data/${caseId}`)
+				.then(r => r.json())
+				.then(j => { if (!j.error) reportDataCache[caseId] = j; })
+				.catch(() => {});
+		}, 2000);
+		return () => clearTimeout(t);
+	}, [caseId, isDicom]);
+
 	const [showAnnotationToolbar, setShowAnnotationToolbar] = useState(false);
 	const [isEditRendering, setIsEditRendering] = useState(false);
 	// Mirrors SegmentsPopup's "something is currently being deleted" state up
@@ -546,6 +662,12 @@ function VisualizationPage() {
 	
 	const [outlineOpacityValue, setOutlineOpacityValue] = useState(0);
 	// Current/total slice per MPR pane, for the "245/519" caption + drag scrollbar.
+	// One event per case actually opened in the viewer — not per re-render, and
+	// not for a viewer opened on a local file, which has no case behind it.
+	useEffect(() => {
+		if (pantsCase || sessionId) track("viewer_open_case");
+	}, [pantsCase, sessionId]);
+
 	// Populated by subscribeToSliceChanges once the volume is ready; null until then.
 	const [sliceInfo, setSliceInfo] = useState<Record<CinePane, SliceInfo | null>>({
 		axial: null,
@@ -757,6 +879,21 @@ function VisualizationPage() {
 
 	const setActiveSegment = (id: number | null) => setActiveSegmentState(id);
 
+	// Shared by both "select a custom class" and "select an existing organ"
+	// (see onSelect/handleSelectCatalogOrgan below): moves both the 2D MPR
+	// crosshair and the 3D crosshair to the centroid of whatever class was
+	// just targeted, on axial/sagittal/coronal at once — same mechanism the
+	// sidebar's "jump to organ" already uses (handleJumpToOrgan below), just
+	// triggered from the popup's own row click instead. No-ops quietly if
+	// the class has no voxels yet (nothing painted into it) or centroid data
+	// isn't available for it.
+	const jumpCrosshairToSegmentCentroid = (label: number) => {
+		const centroid = getOrganCentroids()?.[label];
+		if (!centroid) return;
+		moveCornerstoneCrosshairToMm(centroid);
+		setCrosshairMm(centroid);
+	};
+
 	// Selecting an existing organ from the dropdown targets the brush at it
 	// exactly like clicking a custom-segment row does.
 	const handleSelectCatalogOrgan = (id: number | null) => {
@@ -765,6 +902,7 @@ function VisualizationPage() {
 		// (id === null) must clear activeSegment too, or a stale id lingers
 		// and SegmentsPopup keeps showing a target as active.
 		setActiveSegmentState(id);
+		if (id != null) jumpCrosshairToSegmentCentroid(id);
 	};
 	const handleRenameSegment = (id: number, name: string): boolean => {
 		const dup = checkBoxData.some((s) => s.id !== id && s.label.toLowerCase() === name.toLowerCase());
@@ -779,6 +917,7 @@ function VisualizationPage() {
 	};
 
 	const handleToggleSegmentVisibility = (id: number) => {
+	track("viewer_toggle_organ");
 	setSegmentVisibility((prev) => {
 		const next = { ...prev, [id]: prev[id] === false ? true : false };
 		setCheckState((cs) => {
@@ -1151,16 +1290,78 @@ function VisualizationPage() {
 		operation: levelTraceOperation,
 		activeSegmentIndex: activeSegment,
 		maskFilter,
+		// Lets the hook re-derive its cached preview outline (voxel-space,
+		// camera-independent) against the new camera the instant zoom changes,
+		// instead of leaving it drawn at old canvas pixels until the next
+		// mousemove happens to refresh it.
+		cameraVersion: zoomLevel,
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 1500),
 	});
-
 
 	// The active drawing tool for the pane handlers below — whichever one is
 	// actually armed right now (they're mutually exclusive via `enabled`).
 	const activeDrawTool = activeToolbarTool === "scissors" ? scissors : lasso;
+
+	// Single entry point for both the toolbar's Undo button and the ⌘Z/Ctrl+Z
+	// shortcut. Scissors/lasso place polygon points one click at a time
+	// (usePolygonDraw's local `points` state) BEFORE anything is committed
+	// to the shared mask-edit undo stack — that commit only happens once the
+	// shape is closed. Previously Undo always called the global
+	// `undoMaskEdit()` directly, with no awareness of an in-progress draw:
+	// pressing it while a point was down undid the last COMMITTED mask edit
+	// (e.g. a brush stroke) while doing nothing to the pending point, but
+	// since the point then got silently cleared by the mask refresh that
+	// undo triggers, one press looked like it undid two things at once —
+	// the pending point AND the previous brush stroke. Now: if there's a
+	// pending, uncommitted point, undo removes just that one point first
+	// (activeDrawTool.undo(), from usePolygonDraw); only once there are no
+	// pending points left does it fall through to the normal undoMaskEdit()
+	// for the last committed edit. Redo has no equivalent concept for an
+	// in-progress draw, so it's untouched.
+	const handleUndo = useCallback(() => {
+		if (activeDrawTool.anchorsCanvas.length > 0) {
+			activeDrawTool.undo();
+			return;
+		}
+		undoMaskEdit();
+	}, [activeDrawTool]);
+
 	// Progressive resolution: after the fast low-res load, the full-res CT streams in
 	// the background and hot-swaps in place (no reload). idle → streaming → done/failed.
 	const [enhance, setEnhance] = useState<{ state: "idle" | "streaming" | "done" | "failed"; pct: number | null }>({ state: "idle", pct: null });
+
+	// Click/box-to-segment (interactive prompt tools). `res` MUST match the
+	// grid the live segmentation volume is actually on right now — same
+	// hdReady logic gating the Annotate button, not a separate guess. Placed
+	// after `enhance` is declared above since both read enhance.state.
+	const [promptToolBusy, setPromptToolBusy] = useState(false);
+	const pointSegment = useInteractivePromptTool({
+		enabled: activeToolbarTool === "pointSegment" && !promptToolBusy,
+		mode: "point",
+		apiBase: API_BASE,
+		caseId: pantsCase ?? null,
+		activeSegmentIndex: activeSegment,
+		res: isHd || enhance.state === "done" ? "full" : "low",
+		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
+		onBusyChange: setPromptToolBusy,
+		// Single-shot tool, not equip-and-use like paint/erase — deselect
+		// (icon loses its active/white-background state) once a click
+		// actually produced a mask, instead of staying armed for repeated
+		// clicks the way the brush does.
+		onComplete: () => setActiveToolbarTool(null),
+	});
+	const boxSegment = useInteractivePromptTool({
+		enabled: activeToolbarTool === "boxSegment" && !promptToolBusy,
+		mode: "box",
+		apiBase: API_BASE,
+		caseId: pantsCase ?? null,
+		activeSegmentIndex: activeSegment,
+		res: isHd || enhance.state === "done" ? "full" : "low",
+		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
+		onBusyChange: setPromptToolBusy,
+		onComplete: () => setActiveToolbarTool(null),
+	});
+
 	const enhanceStartedRef = useRef(false);
 	// Live mirrors so the async swap re-applies the *current* window/visibility, not
 	// the values captured when the stream started.
@@ -1228,6 +1429,27 @@ function VisualizationPage() {
 	const [sessionStarting, setSessionStarting] = useState(false);
 	const [sessionResult, setSessionResult] = useState<SessionResult | null>(null);
 	const [sessionMeasurements, setSessionMeasurements] = useState<ReportMeasurement[]>([]);
+	// Friendly name shown in the toolbar in place of the raw session UUID. Reads
+	// from the SAME localStorage record the Upload page's "Completed Uploads"
+	// list renders and renames, so the two are always in sync by construction
+	// (one store, one label field) rather than two names that can drift apart.
+	// null when this session has no local record (e.g. opened on a different
+	// browser) -- falls back to the raw id in that case, same as before.
+	const [scanLabel, setScanLabel] = useState<string | null>(null);
+	const [renamingScan, setRenamingScan] = useState(false);
+	const [scanRenameDraft, setScanRenameDraft] = useState("");
+	useEffect(() => {
+		if (!sessionId) { setScanLabel(null); return; }
+		const match = loadRecentUploads().find((u) => u.sessionId === sessionId);
+		setScanLabel(match?.label ?? null);
+	}, [sessionId]);
+	const commitScanRename = () => {
+		if (!sessionId) return;
+		renameRecentUpload(sessionId, scanRenameDraft);
+		const match = loadRecentUploads().find((u) => u.sessionId === sessionId);
+		setScanLabel(match?.label ?? null);
+		setRenamingScan(false);
+	};
 	const [showMeasurePanel, setShowMeasurePanel] = useState(false);
 	// Shareable-link state: brief "copied" confirmation, and a guard so a deep-link's view
 	// state is applied exactly once after the volume finishes loading.
@@ -1271,11 +1493,39 @@ function VisualizationPage() {
 		if (editMode === "brush" || editMode === "eraser") {
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(editMode === "brush" ? EDIT_BRUSH : EDIT_ERASER);
-		} else if (editMode === "smartfill") {
-			// Smart fill owns the mouse itself (scribbling) — no Cornerstone tool needed.
+		} else if (editMode === "smartfill" || activeToolbarTool === "pointSegment" || activeToolbarTool === "boxSegment") {
+			// Smart fill (scribbling) and point/box segment (click / click-drag
+			// prompts) all own the mouse themselves — no Cornerstone tool
+			// needed. This must be a full releasePrimaryMouseTools(), not just
+			// crosshair-off: box-segment specifically is a mousedown→drag→
+			// mouseup gesture, and with the crosshair merely toggled off but
+			// no tool explicitly released, Cornerstone still had SOME tool
+			// bound to primary-button-drag (pan/window-level, whatever the
+			// viewport's underlying default is) — so dragging out a box
+			// simultaneously panned/adjusted the underlying CT view instead of
+			// just drawing the box overlay. Point segment is a plain click
+			// with no drag, so the same bug wasn't visible there, but it's
+			// released here too for consistency (and so a slight click-drift
+			// during the click can't be misread as a pan/W-L nudge either).
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(null);
 			releasePrimaryMouseTools();
+		} else if (editMode === "lasso" || activeToolbarTool === "levelTracing") {
+			// Scissors/lasso (editMode "lasso") and level tracing place their
+			// points via plain clicks on the pane — so the crosshair tool
+			// needs to be OFF here too, not just left to whatever
+			// `crosshairToolActive` (the user's saved navigation preference)
+			// happens to be. Previously this fell through to the plain `else`
+			// below, which re-enabled Crosshairs whenever `crosshairToolActive`
+			// was true (the default) — so the crosshair stayed live and
+			// interactive underneath the polygon/trace clicks even though the
+			// toolbar's own crosshair button visually showed itself as
+			// deselected (its active-state check already excludes any
+			// editMode) — nothing in the UI hinted navigation was still armed
+			// underneath.
+			setActiveMeasurementTool(null);
+			setActiveMaskEditTool(null);
+			toggleCrosshairTool(false);
 		} else if (activeMeasureTool) {
 			setActiveMaskEditTool(null);
 			setActiveMeasurementTool(activeMeasureTool);
@@ -1284,7 +1534,7 @@ function VisualizationPage() {
 			setActiveMeasurementTool(null);
 			toggleCrosshairTool(crosshairToolActive);
 		}
-	}, [editMode, activeMeasureTool, crosshairToolActive]);
+	}, [editMode, activeToolbarTool, activeMeasureTool, crosshairToolActive]);
 
 
 
@@ -1346,6 +1596,10 @@ function VisualizationPage() {
 				c.height = Math.round(img.height * scale);
 				const ctx = c.getContext("2d");
 				if (!ctx) return resolve(dataUrl);
+				// JPEG has no alpha: paint the CT viewer's black ground first so a
+				// source with transparent pixels does not decode as white fringing.
+				ctx.fillStyle = "#000";
+				ctx.fillRect(0, 0, c.width, c.height);
 				ctx.drawImage(img, 0, 0, c.width, c.height);
 				resolve(c.toDataURL("image/jpeg", 0.85));
 			};
@@ -1358,17 +1612,81 @@ function VisualizationPage() {
 	// grid. The segmentation masks are left VISIBLE so the model can identify
 	// each organ by its color (paired with the mask legend). Images are
 	// downscaled before returning so the vision model responds quickly.
+	// Wait for a frame that has actually been presented. rAF never fires in a
+	// background tab, so cap the wait rather than hanging the capture.
+	const nextPresentedFrame = () =>
+		new Promise<void>((resolve) => {
+			const done = () => resolve();
+			const timer = window.setTimeout(done, 250);
+			requestAnimationFrame(() =>
+				requestAnimationFrame(() => {
+					window.clearTimeout(timer);
+					done();
+				})
+			);
+		});
+
+	// A WebGL readback that lost its drawing buffer comes out as one flat color —
+	// the "black 3D screenshot". Sample the CAPTURED IMAGE (not the canvas, which
+	// may have been redrawn since) so a dead capture is caught here instead of
+	// being sent to the vision model, which would then confidently describe it.
+	const imageLooksBlank = (dataUrl: string): Promise<boolean> =>
+		new Promise((resolve) => {
+			const img = new Image();
+			img.onload = () => {
+				try {
+					const probe = document.createElement("canvas");
+					probe.width = 32;
+					probe.height = 32;
+					const ctx = probe.getContext("2d", { willReadFrequently: true });
+					if (!ctx) return resolve(false);
+					ctx.drawImage(img, 0, 0, probe.width, probe.height);
+					const { data } = ctx.getImageData(0, 0, probe.width, probe.height);
+					let min = 255;
+					let max = 0;
+					for (let i = 0; i < data.length; i += 4) {
+						const luma = (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
+						if (luma < min) min = luma;
+						if (luma > max) max = luma;
+					}
+					resolve(max - min < 4);
+				} catch {
+					resolve(false); // unreadable — assume the shot is usable
+				}
+			};
+			img.onerror = () => resolve(true);
+			img.src = dataUrl;
+		});
+
 	const captureAllViews = useCallback(async () => {
 		const shots: { name: string; dataUrl: string }[] = await captureViewportImages();
-		try {
-			const pane = document.querySelector<HTMLElement>(".render");
-			const canvas = pane?.querySelector<HTMLCanvasElement>("canvas");
-			if (canvas && canvas.width && pane && pane.offsetParent !== null) {
-				const url = canvas.toDataURL("image/png");
-				if (url && url.length > 128) shots.push({ name: "3d", dataUrl: url });
+		if (INCLUDE_3D_PANE_IN_SNAPSHOTS) {
+			try {
+				const pane = document.querySelector<HTMLElement>(".render");
+				const paneVisible = !pane || pane.offsetParent !== null;
+				if (paneVisible) {
+					// Draw a frame and read the pixels back in one synchronous step;
+					// querying the canvas and reading it later races the compositor.
+					let url = captureMeshCanvas();
+
+					if (!url) {
+						const canvas =
+							document.querySelector<HTMLCanvasElement>("canvas[data-bodymaps-3d]") ??
+							pane?.querySelector<HTMLCanvasElement>("canvas") ??
+							null;
+						if (canvas && canvas.width) {
+							await nextPresentedFrame();
+							url = canvas.toDataURL("image/png");
+						}
+					}
+
+					if (url && url.length > 128 && !(await imageLooksBlank(url))) {
+						shots.push({ name: "3d", dataUrl: url });
+					}
+				}
+			} catch (error) {
+				console.warn("[BodyMaps AI] 3D capture skipped", error);
 			}
-		} catch (error) {
-			console.warn("[BodyMaps AI] 3D capture skipped", error);
 		}
 		// Downscale all shots for fast vision inference.
 		return Promise.all(
@@ -1450,6 +1768,7 @@ function VisualizationPage() {
 		const unsubscribe = subscribeToMeasurementChanges((kind, m) => {
 			if (!sessionRef.current) return;
 			if (kind === "completed") {
+				track("viewer_measure");
 				sessionRef.current.log("measure", `${toolDisplayName(m.tool)} measured: ${m.value}`);
 				requestAnimationFrame(() => {
 					void takeSnapshot(`${toolDisplayName(m.tool)} — ${m.value}`);
@@ -1510,6 +1829,7 @@ function VisualizationPage() {
 		sliceInfoRef,
 		editMode,
 		setZoomLevel,
+		onUndo: handleUndo,
 	});
 	// Live-adjust the frame rate: if a clip is already running, restart it immediately at
 	// the new speed rather than waiting for the next stop/start.
@@ -1571,6 +1891,23 @@ function VisualizationPage() {
 				true,
 				...checkBoxDataRef.current.map((item) => !!checkStateRef.current[item.id]),
 			]);
+			// The segmentation volume must be rebuilt at full-res too, or its voxel
+			// grid stays on the old low-res spacing while the CT (and displayed
+			// slice) is now full-res — brush strokes then compute against mismatched
+			// grids and land on the wrong slice. Annotation stays gated (see
+			// hdReady in the Annotate button) until this completes, since painting
+			// mid-swap would hit the same mismatch this is meant to fix.
+			if (segUrl) {
+				const segOk = await upgradeSegmentationVolume(`${API_BASE}/api/get-segmentations/${pantsCase}.nii.gz`);
+				if (!segOk) {
+					// CT upgraded but mask didn't — don't claim "done" (which the
+					// Annotate button treats as a green light) while the mask is
+					// still misaligned. Report failed so the button stays disabled
+					// and hdReady falls back to isHd if/when the case is reloaded.
+					setEnhance({ state: "failed", pct: null });
+					return;
+				}
+			}
 			setEnhance({ state: "done", pct: 100 });
 			sessionRef.current?.log("session", "Enhanced to full resolution");
 		} catch {
@@ -2142,7 +2479,16 @@ function VisualizationPage() {
 		// flow doesn't reflow the other three — their viewports stay valid, so switching back
 		// to MPR is instant (no resize/re-fit of the 2D views, no animation, correct sizes).
 		if (viewMode === "3d") {
-			return panel === "3d" ? { position: "absolute", inset: 0, zIndex: 20 } : {};
+			if (panel === "3d") return { position: "absolute", inset: 0, zIndex: 20 };
+			// Keep the pane mounted at its normal grid size (no display:none — that's
+			// what preserves the "instant, no resize" swap back to MPR described above),
+			// but strip it from paint and hit-testing entirely. Previously this branch
+			// left these panes fully visible/interactive and relied on the 3D pane's
+			// z-index to visually cover them — but the slice scrollbar/counter overlays
+			// (rendered by renderPaneOverlays, see below) carry their own z-index for
+			// sitting above the Cornerstone canvas, which could equal or exceed the 3D
+			// pane's z-index:20 and bleed through on top of it.
+			return { visibility: "hidden", pointerEvents: "none" };
 		}
 		// 2D single view: collapse the grid to one cell and hide the rest.
 		return viewMode === panel ? {} : { display: "none" };
@@ -2169,6 +2515,9 @@ function VisualizationPage() {
 	// and mixing React-rendered children into the same node risks the two fighting over
 	// the same DOM nodes.
 	const renderPaneOverlays = (pane: CinePane) => {
+		// Never show 2D slice-counter/W-L overlays while the 3D pane is fullscreen —
+		// these are the elements that were bleeding through on top of the 3D render.
+		if (viewMode === "3d") return null;
 		const info = sliceInfo[pane];
 		return (
 			<>
@@ -2190,6 +2539,25 @@ function VisualizationPage() {
 				<div className={`vp-window-readout${windowReadoutVisible ? " vp-window-readout--visible" : ""}`}>
 					W {Math.round(windowWidth)} · L {Math.round(windowCenter)}
 				</div>
+				{activeToolbarTool === "boxSegment" && boxSegment.pane === pane && boxSegment.liveBox && (() => {
+					const [start, end] = boxSegment.liveBox;
+					const left = Math.min(start[0], end[0]);
+					const top = Math.min(start[1], end[1]);
+					const width = Math.abs(end[0] - start[0]);
+					const height = Math.abs(end[1] - start[1]);
+					return (
+						<div
+							style={{
+								position: "absolute",
+								left, top, width, height,
+								border: "1.5px dashed #6fd3ff",
+								background: "rgba(111, 211, 255, 0.12)",
+								pointerEvents: "none",
+								zIndex: 40,
+							}}
+						/>
+					);
+				})()}
 			</>
 		);
 	};
@@ -2302,6 +2670,44 @@ function VisualizationPage() {
 		}
 	};
 
+	const handleToggleAnnotationToolbar = () => {
+		const opening = !showAnnotationToolbar;
+		setShowAnnotationToolbar(opening);
+		if (!opening) {
+			// Closing (deselecting the Annotate button): drop whatever class
+			// was targeted — the isolation effect above reacts to
+			// activeCatalogOrganId/activeSegment both going null by putting
+			// every segmentation mask back to visible — and back out of
+			// whatever tool/edit mode was active, so the toolbar and popup
+			// (both driven by the same `open`/`showAnnotationToolbar` prop)
+			// close together instead of the target/tool state lingering
+			// invisibly after the UI has visually gone away.
+			setActiveCatalogOrganId(null);
+			setActiveSegmentState(null);
+			setEditMode(null);
+			setActiveToolbarTool(null);
+		}
+	};
+
+	// Every OTHER main-toolbar icon (crosshair, measure, view, cine, layout,
+	// window preset, adjust, download, HD) needs to close the annotation
+	// toolbar/SegmentsPopup the same way pressing Annotate again does —
+	// previously only the Annotate button itself (and a couple of the
+	// right-side panel togglers like Stats/Metadata/Measurements) ran this
+	// teardown, so clicking e.g. Crosshair or Measure while annotating left
+	// the horizontal toolbar and the class popup visibly open even though
+	// navigation/measurement mode had taken over underneath them. Mirrors
+	// the closing branch of handleToggleAnnotationToolbar exactly, just
+	// gated on "was it open" instead of always toggling.
+	const closeAnnotationToolbarIfOpen = () => {
+		if (!showAnnotationToolbar) return;
+		setShowAnnotationToolbar(false);
+		setActiveCatalogOrganId(null);
+		setActiveSegmentState(null);
+		setEditMode(null);
+		setActiveToolbarTool(null);
+	};
+
 	const handleToggleStats = () => {
 		// The right-side slot is shared by stats / metadata / measurements / mask editing.
 		setShowMetadata(false);
@@ -2327,6 +2733,7 @@ function VisualizationPage() {
 	const handleToggleAISidebar = () => {
 		const opening = !showAISidebar;
 
+		if (opening) track("assistant_open");
 		setShowAISidebar(opening);
 
 		if (opening) {
@@ -2559,21 +2966,6 @@ const aiAvailableOrgans = useMemo(() => {
 				<div
 					className="vp-topbar"
 					ref={topbarRef}
-					onClick={(e) => {
-						// Clicking any OTHER control in the main toolbar while the
-						// annotation ribbon is open closes it — same as clicking the
-						// pencil again. The pencil button is excluded here since its
-						// own onClick already toggles the state; without the
-						// exclusion this bubbling handler would immediately flip it
-						// back off right after turning it on.
-						if (
-							showAnnotationToolbar &&
-							!annotatePencilRef.current?.contains(e.target as Node) &&
-							!undoRedoGroupRef.current?.contains(e.target as Node)
-						) {
-							setShowAnnotationToolbar(false);
-						}
-					}}
 				>
 					{/* Gear (hides the bar) + home, in-flow so there's no dead corner space */}
 					<button
@@ -2595,10 +2987,39 @@ const aiAvailableOrgans = useMemo(() => {
 
 					<span className="vp-tb-divider" />
 
-					{/* Case / session identity */}
+					{/* Case / session identity. For a personal upload with a local record,
+					    show + edit the same friendly name the Upload page shows -- both
+					    read/write recentUploads, so renaming here updates it there too. */}
 					<div className="vp-tb-id">
 						<span className="vp-tb-id__eyebrow">{sessionId ? "Session" : "Case"}</span>
-						<span className="vp-tb-id__val">{caseId}</span>
+						{renamingScan ? (
+							<input
+								autoFocus
+								value={scanRenameDraft}
+								onChange={(e) => setScanRenameDraft(e.target.value)}
+								onBlur={commitScanRename}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") commitScanRename();
+									else if (e.key === "Escape") setRenamingScan(false);
+								}}
+								className="vp-tb-id__val vp-tb-id__rename-input"
+							/>
+						) : (
+							<span className="vp-tb-id__val-row">
+								<span className="vp-tb-id__val">{sessionId && scanLabel ? scanLabel : caseId}</span>
+								{sessionId && scanLabel && (
+									<button
+										type="button"
+										className="vp-tb-id__rename-btn"
+										title="Rename scan"
+										aria-label="Rename scan"
+										onClick={() => { setScanRenameDraft(scanLabel); setRenamingScan(true); }}
+									>
+										<IconPencil size={12} />
+									</button>
+								)}
+							</span>
+						)}
 					</div>
 
 					<span className="vp-tb-divider" />
@@ -2645,7 +3066,7 @@ const aiAvailableOrgans = useMemo(() => {
 												{LAYOUT_PRESETS.map(({ id, label }) => (
 													<button
 														key={id}
-														onClick={() => setLayoutPreset(id)}
+														onClick={() => { track("viewer_change_layout"); setLayoutPreset(id); }}
 														className={`vp-seg__btn ${layoutPreset === id ? "vp-seg__btn--active" : ""}`}
 													>{label}</button>
 												))}
@@ -2808,7 +3229,7 @@ const aiAvailableOrgans = useMemo(() => {
 										    dropdowns (same portal-flyout pattern as Measure/Cine originally used)
 										    so the bar reads as ~9 clusters instead of ~20 individual icons. */}
 										<button
-												className={`vp-tool ${crosshairToolActive && !activeMeasureTool && !editMode ? "vp-tool--active" : ""}`}
+												className={`vp-tool ${crosshairToolActive && !activeMeasureTool && !editMode && activeToolbarTool !== "pointSegment" && activeToolbarTool !== "boxSegment" ? "vp-tool--active" : ""}`}
 												onClick={() => {
 													setEditMode(null);
 													setActiveMeasureTool(null);
@@ -2816,7 +3237,7 @@ const aiAvailableOrgans = useMemo(() => {
 												}}
 												aria-label="Crosshair mode"
 											>
-												<IconPointer size={20} color={crosshairToolActive && !activeMeasureTool && !editMode ? "#08090b" : "white"} />
+												<IconPointer size={20} color={crosshairToolActive && !activeMeasureTool && !editMode && activeToolbarTool !== "pointSegment" && activeToolbarTool !== "boxSegment" ? "#08090b" : "white"} />
 												<span className="vp-tool__tip">Crosshair</span>
 											</button>
 
@@ -3015,7 +3436,7 @@ const aiAvailableOrgans = useMemo(() => {
 											<div ref={undoRedoGroupRef} style={{ display: "contents" }}>
 												<button
 													className="vp-tool"
-													onClick={() => undoMaskEdit()}
+													onClick={handleUndo}
 													aria-label="Undo"
 												>
 													<IconArrowBackUp size={20} color="white" />
@@ -3031,18 +3452,32 @@ const aiAvailableOrgans = useMemo(() => {
 												</button>
 											</div>
 											
-											{!isLocal && (
-												<button
-													ref={annotatePencilRef}
-													className={`vp-tool ${showAnnotationToolbar ? "vp-tool--active" : ""}`}
-													onClick={() => setShowAnnotationToolbar((v) => !v)}
-													aria-label="Annotate"
-													aria-pressed={showAnnotationToolbar}
-												>
-													<IconPencil size={20} color={showAnnotationToolbar ? "#08090b" : "white"} />
-													<span className="vp-tool__tip">Annotate</span>
-												</button>
-											)}
+											{!isLocal && (() => {
+												// Annotating on the low-res stream would edit a mask that
+												// doesn't line up with the eventual full-res volume, so the
+												// button stays disabled until the HD upgrade has actually
+												// finished (native HD load, or the progressive stream done).
+												const hdReady = isHd || enhance.state === "done";
+												return (
+													<button
+														ref={annotatePencilRef}
+														className={`vp-tool ${showAnnotationToolbar ? "vp-tool--active" : ""} ${!hdReady ? "vp-tool--disabled" : ""}`}
+														onClick={() => {
+															if (!hdReady) return;
+															handleToggleAnnotationToolbar();
+														}}
+														disabled={!hdReady}
+														aria-disabled={!hdReady}
+														aria-label="Annotate"
+														aria-pressed={showAnnotationToolbar}
+													>
+														<IconPencil size={20} color={showAnnotationToolbar ? "#08090b" : "white"} />
+														<span className="vp-tool__tip">
+															{hdReady ? "Annotate" : "Annotate — waiting for HD resolution to finish loading"}
+														</span>
+													</button>
+												);
+											})()}
 
 											{/* Capture ▾ — snapshot, voice-narrated reading session, share link. */}
 											<div className="vp-toolgroup" ref={captureFlyout.groupRef}>
@@ -3213,7 +3648,7 @@ const aiAvailableOrgans = useMemo(() => {
 											{!isLocal && (
 												<button
 													className="vp-tool"
-													onClick={handleDownloadClick}
+													onClick={() => { closeAnnotationToolbarIfOpen(); handleDownloadClick(); }}
 													aria-label="Download segmentations"
 												>
 													<IconDownload size={20} color="white" />
@@ -3221,14 +3656,18 @@ const aiAvailableOrgans = useMemo(() => {
 												</button>
 											)}
 											{!isLocal && (
-												<button
-													className="vp-tool"
-													onClick={() => setShowReportScreen(true)}
-													aria-label="Open report"
-												>
-													<IconReport size={20} color="white" />
-													<span className="vp-tool__tip">Report</span>
-												</button>
+													<button
+															className="vp-tool"
+															onClick={() => {
+																	track("report_open");
+																	setViewMode("3d");
+																	setShowReportScreen(true);
+															}}
+															aria-label="Open report"
+													>
+															<IconReport size={20} color="white" />
+															<span className="vp-tool__tip">Report</span>
+													</button>
 											)}
 
 											{/* HD and AI stay inline: HD is a live status indicator (streaming %),
@@ -3237,6 +3676,7 @@ const aiAvailableOrgans = useMemo(() => {
 												<button
 													className={`vp-tool ${isHd || enhance.state === "done" ? "vp-tool--active" : ""} ${enhance.state === "streaming" ? "vp-tool--busy" : ""}`}
 													onClick={() => {
+														closeAnnotationToolbarIfOpen();
 														// Full-res streams in automatically and swaps in place; the button
 														// is the status + manual trigger, with reload as the failure path.
 														if (isHd) toggleHd();
@@ -3368,12 +3808,12 @@ const aiAvailableOrgans = useMemo(() => {
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("axial"), ...paneGridStyle("axial") }}
-						onMouseUp={smartFill.handleMouseUp}>
+						onMouseUp={(e) => { smartFill.handleMouseUp(); boxSegment.handleMouseUp("axial")(e); }}>
 						<div
 							className={`axial ${loading ? "" : "vp-pane vp-pane--axial"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 							data-label="Axial"
 							ref={axial_ref}
-							onClick={(e) => { handleMouseClick(e); }}
+							onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("axial")(e); }}
 							onDoubleClick={activeDrawTool.handleDoubleClick("axial")}
 							onMouseDown={(e) => {
 								focusedPane.handleMouseDown("axial")();
@@ -3381,12 +3821,14 @@ const aiAvailableOrgans = useMemo(() => {
 								morphPicker.handlePaneClick("axial")(e);
 								activeDrawTool.handleClick("axial")(e);
 								levelTracing.handleClick("axial")(e);
+								boxSegment.handleMouseDown("axial")(e);
 							}}
 							onMouseMove={(e) => {
 								handlePaneHover("axial")(e);
 								smartFill.handleMouseMove("axial")(e);
 								activeDrawTool.handleMouseMove("axial")(e);
 								levelTracing.handleMouseMove("axial")(e);
+								boxSegment.handleMouseMove("axial")(e);
 							}}
 							onMouseLeave={handlePaneHoverLeave("axial")}
 							onWheel={focusedPane.handleWheel("axial")}
@@ -3418,6 +3860,9 @@ const aiAvailableOrgans = useMemo(() => {
 							livePreviewPath={activeDrawTool.livePreviewPath}
 						/>
 						)}
+						{editMode === "lasso" && activeDrawTool.pane === "axial" && (
+							<CloseLoopHint nearClose={activeDrawTool.nearClose} anchor={activeDrawTool.cornersCanvas[0]} />
+						)}
 						{activeToolbarTool === "levelTracing" && levelTracing.previewPane === "axial" && levelTracing.previewPath && (
 						<svg
 							className="vp-leveltrace-overlay"
@@ -3426,7 +3871,7 @@ const aiAvailableOrgans = useMemo(() => {
 							<polygon
 								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
 								fill="rgba(0, 45, 114, 0.22)"
-								stroke="#002D72"
+								stroke="#002d72"
 								strokeWidth={2}
 							/>
 						</svg>
@@ -3446,12 +3891,12 @@ const aiAvailableOrgans = useMemo(() => {
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("sagittal"), ...paneGridStyle("sagittal") }}
-						onMouseUp={smartFill.handleMouseUp}>
+						onMouseUp={(e) => { smartFill.handleMouseUp(); boxSegment.handleMouseUp("sagittal")(e); }}>
 					<div
 						className={`sagittal ${loading ? "" : "vp-pane vp-pane--sagittal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Sagittal"
 						ref={sagittal_ref}
-						onClick={(e) => { handleMouseClick(e); }}
+						onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("sagittal")(e); }}
 						onDoubleClick={activeDrawTool.handleDoubleClick("sagittal")}
 						onMouseDown={(e) => {
 							focusedPane.handleMouseDown("sagittal")();
@@ -3459,12 +3904,14 @@ const aiAvailableOrgans = useMemo(() => {
 							morphPicker.handlePaneClick("sagittal")(e);
 							activeDrawTool.handleClick("sagittal")(e);
 							levelTracing.handleClick("sagittal")(e);
+							boxSegment.handleMouseDown("sagittal")(e);
 						}}
 						onMouseMove={(e) => {
 							handlePaneHover("sagittal")(e);
 							smartFill.handleMouseMove("sagittal")(e);
 							activeDrawTool.handleMouseMove("sagittal")(e);
 							levelTracing.handleMouseMove("sagittal")(e);
+							boxSegment.handleMouseMove("sagittal")(e);
 						}}
 						onMouseLeave={handlePaneHoverLeave("sagittal")}
 						onWheel={focusedPane.handleWheel("sagittal")}
@@ -3496,6 +3943,9 @@ const aiAvailableOrgans = useMemo(() => {
 								livePreviewPath={activeDrawTool.livePreviewPath}
 							/>
 						)}
+						{editMode === "lasso" && activeDrawTool.pane === "sagittal" && (
+							<CloseLoopHint nearClose={activeDrawTool.nearClose} anchor={activeDrawTool.cornersCanvas[0]} />
+						)}
 						{activeToolbarTool === "levelTracing" && levelTracing.previewPane === "sagittal" && levelTracing.previewPath && (
 						<svg
 							className="vp-leveltrace-overlay"
@@ -3504,7 +3954,7 @@ const aiAvailableOrgans = useMemo(() => {
 							<polygon
 								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
 								fill="rgba(0, 45, 114, 0.22)"
-								stroke="#002D72"
+								stroke="#002d72"
 								strokeWidth={2}
 							/>
 						</svg>
@@ -3525,12 +3975,12 @@ const aiAvailableOrgans = useMemo(() => {
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("coronal"), ...paneGridStyle("coronal") }}
-						onMouseUp={smartFill.handleMouseUp}>
+						onMouseUp={(e) => { smartFill.handleMouseUp(); boxSegment.handleMouseUp("coronal")(e); }}>
 					<div
 						className={`coronal ${loading ? "" : "vp-pane vp-pane--coronal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Coronal"
 						ref={coronal_ref}
-						onClick={(e) => { handleMouseClick(e); }}
+						onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("coronal")(e); }}
 						onDoubleClick={activeDrawTool.handleDoubleClick("coronal")}
 						onMouseDown={(e) => {
 							focusedPane.handleMouseDown("coronal")();
@@ -3538,6 +3988,7 @@ const aiAvailableOrgans = useMemo(() => {
 							morphPicker.handlePaneClick("coronal")(e);
 							activeDrawTool.handleClick("coronal")(e);
 							levelTracing.handleClick("coronal")(e);
+							boxSegment.handleMouseDown("coronal")(e);
 
 
 						}}
@@ -3546,6 +3997,7 @@ const aiAvailableOrgans = useMemo(() => {
 							smartFill.handleMouseMove("coronal")(e);
 							activeDrawTool.handleMouseMove("coronal")(e);
 							levelTracing.handleMouseMove("coronal")(e);
+							boxSegment.handleMouseMove("coronal")(e);
 						}}
 						onMouseLeave={handlePaneHoverLeave("coronal")}
 						onWheel={focusedPane.handleWheel("coronal")}
@@ -3577,6 +4029,9 @@ const aiAvailableOrgans = useMemo(() => {
 								livePreviewPath={activeDrawTool.livePreviewPath}
 							/>
 						)}
+						{editMode === "lasso" && activeDrawTool.pane === "coronal" && (
+							<CloseLoopHint nearClose={activeDrawTool.nearClose} anchor={activeDrawTool.cornersCanvas[0]} />
+						)}
 
 						{activeToolbarTool === "levelTracing" && levelTracing.previewPane === "coronal" && levelTracing.previewPath && (
 						<svg
@@ -3586,7 +4041,7 @@ const aiAvailableOrgans = useMemo(() => {
 							<polygon
 								points={levelTracing.previewPath.map((p) => `${p[0]},${p[1]}`).join(" ")}
 								fill="rgba(0, 45, 114, 0.22)"
-								stroke="#002D72"
+								stroke="#002d72"
 								strokeWidth={2}
 							/>
 						</svg>
@@ -3918,7 +4373,7 @@ const aiAvailableOrgans = useMemo(() => {
 				onMaskingAreaChange={setMaskingArea}
 				hasAnySegments={hasAnySegments}
 				scopeLocked={false}
-				isRendering={isEditRendering}
+				isRendering={isEditRendering || promptToolBusy}
 				isDeletingSegment={isDeletingSegment}
 				targetKey={activeCatalogOrganId ?? activeSegment}
 				showOnlyTargetMask={showOnlyTargetMask}
@@ -3927,14 +4382,45 @@ const aiAvailableOrgans = useMemo(() => {
 				popupDragRef={annotationPopupDragRef}
 				popupMinRef={annotationPopupMinRef}
 				sliceJumpRef={sliceJumpWrapRef}
+				anchorRef={annotatePencilRef}
 			/>
+			{/* Point/box-segment SUCCESS/ERROR overlay only — the "applying"
+			    state is now shown via the toolbar's own pulsing dot (isRendering
+			    below), same spot as Copy-Across-Slices/Grow-From-Seeds/etc, so
+			    it doesn't need its own separate indicator here too. This one is
+			    just the result, and reuses the exact same centered
+			    GuidedStepModal (blurred backdrop + "Got it") that Copy across
+			    slices/Fill between slices use for their own success step,
+			    rather than a small bottom-of-screen pill — consistent with
+			    every other guided-flow tool's confirmation. Rendered once
+			    globally (not per-pane, since a point-prompt submit doesn't
+			    stay anchored to one pane the way a box-drag does). */}
+			{(pointSegment.status === "success" || pointSegment.status === "error" ||
+			  boxSegment.status === "success" || boxSegment.status === "error") && (() => {
+				const active =
+					pointSegment.status === "success" || pointSegment.status === "error"
+						? pointSegment
+						: boxSegment;
+				return (
+					<GuidedStepModal
+						title={active.status === "success" ? "Success" : "No change"}
+						instruction={active.statusMessage ?? ""}
+						primaryLabel="Got it"
+						onPrimary={active.dismissStatus}
+					/>
+				);
+			})()}
 			<SegmentsPopup
 				open={showAnnotationToolbar}
 				segments={customOrgans}
 				colors={segmentColorsHex}
 				visibility={segmentVisibility}
 				activeSegmentId={activeSegment}
-				onSelect={(id) => { setActiveSegment(id); setActiveCatalogOrganId(null); }}
+				onSelect={(id) => {
+					setActiveSegment(id);
+					setActiveCatalogOrganId(null);
+					if (id != null) jumpCrosshairToSegmentCentroid(id);
+				}}
 				onRename={handleRenameSegment}
 				onColorChange={handleSegmentColorChange}
 				onToggleVisibility={handleToggleSegmentVisibility}

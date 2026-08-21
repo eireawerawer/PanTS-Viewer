@@ -29,6 +29,11 @@
 
 .segpop.is-open {
     transform: translateX(0);
+    /* Faint blue-tinted left edge — same accent used by AnnotationToolbar's
+       ribbon border when open — so the two read as one coordinated
+       "annotation mode is on" surface, distinct from the plain-black main
+       toolbar and other panels. */
+    border-left-color: rgba(104, 172, 229, 0.3);
 }
 
 .segpop.is-closed {
@@ -146,6 +151,12 @@
 
 .segpop__row.is-active {
     background: rgba(104, 172, 229, 0.14);
+}
+
+.segpop__row.is-editing-target {
+    background: rgba(104, 172, 229, 0.1);
+    outline: 1px solid rgba(104, 172, 229, 0.35);
+    outline-offset: -1px;
 }
 
 .segpop__vis {
@@ -267,7 +278,7 @@
 }
 
 .segpop__color-popover-swatch.is-active {
-    outline: 2px solid #68ACE5;
+    outline: 2px solid #7cb7da;
     outline-offset: 1px;
 }
 
@@ -292,6 +303,53 @@
     appearance: none;
 }
 
+/* Explicit commit footer for the color popover — live preview + hex value
+   + a clear "Done" close button, so picking a color visibly registers
+   before the popover disappears instead of a swatch click silently
+   closing it with no confirmation of what was chosen. Doesn't itself save
+   the class (that's still the row's own Save/ApplyButton); this is purely
+   about the popover's own selection state being unambiguous. */
+.segpop__color-popover-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 2px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.segpop__color-popover-preview {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    flex-shrink: 0;
+}
+
+.segpop__color-popover-hex {
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.02em;
+    color: rgba(255, 255, 255, 0.7);
+    flex: 1;
+}
+
+.segpop__color-popover-done {
+    appearance: none;
+    border: none;
+    border-radius: 6px;
+    padding: 5px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    background: #7cb7da;
+    color: #16181d;
+    cursor: pointer;
+}
+
+.segpop__color-popover-done:hover {
+    background: #7cb7da;
+}
+
 /* Static color chip shown in the normal (non-editing) row — color is only
    changed together with the name via the pen-icon editor, so this isn't an
    <input type="color"> and doesn't open a picker on click. */
@@ -305,7 +363,9 @@
 
 /* Shared active/targeting indicator — icon only, used identically in the
    Existing-organ and Custom tabs so both read the same way and cost the
-   row as little width as possible, leaving more room for the name. */
+   row as little width as possible, leaving more room for the name. Now a
+   real button (see TargetBadge in SegmentsPopup.tsx): clicking it untargets
+   the class directly, so the icon itself is the "remove target" control. */
 .segpop__target-badge {
     display: flex;
     align-items: center;
@@ -314,8 +374,21 @@
     width: 18px;
     height: 18px;
     border-radius: 50%;
-    color: #68ACE5;
+    color: #7cb7da;
     background: rgba(104, 172, 229, 0.16);
+}
+
+.segpop__target-badge--btn {
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    transition: background 0.12s ease, color 0.12s ease, transform 0.12s ease;
+}
+
+.segpop__target-badge--btn:hover {
+    background: rgb(17, 0, 75);
+    color: #7cb7da;
+    transform: scale(1.08);
 }
 
 .segpop__row.is-deleting {
@@ -352,58 +425,64 @@
     flex-shrink: 0;
 }
 
-.segpop__edit-btn:hover {
-    color: #68ACE5;
+.segpop__edit-btn:hover,
+.segpop__edit-btn.is-active {
+    color: #7cb7da;
 }
 
-/* .segpop__collapse (shared by both the editing row and the add-form below)
-   is the Collapse component's own wrapper — its `max-height` is driven
-   directly from JS (see the Collapse component in SegmentsPopup.tsx),
-   measured off the content's real scrollHeight rather than guessed via a
-   CSS grid-track trick. That's what fixes the old "stuck halfway then
-   disappears" bug: the previous grid-template-rows(0fr/1fr) approach
-   animated a grid track's size independently of the content's actual
-   height, so an error line appearing/disappearing (or any other height
-   change) could desync the two, and the close was finalized by a JS
-   setTimeout guessing the transition's duration rather than the
-   transition's own completion — a slow frame could unmount the row well
-   before the animation had actually finished, reading as a stuck-then-gone
-   snap. Only `max-height` needs a transition here; opacity/transform ride
-   along on the same one shared curve so the fade and the collapse read as
-   one continuous motion instead of two racing animations. */
-.segpop__collapse {
-    overflow: hidden;
+/* Floating add/edit form (see FormFlyout in SegmentsPopup.tsx). Portaled to
+   <body> and positioned via inline `fixed` coords computed off the trigger
+   button's own rect — it never participates in the row list's flex flow, so
+   opening it never shifts any existing row or icon. Open/close is driven by
+   this component's own JS timer rather than waiting on a transitionend, so
+   (unlike the old inline collapse) it can't get stuck: closing always
+   finishes and calls back, every time. */
+.segpop__form-flyout {
+    position: relative;
+    z-index: 2000;
+    width: 260px;
+    max-width: calc(100vw - 16px);
+    display: flex;
+    flex-direction: column;
+    padding: 10px;
+    border-radius: 10px;
+    background: #16181d;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+    transform-origin: top left;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.segpop__form-flyout.is-open {
     opacity: 1;
-    transform: none;
-    transform-origin: top center;
-    transition: max-height 0.28s cubic-bezier(0.4, 0, 0.2, 1),
-        opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1),
-        transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
-        margin 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    transform: scale(1) translateY(0);
 }
 
-.segpop__collapse.is-closing {
+.segpop__form-flyout.is-closing {
     opacity: 0;
-    /* Subtler than a bouncier scale — a barely-there shrink reads as
-       "settling away" rather than a visible pop, which suits a form
-       dismiss better than the treatment used for e.g. a toast or modal. */
-    transform: scale(0.98);
-    margin: 0;
+    transform: scale(0.96) translateY(-4px);
     pointer-events: none;
 }
 
-.segpop__collapse-inner {
-    min-height: 0;
+/* Little pointer connecting the flyout back to whichever button opened it
+   (the "Add class" button, or a row's pencil icon) — left offset is set
+   inline, computed from that trigger's own center. */
+.segpop__form-flyout-arrow {
+    position: absolute;
+    top: -6px;
+    width: 11px;
+    height: 11px;
+    background: #16181d;
+    border-left: 1px solid rgba(255, 255, 255, 0.1);
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    transform: translateX(-50%) rotate(45deg);
 }
 
-.segpop__row--editing-inner {
+.segpop__form-flyout-inner {
     display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-    padding: 8px;
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.05);
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
     position: relative;
 }
 
@@ -417,9 +496,9 @@
 }
 
 .segpop__edit-confirm {
-    background: #002D72;
+    background: #002d72;
     border: none;
-    color: #08090b;
+    color: #ffffff;
     border-radius: 6px;
     height: 22px;
     padding: 0 8px;
@@ -483,7 +562,7 @@
 }
 
 .segpop__delete:hover:not(:disabled) {
-    color: #68ACE5;
+    color: #7cb7da;
 }
 
 .segpop__err {
@@ -515,28 +594,14 @@
     margin-top: 4px;
 }
 
-.segpop__new:hover {
+.segpop__new:hover,
+.segpop__new.is-active {
     color: #fff;
     border-color: rgba(104, 172, 229, 0.45);
 }
 
-.segpop__add-form {
-    margin-top: 4px;
-    animation: segpop-row-in 0.2s ease both;
-}
-
-.segpop__add-form.is-closing {
-    margin-top: 0;
-}
-
-.segpop__add-form-inner {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 8px;
-    padding: 8px;
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.04);
+.segpop__new.is-active {
+    background: rgba(104, 172, 229, 0.1);
 }
 
 /* Now rendered via the shared ApplyButton component (see SegmentsPopup.tsx)
@@ -635,7 +700,7 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: #68ACE5;
+    background: #7cb7da;
 }
 
 .segpop__tab.is-active .segpop__tab-dot {

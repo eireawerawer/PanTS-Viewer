@@ -272,7 +272,11 @@
 }
 
 .vp-seg__btn {
-  flex: 1 1 auto;
+  /* Equal width within a row regardless of label length ("MPR" vs "Axial
+     Large") — flex-basis 0 ignores each button's own content size and
+     divides the row evenly, instead of every button sizing to its own text. */
+  flex: 1 1 0;
+  min-width: 0;
   padding: 7px 10px;
   border-radius: 8px;
   font-family: var(--vp-font);
@@ -441,6 +445,22 @@
   /* Above .atb-shell's z-index (50) so this bar's downward-pointing tool
      tooltips render on top of the annotation ribbon when it's open. */
   z-index: 55;
+  transition: background 0.25s ease, border-color 0.25s ease;
+}
+
+/* While the annotation ribbon is open, the main toolbar steps back —
+   lower background contrast and dimmer inactive icons — so attention
+   reads as "focused on the annotation toolbar now open below" instead of
+   two equally-loud bars competing for it. The Annotate button itself
+   (and anything else already flagged active) stays at full strength so
+   it doesn't look broken or disabled. */
+.VisualizationPage.annotation-open .vp-topbar {
+  background: rgba(12, 13, 16, 0.6);
+  border-bottom-color: rgba(255, 255, 255, 0.05);
+}
+
+.VisualizationPage.annotation-open .vp-topbar .vp-tool:not(.vp-tool--active) {
+  opacity: 0.5;
 }
 
 /* Floating gear shown only when the toolbar is hidden. */
@@ -573,6 +593,39 @@
   color: var(--vp-text);
 }
 
+.vp-tb-id__val-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.vp-tb-id__rename-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 2px;
+  margin: 0;
+  line-height: 0;
+  color: var(--vp-text-faint);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.vp-tb-id__rename-btn:hover {
+  color: var(--vp-text);
+}
+
+.vp-tb-id__rename-input {
+  background: transparent;
+  border: 1px solid var(--vp-border);
+  border-radius: 4px;
+  padding: 1px 4px;
+  max-width: 220px;
+  outline: none;
+}
+
 .vp-tb-divider {
   width: 1px;
   align-self: stretch;
@@ -701,7 +754,7 @@
   border: 1px solid var(--vp-border);
   color: var(--vp-text);
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s, border-color 0.15s, opacity 0.25s ease;
 }
 
 .vp-tool:hover {
@@ -713,6 +766,18 @@
   background: #ffffff;
   border-color: #ffffff;
   color: #08090b;
+}
+
+.vp-tool--disabled,
+.vp-tool:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.vp-tool--disabled:hover,
+.vp-tool:disabled:hover {
+  background: var(--vp-panel);
+  border-color: var(--vp-border);
 }
 
 .vp-tool__tip {
@@ -1409,7 +1474,8 @@
 }
 
 .vp-stats__summary strong {
-  color: #ffb454;
+  color: #465bfc
+;
 }
 
 .vp-stats__msg {
@@ -1476,7 +1542,8 @@
 
 /* Muted by default, highlighted when in the extreme tails (<p5 / >p95). */
 .vp-stats__pct--flag {
-  color: #ffb454 !important;
+  color: #465bfc
+ !important;
   font-weight: 600;
 }
 
@@ -1511,7 +1578,7 @@
 }
 
 .vp-spark__marker--flag {
-  background: #ffb454;
+  background: #465bfc;
 }
 
 /* Explicit index-based stripe (not :nth-child) since expanded detail rows are interleaved
@@ -1562,7 +1629,8 @@
 .vp-stats__truncated-flag {
   margin-left: 5px;
   font-size: 10px;
-  color: #ffb454;
+  color: #465bfc
+;
   cursor: help;
 }
 
@@ -1764,3 +1832,7 @@
   z-index: 35;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
 }
+
+/* Point/box-segment SUCCESS/ERROR now reuses the shared GuidedStepModal
+   (SliceAnchorPickerUI.tsx) instead of its own bottom pill — no CSS of
+   its own needed here anymore. */

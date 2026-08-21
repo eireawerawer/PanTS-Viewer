@@ -1,0 +1,25 @@
+import styles from "./SiteFooter.module.css";
+
+/** Slim site-wide footer: company line + commercial-partnership pointer to the main site. */
+function SiteFooter() {
+  return (
+    <footer className={styles.footer}>
+      <span className={styles.tagline}>
+        BodyMaps — the intelligence layer for medical imaging AI.
+      </span>
+      <span className={styles.partner}>
+        For commercial use, please visit{" "}
+        <a
+          className={styles.link}
+          href="https://thebodymaps.com/contact/"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          thebodymaps.com
+        </a>
+      </span>
+    </footer>
+  );
+}
+
+export default SiteFooter;

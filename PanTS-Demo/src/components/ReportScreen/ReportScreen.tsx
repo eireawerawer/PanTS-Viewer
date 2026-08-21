@@ -34,7 +34,7 @@ interface ReportData {
 type Lang = 'patient' | 'clinical';
 type Step = number;
 
-const cache: { [k: string]: ReportData } = {};
+export const cache: { [key: string]: ReportData } = {};
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
@@ -80,10 +80,15 @@ function getDetail(organ: string, comments: string): string | null {
 function organRoot(organ: string): string {
   if (organ.startsWith('pancreas')) return 'pancreas';
   if (organ.startsWith('kidney')) return 'kidney';
+  // BUG FIX: this used to end with .split(' ')[0], which truncated every
+  // multi-word organ down to its first word — "adrenal_gland_right" became
+  // just "adrenal", "common_bile_duct" became just "common". That broke
+  // section-heading lookup (the report heading wouldn't match a truncated
+  // root) and produced mangled patient sentences ("...in your adrenal.").
+  // Only the trailing location/anatomy-suffix word should ever be stripped.
   return organ
     .replace(/_(gland|body|tail|head|left|right)$/, '')
     .replace(/_/g, ' ')
-    .split(' ')[0]
     .toLowerCase();
 }
 
@@ -96,12 +101,18 @@ function getReportSection(organ: string, comments: string): string | null {
     return cleaned === root || cleaned === `${root}s` || cleaned.startsWith(`${root}:`);
   });
   if (start === -1) return getDetail(organ, comments);
-
   const collected: string[] = [];
+  let lesionsHeadingSeen = false;
   for (let i = start; i < lines.length; i++) {
     const line = lines[i];
     const trimmed = line.trim();
-    if (i > start && /^[A-Za-z][A-Za-z\s_/-]*:\s*$/.test(trimmed)) break;
+    const cleanedHeading = trimmed.replace(/:$/, '').toLowerCase();
+    if (i > start && cleanedHeading === `${root} lesions`) {
+      lesionsHeadingSeen = true;
+      continue;
+    }
+    if (i > start && !lesionsHeadingSeen && /^[A-Za-z][A-Za-z\s_/-]*:\s*$/.test(trimmed)) break;
+    if (i > start && lesionsHeadingSeen && /^[A-Za-z][A-Za-z\s_/-]*:\s*$/.test(trimmed) && !cleanedHeading.startsWith(root)) break;
     if (i > start && /^IMPRESSION:\s*$/i.test(trimmed)) break;
     if (trimmed) collected.push(trimmed);
   }
@@ -111,24 +122,106 @@ function getReportSection(organ: string, comments: string): string | null {
 type ReportMeasurements = {
   section: string | null;
   volumeCc: number | null;
+  lesionVolumeCc: number | null;
+  organVolumeCc: number | null;
   meanHu: number | null;
+  organMeanHu: number | null;
   huSd: number | null;
   sizeCm: string | null;
+  lesionCount: number;
 };
 
 function getReportMeasurements(organ: string, comments: string): ReportMeasurements {
   const section = getReportSection(organ, comments);
-  const volumeMatch = section?.match(/volume:\s*([\d.]+)\s*cc/i);
-  const huMatch = section?.match(/Mean HU value:\s*([\d.]+)(?:\s*\+\/\-\s*([\d.]+))?/i);
-  const sizeMatch = section?.match(/Size:\s*([^().]+?)\s*cm/i);
+  // Prefer the lesion's own numbers over the organ's baseline stats when a
+  // lesion block is present in this section, since those matter more clinically.
+  const lesionVolumeMatch = section?.match(/lesion[\s\S]*?volume:\s*([\d.]+)\s*cc/i);
+  const lesionHuMatch = section?.match(/hu\s*value\s*is\s*(-?[\d.]+)(?:\s*\+\/\-\s*([\d.]+))?/i);
+  const volumeMatch = lesionVolumeMatch ?? section?.match(/volume:\s*([\d.]+)\s*cc/i);
+  const huMatch = lesionHuMatch ?? section?.match(/Mean HU value:\s*([\d.]+)(?:\s*\+\/\-\s*([\d.]+))?/i);
+  // BUG FIX: the size capture excluded '.' from its own character class, so it
+  // could never match decimal sizes like "1.0 x 0.5 cm" — only whole numbers.
+  // That silently broke "Report size" for virtually every real lesion.
+  const sizeMatch = section?.match(/Size:\s*([^()]+?)\s*cm/i);
+
+  // Organ-level baseline stats (what the report states for the whole organ,
+  // e.g. "Pancreas: Normal size (volume: 9.0 cc). Mean HU value: 8.4 +/- 29.6.")
+  // — deliberately NOT lesion-preferred, since the metrics card needs these
+  // distinct from the lesion's own (and often much smaller, or relative-to-
+  // organ) numbers. "Mean HU value:" only ever appears for the organ baseline;
+  // the lesion's enhancement line reads "HU value is X", a different phrase,
+  // so this regex can't accidentally pick up the lesion's number.
+  const organVolumeMatch = section?.match(/volume:\s*([\d.]+)\s*cc/i);
+  const organHuMatch = section?.match(/Mean HU value:\s*([\d.]+)/i);
+
+  // Each distinct lesion in a report section carries its own "Size: ... cm" line,
+  // so counting those is a reasonable proxy for lesion count without the backend
+  // needing to add a dedicated field.
+  const sizeMatches = section?.match(/Size:\s*[^()]+?cm/gi) ?? [];
+  const lesionCount = sizeMatches.length || (lesionVolumeMatch ? 1 : 0);
 
   return {
     section,
     volumeCc: volumeMatch ? Number(volumeMatch[1]) : null,
+    lesionVolumeCc: lesionVolumeMatch ? Number(lesionVolumeMatch[1]) : null,
+    organVolumeCc: organVolumeMatch ? Number(organVolumeMatch[1]) : null,
     meanHu: huMatch ? Number(huMatch[1]) : null,
+    organMeanHu: organHuMatch ? Number(organHuMatch[1]) : null,
     huSd: huMatch?.[2] ? Number(huMatch[2]) : null,
     sizeCm: sizeMatch ? sizeMatch[1].trim() : null,
+    lesionCount,
   };
+}
+
+// Suffix on organ keys like "pancreas_tail" / "kidney_left" already encodes the
+// anatomical location the backend split out — reuse it instead of re-parsing
+// the report text for location. Paired organs (left/right) read better as
+// "your left kidney"; sub-regions of a single organ (head/body/tail) read
+// better as "in the tail of your pancreas" — so these are kept distinct
+// rather than forced through one phrasing template.
+function organLocation(organ: string): { type: 'lateral' | 'subregion'; word: string } | null {
+  const suffix = organ.split('_').pop() ?? '';
+  if (suffix === 'left' || suffix === 'right') return { type: 'lateral', word: suffix };
+  if (suffix === 'tail' || suffix === 'head' || suffix === 'body') return { type: 'subregion', word: suffix };
+  return null;
+}
+
+// Rough qualitative size bucket from whichever number we have — used only to
+// pick a plain-language adjective, not for any clinical claim.
+function sizeDescriptor(volumeCc: number | null, sizeCm: string | null): string {
+  let maxDim: number | null = null;
+  if (sizeCm) {
+    const nums = sizeCm.match(/[\d.]+/g)?.map(Number) ?? [];
+    if (nums.length) maxDim = Math.max(...nums);
+  }
+  if (maxDim !== null) {
+    if (maxDim < 1) return 'tiny';
+    if (maxDim < 2) return 'small';
+    if (maxDim < 5) return 'noticeable';
+    return 'sizable';
+  }
+  if (volumeCc !== null) {
+    if (volumeCc < 1) return 'tiny';
+    if (volumeCc < 5) return 'small';
+    if (volumeCc < 20) return 'noticeable';
+    return 'sizable';
+  }
+  return '';
+}
+
+// Returns null (deliberately) when the text doesn't actually describe a
+// lesion/mass — some organs get flagged purely on a numeric HU-range check
+// with no lesion mentioned anywhere in the report text, and it previously
+// defaulted to "spot" regardless, inventing a finding the text never stated.
+function findingNoun(detail: string): string | null {
+  const d = detail.toLowerCase();
+  if (d.includes('cyst')) return 'fluid-filled spot';
+  if (d.includes('nodule')) return 'small bump';
+  if (d.includes('mass') || d.includes('tumor')) return 'growth';
+  if (d.includes('enlarged')) return 'enlarged area';
+  if (d.includes('dilated') || d.includes('widened')) return 'widened area';
+  if (d.includes('lesion')) return 'spot';
+  return null;
 }
 
 function getImpressionText(data: ReportData | null): string {
@@ -138,15 +231,43 @@ function getImpressionText(data: ReportData | null): string {
     .join(' ');
 }
 
-function patientFindingText(organ: string, detail: string | null): string {
-  const name = labelize(organ).toLowerCase();
-  const d = (detail || '').toLowerCase();
+function capFirst(s: string): string {
+  return s.length ? s[0].toUpperCase() + s.slice(1) : s;
+}
 
-  if (d.includes('enlarged')) return `The report says the ${name} appears enlarged.`;
-  if (d.includes('mass') || d.includes('lesion') || d.includes('tumor')) return `The report found a finding near the ${name}.`;
-  if (d.includes('widened') || d.includes('dilated')) return `The report says the ${name} appears widened.`;
-  if (d.includes('normal size')) return `The report mentions the ${name}.`;
-  return `The report found something in the ${name} that should be reviewed.`;
+// Turns the parsed report measurements into a real plain-language sentence
+// instead of generic keyword-matched boilerplate — e.g. "The scan found a
+// small spot (1.0 x 0.5 cm) in the tail of your pancreas." Falls back to an
+// honest, still-specific sentence when the report text doesn't describe an
+// actual lesion (e.g. flagged purely on an HU-range anomaly) — it never
+// invents "a spot" or similar when none is described.
+function patientFindingText(organ: string, measurements: ReportMeasurements): string {
+  const organLabel = labelize(organRoot(organ)).toLowerCase();
+  const loc = organLocation(organ);
+  const subject =
+    loc?.type === 'lateral' ? `your ${loc.word} ${organLabel}`
+    : loc?.type === 'subregion' ? `the ${loc.word} of your ${organLabel}`
+    : `your ${organLabel}`;
+  const detail = measurements.section || '';
+
+  if (!detail) {
+    return `The scan flagged ${subject} for your doctor to review — the report text wasn't specific enough to describe here.`;
+  }
+
+  const noun = findingNoun(detail);
+  if (!noun) {
+    // Flagged, but the text doesn't describe an actual lesion/mass — don't
+    // invent one. Most common cause: flagged on an HU-range check, not a
+    // described finding.
+    return `${capFirst(subject)} was flagged for review, but the report doesn't describe a specific spot or growth — ask your doctor what stood out.`;
+  }
+
+  const sizeWord = sizeDescriptor(measurements.lesionVolumeCc ?? measurements.volumeCc, measurements.sizeCm);
+  const sizePart = measurements.sizeCm ? ` (${measurements.sizeCm} cm)` : '';
+  const article = sizeWord ? `a ${sizeWord} ${noun}` : `a ${noun}`;
+  const countPart = measurements.lesionCount > 1 ? `${measurements.lesionCount} spots` : article;
+
+  return `The scan found ${countPart}${sizePart} in ${subject}.`;
 }
 
 // ─── Small UI pieces ──────────────────────────────────────────────────────────
@@ -260,6 +381,66 @@ function MetricRow({ label, value, sub, tone = 'white' }: { label: string; value
   );
 }
 
+function Badge({ tone, children }: { tone: 'amber' | 'green'; children: React.ReactNode }) {
+  const color = tone === 'amber' ? '#fbbf24' : '#6ee7b7';
+  const bg = tone === 'amber' ? 'rgba(251,191,36,0.14)' : 'rgba(110,231,183,0.12)';
+  const border = tone === 'amber' ? 'rgba(251,191,36,0.32)' : 'rgba(110,231,183,0.28)';
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 11px', borderRadius: 999,
+      background: bg, border: `1px solid ${border}`, color, fontSize: 11, fontWeight: 820, letterSpacing: '0.05em',
+      whiteSpace: 'nowrap',
+    }}>
+      {children}
+    </span>
+  );
+}
+
+function MetricLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, padding: '10px 0', borderBottom: '1px solid rgba(255,255,255,0.075)' }}>
+      <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.52)' }}>{label}</span>
+      <span style={{ fontSize: 15, fontWeight: 720, color: 'rgba(255,255,255,0.92)', textAlign: 'right' }}>{value}</span>
+    </div>
+  );
+}
+
+// Structured doctor-view card: labeled metric rows + a review badge, in place
+// of dumping the raw report-comments string. Deliberately sources HU/volume
+// from the report's organ-baseline numbers (report.organMeanHu/organVolumeCc)
+// rather than curData — curData can be a small anatomical sub-label (e.g.
+// "pancreas_tail") whose own segmented mask is tiny, which previously showed
+// as a misleading "0 HU / 0 cc" even though the organ itself had real values.
+function OrganMetricsCard({
+  curData,
+  report,
+  needsReview,
+}: {
+  curData: OrganData;
+  report: ReportMeasurements;
+  needsReview: boolean;
+}) {
+  const meanHu = report.organMeanHu ?? curData.mean_hu;
+  const organVolume = report.organVolumeCc ?? curData.volume;
+  return (
+    <div style={{ marginTop: 4, marginBottom: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ fontSize: 11, letterSpacing: '0.12em', color: 'rgba(255,255,255,0.42)', fontWeight: 820, textTransform: 'uppercase' }}>
+          Organ Metrics
+        </div>
+        {needsReview && <Badge tone="amber">NEEDS REVIEW</Badge>}
+      </div>
+      <MetricLine label="Mean attenuation (HU)" value={meanHu !== null ? `${Math.round(meanHu * 10) / 10} HU` : 'Not listed'} />
+      <MetricLine label="Organ volume" value={`${organVolume.toFixed(1).replace(/\.0$/, '')} cc`} />
+      <MetricLine
+        label="Lesion volume"
+        value={report.lesionVolumeCc !== null ? `${report.lesionVolumeCc.toFixed(1).replace(/\.0$/, '')} cc` : 'None detected'}
+      />
+      <MetricLine label="Lesion count" value={String(report.lesionCount)} />
+    </div>
+  );
+}
+
 function EvidencePanel({
   step,
   lang,
@@ -281,6 +462,7 @@ function EvidencePanel({
 }) {
   const firstFinding = flagged[0]?.[0] ?? null;
   const firstDetail = firstFinding ? getDetail(firstFinding, data.comments) : null;
+  const firstMeasurements = firstFinding ? getReportMeasurements(firstFinding, data.comments) : null;
   const impression = getImpressionText(data);
   const report = curOrgan ? getReportMeasurements(curOrgan, data.comments) : null;
   const reportVolume = report?.volumeCc ?? null;
@@ -304,7 +486,7 @@ function EvidencePanel({
             </div>
             <p style={{ color: 'rgba(255,255,255,0.70)', fontSize: 16, lineHeight: 1.55, margin: 0 }}>
               {lang === 'patient'
-                ? patientFindingText(firstFinding!, firstDetail)
+                ? patientFindingText(firstFinding!, firstMeasurements!)
                 : (firstDetail || impression || 'See the report finding for details.')}
             </p>
           </>
@@ -326,7 +508,6 @@ function EvidencePanel({
   }
 
   if (step >= 2 && curOrgan && curData) {
-    const detail = getDetail(curOrgan, data.comments);
     return (
       <div style={{ ...glass, width: 350, padding: 24, animation: `${anim} 0.36s cubic-bezier(0.22,1,0.36,1) both` }}>
         <div style={{ fontSize: 12, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'rgba(251,191,36,0.72)', fontWeight: 800, marginBottom: 18 }}>
@@ -335,18 +516,8 @@ function EvidencePanel({
 
         <MetricRow label="Organ" value={labelize(curOrgan)} tone="amber" />
 
-        {reportVolume !== null ? (
-          <MetricRow label="Volume" value={`${reportVolume.toFixed(1).replace(/\.0$/, '')} cc`} tone="amber" sub="From the report text." />
-        ) : (
-          <MetricRow label="Volume" value="Not listed" sub="No report volume was found for this organ." />
-        )}
-
-        {lang === 'clinical' && report?.meanHu !== null && report?.meanHu !== undefined && (
-          <MetricRow
-            label="Mean HU"
-            value={`${Math.round(report.meanHu)}`}
-            sub={report.huSd !== null && report.huSd !== undefined ? `Report value: ${report.meanHu} +/- ${report.huSd}` : 'From the report text.'}
-          />
+        {lang === 'clinical' && report && (
+          <OrganMetricsCard curData={curData} report={report} needsReview={curData.status === 'check'} />
         )}
 
         {lang === 'clinical' && report?.sizeCm && (
@@ -361,19 +532,19 @@ function EvidencePanel({
           />
         )}
 
-        {lang === 'clinical' && (
-          <div style={{ paddingTop: 14 }}>
-            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.42)', marginBottom: 8 }}>Report text</div>
-            <p style={{ color: 'rgba(255,255,255,0.72)', fontSize: 14, lineHeight: 1.55, margin: 0 }}>
-              {report?.section || detail || impression || 'No report detail available.'}
-            </p>
-          </div>
-        )}
+        {/* Full report-text paragraph deliberately omitted here — it's the exact
+            same string already shown in the left story panel (medLocal), so
+            showing it again just duplicated the same paragraph on screen. */}
 
         {lang === 'patient' && (
-          <p style={{ color: 'rgba(255,255,255,0.58)', fontSize: 14, lineHeight: 1.55, margin: '18px 0 0' }}>
-            This panel shows the key measurement from the report. Your doctor can explain what it means for you.
-          </p>
+          <>
+            {reportVolume !== null && (
+              <MetricRow label="Volume" value={`${reportVolume.toFixed(1).replace(/\.0$/, '')} cc`} tone="amber" sub="From the report text." />
+            )}
+            <p style={{ color: 'rgba(255,255,255,0.58)', fontSize: 14, lineHeight: 1.55, margin: '18px 0 0' }}>
+              This panel shows the key measurement from the report. Your doctor can explain what it means for you.
+            </p>
+          </>
         )}
       </div>
     );
@@ -403,6 +574,14 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
   const [modePromptOpen, setModePromptOpen] = useState(false);
   const [plain2, setPlain2] = useState<string[]>([]);
   const [pLoad, setPLoad] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  // De-identified share link, minted on demand (see mintShareLink below) —
+  // this used to be a raw `${API_ORIGIN}/api/report/${id}` string built
+  // straight from the real case id. That exposed the real id in the URL and
+  // skipped the token system the rest of the app now uses for sharing.
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [shareLoading, setShareLoading] = useState(false);
   const startRef = useRef(Date.now());
 
   useEffect(() => {
@@ -418,6 +597,56 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
       })
       .catch(() => setLoading(false));
   }, [id]);
+
+  // Reset any previously-minted link when the case changes, so a stale
+  // token for a different case can never be shown/copied.
+  useEffect(() => {
+    setShareUrl(null);
+  }, [id]);
+
+  // Mints (or re-derives — the backend token is deterministic per case id)
+  // an opaque share token and builds the link to the new de-identified
+  // /share/:token card. Safe to call repeatedly; no-ops if already minted
+  // or in flight.
+  const mintShareLink = useCallback(async () => {
+    if (shareUrl || shareLoading) return;
+    setShareLoading(true);
+    try {
+      const r = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/share/${id}/token`, { method: 'POST' });
+      const j = await r.json();
+      const token = typeof j.url === 'string' ? j.url.split('/').pop() : null;
+      if (token) setShareUrl(`${window.location.origin}/share/${token}`);
+    } catch (e) {
+      console.error('Failed to create share link:', e);
+    } finally {
+      setShareLoading(false);
+    }
+  }, [id, shareUrl, shareLoading]);
+
+  useEffect(() => {
+    if (!shareOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShareOpen(false); };
+    const onClick = () => setShareOpen(false);
+    document.addEventListener('keydown', onKey);
+    // Deferred so the same click that opened the popover doesn't immediately close it.
+    const t = setTimeout(() => document.addEventListener('click', onClick), 0);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('click', onClick);
+      clearTimeout(t);
+    };
+  }, [shareOpen]);
+
+  const handleCopyShareLink = async () => {
+    if (!shareUrl) return;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.error('Copy failed:', e);
+    }
+  };
 
   const fetchPlain = useCallback(async () => {
     if (plain2.length || !data) return;
@@ -440,7 +669,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
     setStep(s);
   }, [step]);
 
-  const all = React.useMemo(() => data ? Object.entries(data.organ_volumes).filter(([_, v]) => v.volume > 5) : [], [data]);
+  const all = React.useMemo(() => data ? Object.entries(data.organ_volumes).filter(([_, v]) => v.volume > 5 || v.status === 'check') : [], [data]);
   const flagged = React.useMemo(() => all.filter(([_, v]) => v.status === 'check'), [all]);
   const normal = React.useMemo(() => all.filter(([_, v]) => v.status !== 'check'), [all]);
   const totalSteps = 2 + flagged.length + 1;
@@ -464,8 +693,9 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
     if (!data) return null;
     const curOrganLocal = step >= 2 && step < 2 + flagged.length ? flagged[step - 2]?.[0] : null;
     const curDataLocal = step >= 2 && step < 2 + flagged.length ? flagged[step - 2]?.[1] : null;
-    const medLocal = curOrganLocal ? getDetail(curOrganLocal, data.comments) : null;
-    const patientLocal = curOrganLocal ? patientFindingText(curOrganLocal, medLocal) : '';
+    const medLocal = curOrganLocal ? getReportSection(curOrganLocal, data.comments) : null;
+    const measurementsLocal = curOrganLocal ? getReportMeasurements(curOrganLocal, data.comments) : null;
+    const patientLocal = curOrganLocal && measurementsLocal ? patientFindingText(curOrganLocal, measurementsLocal) : '';
     const impressionText = getImpressionText(data);
 
     if (step === 0) return (
@@ -638,6 +868,67 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
                   <button className="rs-toggle" onClick={() => { setLang('clinical'); setModePromptOpen(false); }} style={{ padding: '8px 14px', borderRadius: 999, border: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 720, color: lang === 'clinical' ? '#08090b' : 'rgba(255,255,255,0.58)', background: lang === 'clinical' ? 'rgba(255,255,255,0.86)' : 'transparent', transition: 'all 0.2s' }}>Doctor</button>
                 </div>
               )}
+              <div style={{ position: 'relative' }}>
+                <button
+                  onClick={() => { setShareOpen((v) => !v); mintShareLink(); }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    background: shareOpen ? 'rgba(255,255,255,0.10)' : 'transparent',
+                    border: '1px solid rgba(255,255,255,0.16)',
+                    borderRadius: 12,
+                    padding: '9px 13px',
+                    cursor: 'pointer',
+                    fontFamily: 'inherit',
+                    color: 'rgba(255,255,255,0.78)',
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  <span style={{ fontSize: 14, lineHeight: 1 }}>&#128279;</span>
+                  <span style={{ fontSize: 11, letterSpacing: '0.04em' }}>Share report</span>
+                </button>
+
+                {shareOpen && (
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    style={{
+                    position: 'absolute', top: 'calc(100% + 10px)', right: 0, zIndex: 20000,
+                    width: 340, background: '#141518', border: '1px solid rgba(255,255,255,0.14)',
+                    borderRadius: 14, padding: 16, boxShadow: '0 18px 60px rgba(0,0,0,0.5)',
+                  }}>
+                    <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.86)', lineHeight: 1.5, marginBottom: 12 }}>
+                      Share this link with anyone — a family member, your doctor, whoever needs it. It opens a
+                      de-identified, readable summary of this scan.
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <div style={{
+                        flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)',
+                        borderRadius: 10, padding: '8px 10px', fontSize: 12, color: 'rgba(255,255,255,0.65)',
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>
+                        {shareLoading ? 'Generating link…' : (shareUrl || 'Link unavailable')}
+                      </div>
+                      <button
+                        onClick={handleCopyShareLink}
+                        disabled={!shareUrl}
+                        style={{
+                          flexShrink: 0,
+                          background: copied ? 'rgba(52,199,89,0.18)' : 'rgba(255,255,255,0.10)',
+                          border: `1px solid ${copied ? 'rgba(52,199,89,0.4)' : 'rgba(255,255,255,0.16)'}`,
+                          borderRadius: 10, padding: '8px 12px', cursor: shareUrl ? 'pointer' : 'not-allowed',
+                          opacity: shareUrl ? 1 : 0.5,
+                          fontFamily: 'inherit',
+                          fontSize: 12, fontWeight: 700, color: copied ? '#34c759' : 'rgba(255,255,255,0.86)',
+                          transition: 'all 0.2s',
+                        }}
+                      >
+                        {copied ? 'Copied' : 'Copy'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
               <button className="rs-exit" onClick={onClose} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'transparent', border: '1px solid rgba(239,68,68,0.24)', borderRadius: 12, padding: '9px 13px', cursor: 'pointer', fontFamily: 'inherit', color: 'rgba(239,68,68,0.78)', transition: 'all 0.2s' }}>
                 <span style={{ fontSize: 14, lineHeight: 1, fontWeight: 300 }}>✕</span>
                 <span style={{ fontSize: 11, letterSpacing: '0.04em' }}>Exit</span>

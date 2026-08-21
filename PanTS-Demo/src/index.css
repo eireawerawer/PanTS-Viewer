@@ -1,11 +1,12 @@
 @import "tailwindcss";
+@import "./styles/brand.css";
 
 #root {
   width: 100vw;
 }
 
 :root {
-  font-family: "Inter";
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
@@ -16,18 +17,9 @@
 
   /* ── Breakpoints: sm: 640px | md: 768px | lg: 1024px | xl: 1280px ── */
 
-  /* ── Global palette ── */
-  --bg: #0e1a2b;
-  --panel: #12243b;
-  --panel-soft: #132a45;
-  --ink: #e8eff9;
-  --sub: #a9b7cc;
-  --line: #243a57;
-  --brand: #111111;
-  --brand-ink: #fff;
-  --accent: #111111;
-  --good: #16a34a;
-  --bad: #ef4444;
+  /* Color/font tokens live in styles/brand.css (BodyMaps brand pack). */
+
+  /* ── Layout ── */
   --control-h: 44px;
   --header-h: 70px;
 
@@ -49,8 +41,8 @@
   --vp-text-faint: rgba(255, 255, 255, 0.36);
   --vp-hover: rgba(255, 255, 255, 0.1);
   --vp-accent: #6ea8fe;
-  --vp-font: "Space Grotesk", system-ui, sans-serif;
-  --vp-mono: "JetBrains Mono", ui-monospace, monospace;
+  --vp-font: var(--font-sans);
+  --vp-mono: var(--font-mono);
 }
 
 

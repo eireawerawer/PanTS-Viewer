@@ -311,7 +311,7 @@
 
 .seg-effect__number:focus {
     outline: none;
-    border-color: #68ACE5;
+    border-color: #0b17ff;
     background: rgba(104, 172, 229, 0.08);
 }
 
@@ -387,7 +387,7 @@
 
 .seg-effect__icon-btn--primary {
     border-color: rgba(0, 45, 114, 0.4);
-    color: #68ACE5;
+    color: #0b17ff;
 }
 
 .seg-effect__icon-btn--primary:hover:not(:disabled) {

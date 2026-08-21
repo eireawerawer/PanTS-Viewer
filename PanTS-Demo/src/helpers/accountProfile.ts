@@ -1,4 +1,4 @@
-// Plans, what each one allows, and the one remaining client-only profile field.
+// Plans, what each one allows, and the account-type vocabulary.
 //
 // PLAN_LIMITS mirrors flask-server/services/plan_store.py. The server is what
 // actually decides — it returns 402 with a reason, and that reason is what the
@@ -6,9 +6,9 @@
 // out up front instead of letting you click into a rejection. A drift between
 // the two is a cosmetic bug here and a real one there; change them together.
 //
-// The plan itself is NOT stored here. It lives on user_account.plan and arrives
-// through authContext. What's left in localStorage is `accountType`, which is
-// self-reported, optional, and gates nothing.
+// Neither the plan nor the account type is stored here: both are columns on
+// user_account and arrive through authContext. What's left in this file is the
+// vocabulary — the ids, labels and limits the UI renders.
 
 export type AccountType = "patient" | "clinician" | "researcher" | "student";
 export type PlanId = "free" | "pro" | "team" | "enterprise";
@@ -111,7 +111,7 @@ export const PLANS: Plan[] = [
 		group: "individual",
 		blurb: "Try BodyMaps",
 		price: "$0",
-		priceNote: "per month",
+		priceNote: "no donation needed",
 		pointsLead: "Includes:",
 		points: [
 			"3 scans a day",
@@ -127,7 +127,7 @@ export const PLANS: Plan[] = [
 		group: "individual",
 		blurb: "For everyday clinical and research work",
 		price: "$1.99",
-		priceNote: "per month",
+		priceNote: "monthly donation",
 		inherits: "free",
 		points: [
 			"50 scans a day",
@@ -136,7 +136,7 @@ export const PLANS: Plan[] = [
 			"Priority in the queue",
 			"Create reports and annotations",
 		],
-		cta: "Upgrade to Pro",
+		cta: "Donate for Pro",
 	},
 	{
 		id: "team",
@@ -144,7 +144,7 @@ export const PLANS: Plan[] = [
 		group: "team",
 		blurb: "For a practice or lab",
 		price: "$4.99",
-		priceNote: "per month",
+		priceNote: "monthly donation",
 		badge: "2–15 members",
 		inherits: "pro",
 		// No "everything in Pro per member" bullet: the inherits line above the
@@ -153,7 +153,7 @@ export const PLANS: Plan[] = [
 			"Shared case library",
 			"Shared annotations and reports",
 			"Usage pooled across the team",
-			"Central billing",
+			"One donation for the whole team",
 		],
 		cta: "Choose Team",
 	},
@@ -164,7 +164,7 @@ export const PLANS: Plan[] = [
 		blurb: "For a hospital or institution",
 		// "Talk to us" is the button; the price slot needs to say something else.
 		price: "Custom",
-		priceNote: "volume pricing",
+		priceNote: "donation by agreement",
 		badge: "15+ members",
 		inherits: "team",
 		points: [
@@ -205,7 +205,7 @@ export const canCreateReports = (plan: PlanId): boolean => limitsFor(plan).creat
 export const maxConcurrentScans = (plan: PlanId): number =>
 	limitsFor(plan).concurrentScans ?? Infinity;
 
-// ---- account type (self-reported, optional, gates nothing) -----------------
+// ---- account type (self-reported, optional, gates nothing but is reported on) ----
 
 export const ACCOUNT_TYPES: { id: AccountType; label: string }[] = [
 	{ id: "patient", label: "Patient" },
@@ -220,50 +220,4 @@ export const accountTypeLabel = (id: AccountType | null): string =>
 export type AccountProfile = {
 	/** null until the user picks one in settings. Nothing depends on it. */
 	accountType: AccountType | null;
-};
-
-export const DEFAULT_PROFILE: AccountProfile = { accountType: null };
-
-export const PROFILE_KEY_PREFIX = "accountProfile:";
-
-const profileKey = (userId: string) => `${PROFILE_KEY_PREFIX}${userId}`;
-
-export const loadProfile = (userId: string): AccountProfile | null => {
-	try {
-		const raw = localStorage.getItem(profileKey(userId));
-		if (!raw) return null;
-		const parsed = JSON.parse(raw);
-		if (!parsed || typeof parsed !== "object") return null;
-		// Merge over defaults so a profile written by an older build still loads.
-		// Older builds also wrote plan/onboarding keys here; they're ignored now
-		// that the plan is a server column, and dropped on the next write.
-		return { accountType: parsed.accountType ?? null };
-	} catch {
-		return null;
-	}
-};
-
-export const persistProfile = (userId: string, profile: AccountProfile) => {
-	try {
-		localStorage.setItem(profileKey(userId), JSON.stringify(profile));
-	} catch (e) {
-		console.warn("persistProfile failed", e);
-	}
-};
-
-export const updateProfile = (
-	userId: string,
-	patch: Partial<AccountProfile>
-): AccountProfile => {
-	const next = { ...(loadProfile(userId) ?? DEFAULT_PROFILE), ...patch };
-	persistProfile(userId, next);
-	return next;
-};
-
-export const clearProfile = (userId: string) => {
-	try {
-		localStorage.removeItem(profileKey(userId));
-	} catch (e) {
-		console.warn("clearProfile failed", e);
-	}
 };

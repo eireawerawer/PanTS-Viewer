@@ -840,7 +840,10 @@ export function setMaskBrushSize(diameterMm: number) {
 // always on top of ONE of the two, so this behaves as a single button.
 // ---------------------------------------------------------------------------
 export function undoMaskEdit() {
-  if (canUndoSmartFill()) {
+  // Prefer whichever stack was touched more recently, not always the fill
+  // stack — a brush stroke after a box-segment (or vice versa) must undo in
+  // the order it actually happened.
+  if (canUndoSmartFill() && _lastFillEditTime >= _lastBrushEditTime) {
     undoSmartFill();
     return;
   }
@@ -849,7 +852,7 @@ export function undoMaskEdit() {
 }
 
 export function redoMaskEdit() {
-  if (canRedoSmartFill()) {
+  if (canRedoSmartFill() && _lastFillEditTime >= _lastBrushEditTime) {
     redoSmartFill();
     return;
   }
@@ -1408,6 +1411,237 @@ export async function upgradeCtVolume(fullResCtUrl: string): Promise<string | nu
     console.warn("Full-res upgrade failed; keeping the current volume.", e);
     return null;
   }
+}
+
+/**
+ * Rebuild the segmentation (labelmap) volume against a full-res mask, so its
+ * voxel grid actually matches the full-res CT after upgradeCtVolume() swaps
+ * that in. Without this, the labelmap keeps the low-res grid it was created
+ * with at initial load — a brush click computed against the now-full-res
+ * viewport gets worldToIndex'd onto the *old* low-res slice spacing, which
+ * lands one slice off (sometimes the slice before, sometimes after,
+ * depending on where the two grids' boundaries happen to fall). Call this
+ * right after upgradeCtVolume() succeeds, before re-enabling annotation.
+ *
+ * This replaces the labelmap outright with the server's full-res mask — it
+ * does not attempt to carry over voxels painted before the HD swap. (An
+ * earlier version tried a world-position carry-over; it isn't reliable
+ * across differently-shaped vtkImageData volumes and was removed rather than
+ * risk a broken partial state. If preserving pre-HD edits turns out to
+ * matter in practice, that needs its own careful pass, not a quick patch
+ * here.)
+ *
+ * Returns true on success; false leaves the existing (low-res) labelmap in
+ * place — caller should keep annotation disabled in that case.
+ */
+export async function upgradeSegmentationVolume(fullResSegUrl: string): Promise<boolean> {
+  if (!cache.getVolume(segmentationId)) return false;
+  try {
+    const segmentationImageIds = await createNiftiImageIdsAndCacheMetadata({ url: fullResSegUrl });
+    if (!segmentationImageIds.length) return false;
+
+    cache.removeVolumeLoadObject(segmentationId);
+    const newVolume = await volumeLoader.createAndCacheVolume(segmentationId, {
+      imageIds: segmentationImageIds,
+    });
+    await newVolume.load();
+
+    await _rebuildSegmentationRepresentations();
+    return true;
+  } catch (e) {
+    console.warn("Full-res segmentation upgrade failed; keeping the low-res labelmap.", e);
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Click-to-segment / box-to-segment (interactive prompt tools)
+//
+// Backend contract (flask-server/api/api_blueprint.py: POST
+// /api/interactive-segment/<case_id>): body { point_lps, box_lps?, tolerance?,
+// res: "low"|"full" }, response is a gzip'd .nii.gz mask IN THE SAME VOXEL
+// GRID as whichever `res` was requested. Because of that grid match, once
+// decompressed we can copy proposal voxels into the live segmentation volume
+// by flat index directly — no worldToIndex/geometry reconciliation needed,
+// unlike the HD-upgrade carry-over that broke earlier. The one hard
+// requirement is that `res` here must match whatever grid the *current*
+// segmentationId volume is actually on right now (i.e. gate this tool the
+// same way Annotate is gated — behind hdReady — so "low" vs "full" can't
+// drift out of sync mid-session).
+//
+// NOT YET TESTED end-to-end — this is new scaffolding. Test on a real case
+// before trusting it: submit a point prompt, confirm the proposal lands in
+// the right place on the right slice, and confirm undo/segment-switching
+// still behave normally afterward.
+export interface InteractivePrompt {
+  pointLps: Point3;
+  boxLps?: [Point3, Point3];
+  tolerance?: number;
+}
+
+async function _decompressGzip(buf: ArrayBuffer): Promise<ArrayBuffer> {
+  // Prefer the native DecompressionStream (Chrome/Edge/Safari 16.4+); if it's
+  // unavailable, this throws and the caller should show "unsupported browser"
+  // rather than silently failing — there's no bundled gzip fallback here.
+  const ds = new (window as any).DecompressionStream("gzip");
+  const stream = new Blob([buf]).stream().pipeThrough(ds);
+  return await new Response(stream).arrayBuffer();
+}
+
+/**
+ * Send a point/box prompt to the backend's interactive-segment endpoint and
+ * merge the returned proposal into the live segmentation volume as
+ * `activeSegmentIndex`, restricted to voxels the proposal actually covers
+ * (existing voxels elsewhere in the labelmap are untouched).
+ *
+ * `res` MUST match the grid the current segmentation volume is on (see the
+ * module comment above) — pass `isHd ? "full" : "low"` from the caller's own
+ * hdReady state, not a guess.
+ *
+ * Returns the number of voxels changed (0 if the proposal was empty), or
+ * throws with a message safe to show the user (the backend already returns
+ * plain-English error strings for the common cases — empty grow, no CT, etc).
+ */
+export async function submitInteractiveSegmentPrompt(
+  apiBase: string,
+  caseId: string | number,
+  activeSegmentIndex: number,
+  prompt: InteractivePrompt,
+  res: "low" | "full",
+): Promise<number> {
+  const segVolume = cache.getVolume(segmentationId);
+  if (!segVolume) throw new Error("No segmentation loaded for this case.");
+
+  const body: Record<string, unknown> = {
+    point_lps: [prompt.pointLps[0], prompt.pointLps[1], prompt.pointLps[2]],
+    res,
+  };
+  if (prompt.boxLps) {
+    body.box_lps = [
+      [prompt.boxLps[0][0], prompt.boxLps[0][1], prompt.boxLps[0][2]],
+      [prompt.boxLps[1][0], prompt.boxLps[1][1], prompt.boxLps[1][2]],
+    ];
+  }
+  if (prompt.tolerance != null) body.tolerance = prompt.tolerance;
+
+  const httpRes = await fetch(`${apiBase}/api/interactive-segment/${caseId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!httpRes.ok) {
+    let msg = `Interactive segmentation failed (${httpRes.status}).`;
+    try {
+      const j = await httpRes.json();
+      if (j?.error) msg = j.error;
+    } catch { /* body wasn't JSON — keep the generic message */ }
+    throw new Error(msg);
+  }
+
+  const gz = await httpRes.arrayBuffer();
+  const niiBytes = await _decompressGzip(gz);
+
+  // Parse the proposal mask's voxel data directly from the raw NIfTI bytes,
+  // instead of routing it through Cornerstone's volume loader. An earlier
+  // version created a throwaway Cornerstone volume for this — but Cornerstone
+  // prioritizes/cancels image loads based on which viewports are actively
+  // requesting them, and a volume attached to no viewport gets its loads
+  // cancelled outright ("volume load cancelled" for every slice). Reading
+  // the header ourselves avoids that whole pathway.
+  //
+  // The backend always writes this via nibabel with
+  // `out.header.set_data_dtype('uint8')` (see interactive_segment in
+  // api_blueprint.py) — a single-file .nii, uint8, standard 352-byte data
+  // offset, no extensions. If that ever changes server-side, this parser
+  // needs to change with it.
+  const proposal = _parseNiftiUint8Mask(niiBytes);
+
+  const segScalars = (segVolume as any)?.voxelManager?.getCompleteScalarDataArray?.()
+    ?? (segVolume as any)?.scalarData;
+  const segDims = segVolume.imageData.getDimensions() as [number, number, number];
+
+  if (!segScalars) throw new Error("Could not access voxel data to apply the proposal.");
+  if (segDims[0] !== proposal.dims[0] || segDims[1] !== proposal.dims[1] || segDims[2] !== proposal.dims[2]) {
+    // Grid mismatch — almost certainly `res` didn't match the segmentation
+    // volume's current resolution. Refuse rather than silently misapply.
+    throw new Error(
+      "The proposal's resolution doesn't match the loaded segmentation — try again once loading finishes."
+    );
+  }
+
+  let changed = 0;
+  // Sparse before/after capture for undo — only voxels this proposal
+  // actually touches AND actually changes (skips a no-op write where the
+  // voxel already held activeSegmentIndex), so undo/redo stay cheap even
+  // though `proposal.data` spans the whole volume.
+  const touchedIdx: number[] = [];
+  const priorValues: number[] = [];
+  for (let idx = 0; idx < proposal.data.length; idx++) {
+    if (proposal.data[idx]) {
+      if (segScalars[idx] !== activeSegmentIndex) {
+        touchedIdx.push(idx);
+        priorValues.push(segScalars[idx]);
+      }
+      segScalars[idx] = activeSegmentIndex;
+      changed++;
+    }
+  }
+  if (changed > 0) {
+    (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
+    // NOT _rebuildSegmentationRepresentations() — this only mutated voxels
+    // in the SAME already-cached segVolume object, it never swapped which
+    // volume is loaded (unlike upgradeSegmentationVolume, which genuinely
+    // does need the full remove+re-add). A full rebuild tears down and
+    // re-adds every segment's representation on every viewport, which is
+    // both the visible "every class mask flashes/reloads" symptom and
+    // real, avoidable cost on every single click/box prompt. This is the
+    // same lightweight refresh the brush/smart-fill/etc. direct-write paths
+    // already use — it doesn't touch representations or actors, so it also
+    // doesn't disturb camera position/zoom the way rebuilding did.
+    _notifySegmentationChanged();
+
+    // Own undo/redo entry, same shared stack as smart fill / scissors /
+    // lasso (pushEditHistory below) — a SEPARATE stack from brush strokes
+    // (Cornerstone's own HistoryMemo), so undoing a point/box segment never
+    // also reverts (or gets shadowed by) an unrelated brush stroke; see
+    // undoMaskEdit's recency check for how the two stacks interleave.
+    if (touchedIdx.length > 0) {
+      const applyAndRefresh = (values: number[]) => {
+        touchedIdx.forEach((idx, i) => { segScalars[idx] = values[i]; });
+        (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
+        _notifySegmentationChanged();
+      };
+      const redoValues = touchedIdx.map(() => activeSegmentIndex);
+      pushEditHistory({
+        undo: () => applyAndRefresh(priorValues),
+        redo: () => applyAndRefresh(redoValues),
+      });
+    }
+  }
+
+  return changed;
+}
+
+/**
+ * Minimal NIfTI-1 reader for exactly the shape the interactive-segment
+ * endpoint returns: single-file .nii, uint8 data, standard header, no
+ * extensions. Not a general-purpose NIfTI parser — reads only what's needed
+ * (dims + the voxel array) and assumes little-endian, matching nibabel's
+ * default write format.
+ */
+function _parseNiftiUint8Mask(buf: ArrayBuffer): { dims: [number, number, number]; data: Uint8Array } {
+  const view = new DataView(buf);
+  // NIfTI-1 header: dim[8] (int16 x8) starts at byte 40; dim[0]=ndims,
+  // dim[1..3]=nx,ny,nz. vox_offset (float32) is at byte 108 — where the
+  // voxel data actually begins (352 for a standard header with no
+  // extensions, but read it rather than assume, in case that ever changes).
+  const nx = view.getInt16(42, true);
+  const ny = view.getInt16(44, true);
+  const nz = view.getInt16(46, true);
+  const voxOffset = view.getFloat32(108, true);
+  const count = nx * ny * nz;
+  const data = new Uint8Array(buf, voxOffset, count);
+  return { dims: [nx, ny, nz], data };
 }
 
 // ---------------------------------------------------------------------------
@@ -2348,7 +2582,19 @@ export function runDualScribbleFill(
   _notifySegmentationChanged();
   return { filledVoxels: touched.length, threshold };
 }
+// Guards the dispatch below so the module-level listener a few lines down
+// (which stamps _lastBrushEditTime) can tell "this SEGMENTATION_DATA_MODIFIED
+// came from OUR OWN edit path (fill/box/point/scissors/lasso/etc, all of
+// which route through this function)" apart from "this came natively from
+// Cornerstone's own BrushTool after a paint/erase stroke" — both dispatch
+// the identical event, so without this flag the two are indistinguishable
+// from the listener's side, which is exactly what made the old
+// "smart-fill-stack always wins" undo ordering wrong (see _lastFillEditTime
+// / _lastBrushEditTime below).
+let _dispatchingOwnEdit = false;
+
 function _notifySegmentationChanged() {
+  _dispatchingOwnEdit = true;
   try {
     // This is what BrushTool's own strategies call after painting — it invalidates the
     // labelmap's cached GPU texture so the 2D volume viewports actually repaint the new
@@ -2363,9 +2609,21 @@ function _notifySegmentationChanged() {
   eventTarget.dispatchEvent(
     new CustomEvent(csToolsEnums.Events.SEGMENTATION_DATA_MODIFIED, { detail: { segmentationId } })
   );
+  _dispatchingOwnEdit = false;
   currentRenderingEngine?.renderViewports([...MPR_VIEWPORT_IDS]);
   currentRenderingEngine?.render();
 }
+
+// Fires once, unconditionally, for the lifetime of the module — separate
+// from subscribeToSegmentationEdits below (which callers attach/detach per
+// component). Its only job is recency-tracking for undoMaskEdit/redoMaskEdit:
+// stamp _lastBrushEditTime whenever a genuine NATIVE brush/eraser stroke
+// changes the labelmap (i.e. the event fired WITHOUT _dispatchingOwnEdit set,
+// meaning it didn't come from _notifySegmentationChanged / our own edit
+// paths). See _pushFillHistory below for the matching _lastFillEditTime.
+eventTarget.addEventListener(csToolsEnums.Events.SEGMENTATION_DATA_MODIFIED, () => {
+  if (!_dispatchingOwnEdit) _lastBrushEditTime = Date.now();
+});
 
 // ============================================================================
 // SECTION: Undo / Redo History 
@@ -2376,10 +2634,21 @@ type FillHistoryEntry = { undo: () => void; redo: () => void };
 let _fillHistory: FillHistoryEntry[] = [];
 let _fillHistoryIndex = -1;
 
+// Recency trackers so undoMaskEdit/redoMaskEdit can pick whichever of the
+// two history mechanisms (this _fillHistory stack, used by smart fill,
+// scissors, lasso, and point/box segmentation; or Cornerstone's own
+// HistoryMemo, used natively by brush/eraser strokes) the user actually
+// touched most recently — instead of always preferring one stack
+// regardless of order, which let an older fill-type undo silently jump
+// ahead of a newer brush stroke when the two were interleaved.
+let _lastFillEditTime = 0;
+let _lastBrushEditTime = 0;
+
 function _pushFillHistory(entry: FillHistoryEntry) {
   _fillHistory = _fillHistory.slice(0, _fillHistoryIndex + 1);
   _fillHistory.push(entry);
   _fillHistoryIndex = _fillHistory.length - 1;
+  _lastFillEditTime = Date.now();
 }
 
 // Exposed so hooks/components outside this module (e.g. useSmartFill's
@@ -2425,6 +2694,43 @@ export function canvasPointToVoxel(pane: CinePane, canvasPos: Point2): [number, 
     return null;
   }
 }
+// Canvas-pixel positions only mean what they mean for the camera that was
+// active the instant they were captured — zooming/panning afterward remaps
+// every world location to a different canvas pixel, so anything stashed as
+// a raw canvas coordinate (a lasso/scissors corner, a smart-fill seed dot)
+// silently drifts off the anatomy it was placed on the moment the camera
+// changes, both visually and — if it's later fed back into
+// canvasPointToVoxel — in the actual voxels the tool acts on. World-space
+// (mm) points don't have that problem: a world coordinate names the same
+// physical location regardless of zoom/pan. Anything that needs to survive
+// a camera change between "placed" and "drawn/committed" should be stored
+// via canvasPointToWorld and turned back into a canvas pixel via
+// worldToCanvasPoint at the moment it's actually drawn or committed.
+export function canvasPointToWorld(pane: CinePane, canvasPos: Point2): Point3 | null {
+  const engine = getRenderingEngine(renderingEngineId);
+  if (!engine) return null;
+  const viewport = engine.getViewport(CINE_VIEWPORT_BY_PANE[pane]) as any;
+  if (!viewport) return null;
+  try {
+    return viewport.canvasToWorld(canvasPos) as Point3;
+  } catch {
+    return null;
+  }
+}
+
+export function worldToCanvasPoint(pane: CinePane, world: Point3): [number, number] | null {
+  const engine = getRenderingEngine(renderingEngineId);
+  if (!engine) return null;
+  const viewport = engine.getViewport(CINE_VIEWPORT_BY_PANE[pane]) as any;
+  if (!viewport) return null;
+  try {
+    const [x, y] = viewport.worldToCanvas(world) as Point2;
+    return [x, y];
+  } catch {
+    return null;
+  }
+}
+
 function _sliceAxisForPane(pane: CinePane): 0 | 1 | 2 {
   return pane === "sagittal" ? 0 : pane === "coronal" ? 1 : 2;
 }
@@ -2458,6 +2764,26 @@ const LIVEWIRE_WINDOW_MARGIN = 8;
 const LIVEWIRE_W_GRADIENT = 0.55;
 const LIVEWIRE_W_LAPLACIAN = 0.25;
 const LIVEWIRE_W_DIRECTION = 0.20;
+
+// The refined snap point (see refinePoint below) sits at the objective
+// gradient-magnitude peak of the CT intensity ramp — the mathematically
+// "sharpest" point of the transition. That can read as a few mm inside the
+// true anatomical boundary compared to where a human eye places the edge
+// under typical windowing, since the visually-perceived edge and the raw
+// gradient peak aren't always the same point. This nudges the final refined
+// point a small extra distance further along the SAME outward normal
+// refinePoint already found, landing it a bit past the gradient peak instead
+// of exactly on it.
+//
+// Sign convention: positive values move along +[ux,uy], i.e. from lower-HU
+// toward higher-HU across the edge — for a denser structure (bone, most solid
+// organs) against a less-dense surround (fat/air), that's outward, away from
+// the structure's interior. If a specific case needs the opposite (e.g.
+// tracing something LESS dense than its surround), flip the sign here — this
+// is a single scalar, not per-edge logic, so it can't be made
+// direction-aware automatically without knowing which side is "inside" for
+// an arbitrary class.
+const LIVEWIRE_OUTWARD_BIAS_VOXELS = 0.9;
 
 // Minimal binary min-heap keyed by a numeric priority — enough for Dijkstra
 // over a few thousand nodes without pulling in a dependency.
@@ -2671,9 +2997,83 @@ export function computeLiveWirePath(
   if (pathLocal[pathLocal.length - 1] !== seedLocal) return null; // unreachable
   pathLocal.reverse();
 
+  // --- Sub-voxel edge snap ---------------------------------------------
+  // The raw Dijkstra path above is grid-locked (every point sits on an
+  // integer voxel) and, on any CONVEX stretch of boundary, is quietly
+  // biased toward the INSIDE of the intensity transition: a real CT edge
+  // is a ramp several voxels wide (partial-volume blur), not a single-
+  // pixel step, and going around the inside of that ramp is a shorter
+  // route than going around the outside. Since the search also minimizes
+  // path length (linkLen + the bending penalty), that small length
+  // advantage quietly wins the tie-break across a whole curved stretch —
+  // this is what shows up as the contour consistently sitting a few mm
+  // inside the true boundary. Fix: for every interior point (the two
+  // fastened endpoints are left exactly where the user clicked), walk a
+  // short distance along the LOCAL intensity gradient — i.e.
+  // perpendicular to the edge — and re-center the point on the actual
+  // gradient-magnitude peak, located with sub-voxel precision via a
+  // parabolic fit rather than whichever integer voxel the graph search
+  // happened to land on. Bilinear-sampled, so it isn't limited to the
+  // same coarse grid that caused the bias in the first place.
+  const sampleHUf = (a: number, b: number): number => {
+    const a0 = Math.floor(a), b0 = Math.floor(b);
+    const fa = a - a0, fb = b - b0;
+    const v00 = huAt(a0, b0), v10 = huAt(a0 + 1, b0);
+    const v01 = huAt(a0, b0 + 1), v11 = huAt(a0 + 1, b0 + 1);
+    return v00 * (1 - fa) * (1 - fb) + v10 * fa * (1 - fb) + v01 * (1 - fa) * fb + v11 * fa * fb;
+  };
+  const H = 0.5; // sub-voxel differencing step, in voxels
+  const gradAtf = (a: number, b: number): [number, number] => [
+    (sampleHUf(a + H, b) - sampleHUf(a - H, b)) / (2 * H),
+    (sampleHUf(a, b + H) - sampleHUf(a, b - H)) / (2 * H),
+  ];
+  const gradMagAtf = (a: number, b: number): number => {
+    const [gxf, gyf] = gradAtf(a, b);
+    return Math.hypot(gxf, gyf);
+  };
+
+  const REFINE_RADIUS = 1.75; // voxels either side of the raw path point to search
+  const REFINE_STEP = 0.25;
+  const refinePoint = (a: number, b: number): [number, number] => {
+    const [gxf, gyf] = gradAtf(a, b);
+    const gmag = Math.hypot(gxf, gyf);
+    if (gmag < 1e-6) return [a, b]; // flat locally — nothing to snap to, leave it
+    const ux = gxf / gmag, uy = gyf / gmag; // unit vector along the gradient, i.e. perpendicular to the edge
+
+    // Coarse search for the strongest gradient magnitude along that
+    // normal. Starts from (and only ever improves on) the raw point's own
+    // magnitude, so this can only pull toward a genuinely stronger nearby
+    // edge — never introduces a large jump toward an unrelated feature.
+    let bestT = 0, bestMag = gmag;
+    for (let t = -REFINE_RADIUS; t <= REFINE_RADIUS; t += REFINE_STEP) {
+      if (t === 0) continue;
+      const m = gradMagAtf(a + ux * t, b + uy * t);
+      if (m > bestMag) { bestMag = m; bestT = t; }
+    }
+    // Parabolic sub-step refinement around the winning sample so the final
+    // point isn't itself grid-locked to REFINE_STEP increments.
+    const mMinus = gradMagAtf(a + ux * (bestT - REFINE_STEP), b + uy * (bestT - REFINE_STEP));
+    const mPlus = gradMagAtf(a + ux * (bestT + REFINE_STEP), b + uy * (bestT + REFINE_STEP));
+    const denom = mMinus - 2 * bestMag + mPlus;
+    const delta = Math.abs(denom) > 1e-6 ? (0.5 * (mMinus - mPlus)) / denom : 0;
+    const tRefined = bestT + Math.max(-REFINE_STEP, Math.min(REFINE_STEP, delta * REFINE_STEP));
+
+    return [a + ux * (tRefined + LIVEWIRE_OUTWARD_BIAS_VOXELS), b + uy * (tRefined + LIVEWIRE_OUTWARD_BIAS_VOXELS)];
+  };
+
   const points: Array<[number, number]> = [];
-  for (const li of pathLocal) {
-    const a = winA0 + (li % winW), b = winB0 + Math.floor(li / winW);
+  for (let idx = 0; idx < pathLocal.length; idx++) {
+    const li = pathLocal[idx];
+    let a = winA0 + (li % winW), b = winB0 + Math.floor(li / winW);
+    // Leave the two fastened endpoints exactly where the user clicked —
+    // only interior points get snapped to the refined edge location.
+    if (idx > 0 && idx < pathLocal.length - 1) {
+      [a, b] = refinePoint(a, b);
+    }
+    // sliceOf works fine with fractional a/b (it just slots them into the
+    // fixed-axis tuple) — passing the refined, non-rounded values straight
+    // through is what actually preserves the sub-voxel correction; feeding
+    // it Math.round(a)/Math.round(b) here would throw the refinement away.
     const [i, j, k] = sliceOf(a, b);
     try {
       const world = ctVolume.imageData.indexToWorld([i, j, k]);

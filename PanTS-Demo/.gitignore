@@ -30,3 +30,8 @@ Pants/ProfileTr/*
 
 
 .vercel
+
+# Locally generated preview assets (thumbnails + meshes), ~157MB. Built from
+# the dataset, not source — regenerate rather than commit.
+public/thumbs/
+public/meshes/
