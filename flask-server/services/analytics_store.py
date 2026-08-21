@@ -47,10 +47,12 @@ ACTION_NAMES = frozenset({
     # account
     "account_open_settings", "account_change_plan", "account_set_account_type",
     "auth_open_modal", "auth_sign_in", "auth_sign_up", "auth_sign_out",
+    "auth_forgot_password_request", "auth_reset_password",
     # plan limits
     "plan_limit_hit", "plan_limit_dialog_cta",
     # admin
     "admin_grant_role", "admin_revoke_role",
+    "admin_delete_account", "admin_restore_account",
 })
 
 # Route patterns, never raw URLs — "/case/:caseId", not "/case/BDMAP_00000123".
@@ -59,6 +61,7 @@ ROUTE_PATTERNS = frozenset({
     "/", "/dashboard", "/case/:caseId", "/session/:sessionId",
     "/reconstruction/:reconstructionId", "/dicom", "/local-nifti",
     "/upload", "/compare", "/compare-viewer", "/team", "/signup",
+    "/reset-password",
     "/account", "/account/plan", "/account/history", "/account/privacy",
     "/account/analytics", "/account/people",
     "/terms", "/privacy",
@@ -72,6 +75,10 @@ MAX_AGE = timedelta(hours=48)
 # A page view longer than this is a tab left open, not time spent. Clamped
 # rather than dropped so the visit still counts.
 MAX_DURATION_MS = 60 * 60 * 1000  # 1 hour
+# Cities returned when the map is drilled into a country. A long tail of one
+# session each isn't worth the rows; the country total above it is the number
+# that matters.
+CITY_ROWS = 25
 
 AUDIENCE_ALL = "all"
 AUDIENCE_SIGNED_IN = "signed_in"
@@ -139,7 +146,8 @@ def _clean(event: dict, now) -> dict | None:
     }
 
 
-def record_events(events: list, user_id: str | None = None) -> int:
+def record_events(events: list, user_id: str | None = None, ip: str | None = None,
+                  geo: dict | None = None, device: str | None = None) -> int:
     """Write a batch. Returns how many rows were actually stored.
 
     Anything unrecognised is dropped silently rather than failing the batch: one
@@ -149,6 +157,11 @@ def record_events(events: list, user_id: str | None = None) -> int:
     Events the client has already delivered are dropped the same way. The browser
     flushes with ``keepalive`` on pagehide, and a request the browser retries
     resends the identical body — without this, every retry would double-count.
+
+    ``ip``, ``geo`` and ``device`` come from the caller, which reads them off the
+    request — never out of the event body. They are stamped onto every row in the
+    batch, the same way ``plan``/``account_type`` are: one HTTP request comes
+    from one address on one device, whatever the events inside it claim.
     """
     if not isinstance(events, list) or not events:
         return 0
@@ -186,11 +199,20 @@ def record_events(events: list, user_id: str | None = None) -> int:
             else:
                 user_id = None
 
+        place = geo or {}
         for row in cleaned:
             s.add(AnalyticsEvent(
                 user_id=user_id,
                 plan=plan,
                 account_type=account_type,
+                ip_address=ip,
+                country_code=place.get("country_code"),
+                country_name=place.get("country_name"),
+                region=place.get("region"),
+                city=place.get("city"),
+                latitude=place.get("latitude"),
+                longitude=place.get("longitude"),
+                device_type=device,
                 **row,
             ))
         return len(cleaned)
@@ -237,12 +259,14 @@ def purge_old_events(days: int | None = None) -> int:
 
 # ---- reading ---------------------------------------------------------------
 
-def _apply_filters(stmt, start, end, plan, account_type, audience):
+def _apply_filters(stmt, start, end, plan, account_type, audience, country=None):
     stmt = stmt.where(AnalyticsEvent.created_at >= start, AnalyticsEvent.created_at < end)
     if plan:
         stmt = stmt.where(AnalyticsEvent.plan == plan)
     if account_type:
         stmt = stmt.where(AnalyticsEvent.account_type == account_type)
+    if country:
+        stmt = stmt.where(AnalyticsEvent.country_code == country)
     if audience == AUDIENCE_SIGNED_IN:
         stmt = stmt.where(AnalyticsEvent.user_id.isnot(None))
     elif audience == AUDIENCE_ANONYMOUS:
@@ -264,23 +288,30 @@ def earliest_event():
         return s.execute(select(func.min(AnalyticsEvent.created_at))).scalar_one_or_none()
 
 
-def overview(start, end, plan=None, account_type=None, audience=AUDIENCE_ALL) -> dict:
+def overview(start, end, plan=None, account_type=None, audience=AUDIENCE_ALL,
+             country=None) -> dict:
     """Everything the dashboard shows, in one query set.
 
     One call rather than six endpoints: every panel shares the same filters, so
     splitting them up would mean the panels could disagree with each other while
     a range change was in flight.
+
+    ``country`` narrows to one country (alpha-2) so the map can be clicked into.
+    It filters the *whole* response rather than just the place panels: having
+    clicked into Germany, "most-used features" should be Germany's too, or the
+    page is two things at once.
     """
     def f(stmt):
-        return _apply_filters(stmt, start, end, plan, account_type, audience)
+        return _apply_filters(stmt, start, end, plan, account_type, audience, country)
 
     people = func.count(distinct(AnalyticsEvent.anon_id))
+    sessions = func.count(distinct(AnalyticsEvent.session_id))
 
     with session_scope() as s:
         totals = s.execute(f(select(
             func.count(AnalyticsEvent.id),
             people,
-            func.count(distinct(AnalyticsEvent.session_id)),
+            sessions,
             func.count(distinct(AnalyticsEvent.user_id)),
         ))).one()
 
@@ -329,11 +360,83 @@ def overview(start, end, plan=None, account_type=None, audience=AUDIENCE_ALL) ->
             .group_by(day).order_by(day)
         ))
 
+        # ---- where the visitors were ----
+        #
+        # Grouped by code and name together so the name travels with the code
+        # without a second lookup. Rows with no country (a private address in
+        # development, or an event recorded before locations were collected) are
+        # left out rather than bucketed as "unknown": on a map there is nowhere
+        # to draw them, and the country list sits beside the map.
+        by_country = _rows(s, f(
+            select(
+                AnalyticsEvent.country_code, AnalyticsEvent.country_name,
+                sessions, people, func.count(AnalyticsEvent.id),
+            )
+            .where(AnalyticsEvent.country_code.isnot(None))
+            .group_by(AnalyticsEvent.country_code, AnalyticsEvent.country_name)
+            .order_by(sessions.desc())
+        ))
+
+        # Only meaningful once a country is picked, and only queried then — on
+        # the whole world this would be thousands of rows nothing draws.
+        by_city = _rows(s, f(
+            select(
+                AnalyticsEvent.city, AnalyticsEvent.region,
+                func.avg(AnalyticsEvent.latitude), func.avg(AnalyticsEvent.longitude),
+                sessions, people,
+            )
+            .where(AnalyticsEvent.city.isnot(None))
+            .group_by(AnalyticsEvent.city, AnalyticsEvent.region)
+            .order_by(sessions.desc())
+            .limit(CITY_ROWS)
+        )) if country else []
+
+        by_device = _rows(s, f(
+            select(AnalyticsEvent.device_type, sessions, people)
+            .where(AnalyticsEvent.device_type.isnot(None))
+            .group_by(AnalyticsEvent.device_type)
+            .order_by(sessions.desc())
+        ))
+
+        # New vs returning, without a column for it: a visitor is returning if
+        # this browser was seen before the range began. Deliberately measured
+        # against all of history rather than against a previous window of the
+        # same length — "have they been here before" is the question, and the
+        # answer shouldn't change with the size of the range being viewed.
+        seen_before = select(distinct(AnalyticsEvent.anon_id)).where(
+            AnalyticsEvent.created_at < start
+        ).scalar_subquery()
+        returning = s.execute(f(
+            select(people).where(AnalyticsEvent.anon_id.in_(seen_before))
+        )).scalar_one() or 0
+
+        # Hour and weekday come out of the timestamp. strftime is SQLite's, as
+        # is func.date() above — this store has one backend in practice.
+        weekday = func.strftime("%w", AnalyticsEvent.created_at)
+        by_weekday = _rows(s, f(
+            select(weekday, sessions, people).group_by(weekday).order_by(weekday)
+        ))
+        hour = func.strftime("%H", AnalyticsEvent.created_at)
+        by_hour = _rows(s, f(
+            select(hour, sessions, people).group_by(hour).order_by(hour)
+        ))
+
+        # The immediately preceding window of the same length, for the "up 12%
+        # on the previous 30 days" line under each headline number. Only the
+        # four totals — a previous-period figure for every panel would be a lot
+        # of query for a comparison nothing draws.
+        span = end - start
+        previous = s.execute(_apply_filters(
+            select(func.count(AnalyticsEvent.id), people, sessions),
+            start - span, start, plan, account_type, audience, country,
+        )).one()
+
     total_events, total_people, total_sessions, signed_in_people = totals
     return {
         "range": {"start": start.isoformat(), "end": end.isoformat()},
         "filters": {
             "plan": plan, "account_type": account_type, "audience": audience or AUDIENCE_ALL,
+            "country": country,
         },
         "totals": {
             "events": total_events or 0,
@@ -341,6 +444,14 @@ def overview(start, end, plan=None, account_type=None, audience=AUDIENCE_ALL) ->
             "sessions": total_sessions or 0,
             "signed_in_people": signed_in_people or 0,
             "time_ms": sum(int(r[2] or 0) for r in routes),
+        },
+        # The same three counted over the window immediately before this one.
+        # Time is left out: it is summed from the route rows rather than counted,
+        # and a second pass over those for one comparison isn't worth it.
+        "previous": {
+            "events": previous[0] or 0,
+            "people": previous[1] or 0,
+            "sessions": previous[2] or 0,
         },
         "top_actions": [
             {"name": name, "count": count, "people": ppl} for name, count, ppl in actions
@@ -369,5 +480,51 @@ def overview(start, end, plan=None, account_type=None, audience=AUDIENCE_ALL) ->
         ],
         "daily": [
             {"day": str(d), "events": count, "people": ppl} for d, count, ppl in daily
+        ],
+        "by_country": [
+            {
+                "country_code": code,
+                "country_name": name or code,
+                "sessions": sess,
+                "people": ppl,
+                "events": events,
+            }
+            for code, name, sess, ppl, events in by_country
+        ],
+        "by_city": [
+            {
+                "city": city,
+                "region": region,
+                # Averaged over the rows, which for one city is that city's
+                # centroid repeated — the average is just how it comes back out
+                # of a GROUP BY.
+                "latitude": float(lat) if lat is not None else None,
+                "longitude": float(lon) if lon is not None else None,
+                "sessions": sess,
+                "people": ppl,
+            }
+            for city, region, lat, lon, sess, ppl in by_city
+        ],
+        "by_device": [
+            {"device_type": device, "sessions": sess, "people": ppl}
+            for device, sess, ppl in by_device
+        ],
+        "new_vs_returning": {
+            "returning": returning,
+            # Everyone counted in the range who wasn't seen before it. Derived
+            # rather than queried: the two must add up to the headline "people"
+            # figure, and computing them separately is how they stop doing that.
+            "new": max(0, (total_people or 0) - returning),
+        },
+        # "0".."6", Sunday first, as SQLite's %w reports it. Left as the raw
+        # index for the client to name, because the day names belong in the
+        # user's locale, not in the API.
+        "by_weekday": [
+            {"weekday": int(w), "sessions": sess, "people": ppl}
+            for w, sess, ppl in by_weekday
+        ],
+        "by_hour": [
+            {"hour": int(h), "sessions": sess, "people": ppl}
+            for h, sess, ppl in by_hour
         ],
     }

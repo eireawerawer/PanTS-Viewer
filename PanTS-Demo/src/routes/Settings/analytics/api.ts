@@ -17,6 +17,9 @@ export type Filters = {
 	audience: Audience;
 	/** "Ever": ignores from/to and starts at the oldest event on record. */
 	allTime: boolean;
+	/** Alpha-2, set by clicking into a country on the map. Narrows the WHOLE
+	 *  response, not just the location panels — see overview() on the server. */
+	country: string;
 };
 
 export type Overview = {
@@ -28,6 +31,10 @@ export type Overview = {
 		signed_in_people: number;
 		time_ms: number;
 	};
+	/** The same counts over the window immediately before this one, so each
+	 *  headline number can carry a change against it. No time_ms — the server
+	 *  doesn't compute one. */
+	previous: { events: number; people: number; sessions: number };
 	top_actions: { name: string; count: number; people: number }[];
 	time_by_route: {
 		route: string; views: number; total_ms: number; avg_ms: number; people: number;
@@ -35,6 +42,22 @@ export type Overview = {
 	by_plan: { plan: string; events: number; people: number }[];
 	by_account_type: { account_type: string; events: number; people: number }[];
 	daily: { day: string; events: number; people: number }[];
+	by_country: {
+		country_code: string; country_name: string;
+		sessions: number; people: number; events: number;
+	}[];
+	/** Only populated when a country is selected; empty otherwise. */
+	by_city: {
+		city: string; region: string | null;
+		latitude: number | null; longitude: number | null;
+		sessions: number; people: number;
+	}[];
+	by_device: { device_type: string; sessions: number; people: number }[];
+	new_vs_returning: { new: number; returning: number };
+	/** 0 = Sunday, as SQLite's %w reports it. Named client-side so the day
+	 *  names come out in the reader's locale. */
+	by_weekday: { weekday: number; sessions: number; people: number }[];
+	by_hour: { hour: number; sessions: number; people: number }[];
 };
 
 export type Meta = {
@@ -85,5 +108,6 @@ export const fetchOverview = (f: Filters) => {
 	}
 	if (f.plan) params.set("plan", f.plan);
 	if (f.accountType) params.set("account_type", f.accountType);
+	if (f.country) params.set("country", f.country);
 	return get<Overview>(`/api/analytics/overview?${params}`);
 };

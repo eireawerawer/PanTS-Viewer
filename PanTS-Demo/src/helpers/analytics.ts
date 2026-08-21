@@ -44,10 +44,14 @@ export type TrackedAction =
 	| "auth_sign_in"
 	| "auth_sign_up"
 	| "auth_sign_out"
+	| "auth_forgot_password_request"
+	| "auth_reset_password"
 	| "plan_limit_hit"
 	| "plan_limit_dialog_cta"
 	| "admin_grant_role"
-	| "admin_revoke_role";
+	| "admin_revoke_role"
+	| "admin_delete_account"
+	| "admin_restore_account";
 
 type TrackedEvent = {
 	// Generated here, not on the server, and used as the row's primary key. A
@@ -67,6 +71,7 @@ type TrackedEvent = {
 // pattern is what gets sent: "/case/:caseId", never "/case/BDMAP_00000123".
 const STATIC_ROUTES = new Set([
 	"/", "/dashboard", "/dicom", "/local-nifti", "/upload", "/signup",
+	"/reset-password",
 	"/account", "/account/plan", "/account/history", "/account/privacy",
 	"/account/analytics", "/account/people",
 	"/terms", "/privacy", "/team", "/compare", "/compare-viewer",

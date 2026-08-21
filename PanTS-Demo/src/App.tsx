@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 import "./App.css";
-import { prefetchCurated } from "./helpers/prefetchCurated";
+import { warmCuratedCache } from "./helpers/curatedCache";
 import AnalyticsRouteTracker from "./components/AnalyticsRouteTracker";
 import AuthModal from "./components/AuthModal";
 import { AnnotationProvider } from "./contexts/annotationContexts";
@@ -32,7 +32,9 @@ const PrivacySettings = lazy(() => import("./routes/Settings/PrivacySettings"));
 const AnalyticsSettings = lazy(() => import("./routes/Settings/AnalyticsSettings"));
 const PeopleSettings = lazy(() => import("./routes/Settings/PeopleSettings"));
 const SignupRedirect = lazy(() => import("./routes/SignupRedirect"));
+const ResetPassword = lazy(() => import("./routes/ResetPassword"));
 const LegalPage = lazy(() => import("./routes/LegalPage"));
+const SharePatientCard = lazy(() => import("./routes/SharePatientCard"));
 const RotatingHeartLoader = lazy(() => import("./components/Loading"));
 
 const BASENAME = import.meta.env.VITE_BASENAME;
@@ -75,8 +77,8 @@ function App() {
     };
     const ric = w.requestIdleCallback;
     const id = ric
-      ? ric(() => prefetchCurated())
-      : window.setTimeout(prefetchCurated, 1200);
+      ? ric(() => warmCuratedCache())
+      : window.setTimeout(warmCuratedCache, 1200);
     return () => {
       if (ric) w.cancelIdleCallback?.(id as number);
       else window.clearTimeout(id as number);
@@ -103,6 +105,7 @@ function App() {
                   <Route path="/live/:roomId" element={<LiveRoomPage />} />
                   <Route path="/live/challenge/:challengeId" element={<SoloChallengePage />} />
                   <Route path="/learn/quiz/:packId" element={<QuizPracticePage />} />
+                  <Route path="/share/:shareId" element={<SharePatientCard />} />
                   <Route
                     path="/session/:sessionId"
                     element={<VisualizationPage />}
@@ -121,6 +124,9 @@ function App() {
                       /signup stay routable so old links don't 404. */}
                   <Route path="/login" element={<Navigate to="/" replace />} />
                   <Route path="/signup" element={<SignupRedirect />} />
+                  {/* Where the emailed reset link lands. Public by necessity —
+                      the person following it can't sign in. */}
+                  <Route path="/reset-password" element={<ResetPassword />} />
                   {/* Settings is a shell with a left nav; each section is its
                       own URL so a link can point straight at one. */}
                   <Route path="/account" element={<SettingsPage />}>

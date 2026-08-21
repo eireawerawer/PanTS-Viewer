@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ComparePage from "../routes/ComparePage";
@@ -49,6 +49,9 @@ describe("ComparePage", () => {
 				</Routes>
 			</MemoryRouter>
 		);
+
+		// The stats table now lives in a popup — open it first.
+		fireEvent.click(await screen.findByText(/View organ statistics/));
 
 		// Both cases' liver volumes appear…
 		expect(await screen.findByText("1500 cm³")).toBeTruthy();

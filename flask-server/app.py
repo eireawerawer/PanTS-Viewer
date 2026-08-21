@@ -18,6 +18,8 @@ from api.education import education_blueprint
 from api.live_rooms import live_rooms_blueprint
 from api.auth_blueprint import auth_blueprint
 from api.oauth_blueprint import init_oauth, oauth_blueprint
+from api.admin_blueprint import admin_blueprint
+from api.analytics_blueprint import analytics_blueprint
 from models.base import db
 from models.combined_labels import CombinedLabels
 from models.engine import get_engine
@@ -32,19 +34,45 @@ def create_app():
     create_session_dir()
     app = Flask(__name__)
 
-    # Behind nginx, the real scheme and host arrive as X-Forwarded-Proto/Host;
-    # without this Flask sees the proxy's http://127.0.0.1 hop, and the OAuth
-    # redirect_uri (built from request.url_root) comes out http:// and fails to
-    # match what's registered with Google/GitHub. Opt-in because these headers
-    # are client-spoofable when nothing trusted is in front of the app.
+    # Behind nginx, the real scheme, host and client address arrive as
+    # X-Forwarded-Proto/Host/For; without this Flask sees the proxy's
+    # http://127.0.0.1 hop. Two things break on that: the OAuth redirect_uri
+    # (built from request.url_root) comes out http:// and fails to match what's
+    # registered with Google/GitHub, and request.remote_addr is the proxy — so
+    # every visitor geolocates to the server itself and the whole site shares
+    # one rate-limit bucket. Opt-in because these headers are client-spoofable
+    # when nothing trusted is in front of the app.
+    #
+    # TRUST_PROXY_HOPS is how many proxies are in front of the app, and it must
+    # match the deployment exactly. ProxyFix counts from the RIGHT of
+    # X-Forwarded-For, so the value is "how many entries at the end of that
+    # header were written by infrastructure I control".
+    #
+    # Too low and you read a proxy's own address instead of the visitor's. Too
+    # high and you read whatever the client put there — anyone can send an
+    # X-Forwarded-For header, so an over-count is a spoofing hole, which is why
+    # this defaults to 1 rather than to something permissive.
+    #
+    # bodymaps.wse.jhu.edu sits behind two: a campus edge proxy and nginx, so it
+    # sets 2. Check yours rather than guessing — restart gunicorn with
+    #   --access-logformat "XFF=[%({X-Forwarded-For}i)s]"
+    # and count the entries on a request from OUTSIDE the network. Traffic from
+    # inside is NAT'd and shows a private address where the visitor's should be,
+    # which makes an internal test look like a broken one.
     if os.environ.get("TRUST_PROXY", "false").lower() == "true":
-        app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+        try:
+            hops = max(1, int(os.environ.get("TRUST_PROXY_HOPS", "1")))
+        except ValueError:
+            hops = 1
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=hops, x_proto=1, x_host=1)
 
     app.register_blueprint(api_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(education_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(live_rooms_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(auth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
     app.register_blueprint(oauth_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
+    app.register_blueprint(admin_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
+    app.register_blueprint(analytics_blueprint, url_prefix=f'{Constants.BASE_PATH}/api')
 
     app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB, for overcoming size limits in file uploads
 
@@ -91,6 +119,11 @@ def create_app():
         purged = auth_store.purge_expired_deletions()
         if purged:
             print(f"[boot] purged {purged} account(s) past the deletion grace period")
+        # Same deal for spent reset tokens: housekeeping, not security — they
+        # are already refused on redemption, this just stops the table growing.
+        dropped = auth_store.purge_expired_reset_tokens()
+        if dropped:
+            print(f"[boot] dropped {dropped} spent password reset token(s)")
     except Exception as e:
         print(f"[boot] account/job store init skipped: {e}")
 

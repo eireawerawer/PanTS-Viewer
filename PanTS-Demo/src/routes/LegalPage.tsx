@@ -54,6 +54,13 @@ const PRIVACY: Section[] = [
 		body: "Running inference you request, operating and improving the service, and whether data is ever used for model training — and how you would opt out if so.",
 	},
 	{
+		// Unlike its neighbours this one is not a placeholder: it describes what
+		// the site actually does today. Recording visitors' IP addresses without
+		// saying so anywhere is worse than a heading awaiting real legal copy.
+		heading: "Site analytics, IP addresses and location",
+		body: "We record which features are used and which pages are visited, along with the IP address each request came from, the approximate country and city that address resolves to, and whether the device is a desktop, tablet or phone. Location is worked out on our own servers from a local database — your IP address is not sent to any third party for this. These records are visible only to site administrators, are never used to identify you personally, and are deleted automatically after the retention period. No third-party analytics or advertising scripts run on this site.",
+	},
+	{
 		heading: "Retention and deletion",
 		body: "How long scans and results are kept, what deleting your history removes, and what happens to your data when you delete your account.",
 	},

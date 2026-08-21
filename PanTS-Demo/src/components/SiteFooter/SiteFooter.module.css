@@ -29,13 +29,13 @@
 }
 
 .link {
-  color: var(--accent-deep);
+  color: #002d72;
   font-weight: 500;
   text-decoration: underline; /* non-color affordance at rest (WCAG 1.4.1) */
   text-underline-offset: 2px;
 }
 .link:hover {
-  color: var(--accent-deep-hover);
+  color: #001d4a;
 }
 
 @media (max-width: 640px) {

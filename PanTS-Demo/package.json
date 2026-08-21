@@ -24,6 +24,7 @@
     "@tabler/icons": "^3.34.1",
     "@tabler/icons-react": "^3.34.1",
     "@tailwindcss/vite": "^4.1.12",
+    "d3-geo": "^3.1.1",
     "esbuild": "^0.25.9",
     "jszip": "^3.10.1",
     "pako": "^3.0.1",
@@ -33,7 +34,9 @@
     "react-router-dom": "^7.8.1",
     "tailwindcss": "^4.1.12",
     "three": "^0.185.1",
-    "ulabel": "^0.18.2"
+    "topojson-client": "^3.1.0",
+    "ulabel": "^0.18.2",
+    "world-atlas": "^2.0.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.33.0",
@@ -41,9 +44,11 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
+    "@types/d3-geo": "^3.1.1",
     "@types/pako": "^2.0.4",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
+    "@types/topojson-client": "^3.1.5",
     "@vitejs/plugin-react": "^5.0.0",
     "eslint": "^9.33.0",
     "eslint-plugin-react-hooks": "^5.2.0",

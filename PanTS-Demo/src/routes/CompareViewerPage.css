@@ -18,9 +18,9 @@
   --vp-text-dim: rgba(255, 255, 255, 0.5);
   --vp-text-faint: rgba(255, 255, 255, 0.36);
   --vp-hover: rgba(255, 255, 255, 0.1);
-  --vp-accent: var(--accent);
-  --vp-font: "IBM Plex Sans", system-ui, sans-serif;
-  --vp-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --vp-accent: #6ea8fe;
+  --vp-font: var(--font-sans);
+  --vp-mono: var(--font-mono);
 }
 
 .cmv__bar {
@@ -135,8 +135,8 @@
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 12px;
   font-weight: 600;
-  color: var(--ink);
-  background: rgba(231, 111, 81, 0.9);
+  color: #fff;
+  background: rgba(37, 99, 235, 0.8);
   padding: 3px 8px;
   border-radius: 6px;
   pointer-events: none;
@@ -154,6 +154,9 @@
   pointer-events: none;
 }
 .cmv__viewport { width: 100%; height: 100%; }
+/* "Hover to identify" active: a distinct cursor hints the pane now reports the organ
+   under the pointer instead of just navigating — same treatment as the single viewer. */
+.cmv__viewport--hover-identify { cursor: help; }
 
 .cmv__overlay {
   position: absolute;

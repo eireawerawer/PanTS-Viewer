@@ -1,5 +1,6 @@
 import { Bounds, OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
+import { registerMeshRoot } from "../../helpers/viewer/meshCapture";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { APP_CONSTANTS } from "../../helpers/constants";
 import { cornerstoneLpsMmToThree, type Vec3 } from "../../helpers/utils";
@@ -50,6 +51,10 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
     return unsubscribe;
   }, []);
 
+  // Drop the renderer handle when this pane goes away, so a capture can never
+  // reach into a disposed WebGL context.
+  useEffect(() => () => registerMeshRoot(null), []);
+
   // Segment indices touched since the case loaded — includes edits to the STATIC
   // 32-organ catalog, not just brand-new custom classes.
   const editedSegments = useMemo(() => getEditedSegments(), [editVersion]);
@@ -84,7 +89,23 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
   return (
     <div style={{ display: "flex", width: "100%", height: "100%" }}>
       <main style={{ flex: 1, minWidth: 0 }}>
-        <Canvas camera={{ position: [0, 250, 650], fov: 45, near: 0.1, far: 5000 }}>
+        {/*
+          preserveDrawingBuffer is REQUIRED for the AI assistant's snapshots.
+          WebGL clears the drawing buffer as soon as the frame is composited, so
+          without it canvas.toDataURL() reads an already-cleared buffer and the
+          captured "3D view" is a black rectangle. data-bodymaps-3d marks the
+          canvas so the capture helper picks this one and never an unrelated
+          canvas that happens to sit in the same pane.
+        */}
+        <Canvas
+          camera={{ position: [0, 250, 650], fov: 45, near: 0.1, far: 5000 }}
+          gl={{ preserveDrawingBuffer: true, antialias: true }}
+          frameloop="always"
+          onCreated={(state) => {
+            registerMeshRoot(state);
+            state.gl.domElement.setAttribute("data-bodymaps-3d", "1");
+          }}
+        >
           <color attach="background" args={["#050505"]} />
           <ambientLight intensity={0.7} />
           <directionalLight position={[300, 500, 300]} intensity={1.2} />

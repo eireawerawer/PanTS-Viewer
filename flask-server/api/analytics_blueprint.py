@@ -6,6 +6,11 @@ Routes (registered under <BASE_PATH>/api):
   GET  /analytics/overview?from&to&... -> aggregates for the dashboard
   GET  /analytics/meta                 -> the filter values the UI offers
 
+/analytics/collect also records where the request came from — the client IP, the
+place GeoLite2 resolves it to, and the device class from the User-Agent. All
+three are read off the request here, never from the event body, and the stored
+IP is served back only through /analytics/overview, which is admin-only.
+
 **The read endpoints need two things: ANALYTICS_DASHBOARD=true, and an admin.**
 They report on every account's activity, so one lock is the deploy opting in at
 all, and the other is who is asking.
@@ -22,15 +27,14 @@ feature names, not content. It is rate-limited per IP instead — see below.
 """
 
 import os
-import threading
-import time
 from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 
 from api.auth import current_user, refuse_unless_role
+from api.rate_limit import Limiter
 from models.job import utcnow
-from services import analytics_store, role_store
+from services import analytics_store, geoip, role_store
 
 analytics_blueprint = Blueprint("analytics", __name__)
 
@@ -45,32 +49,19 @@ MAX_DAYS = 365
 # per request, that is the cheapest way there is to make the server slower for
 # everyone using it.
 #
-# Deliberately in-process and approximate. There is no Redis here, and the
-# alternative (a new dependency plus somewhere to run it) costs more than the
-# precision is worth: this is an abuse ceiling, not a quota anyone is billed
-# against. Two consequences worth knowing:
-#
-#   * gunicorn runs 2 workers, each with its own counter, so the real ceiling is
-#     about twice RATE_MAX_REQUESTS.
-#   * The key is the client IP, so an institution behind one NAT shares a
-#     bucket. The default is set high enough that this doesn't bite in practice,
-#     and going over costs a dropped batch, not a broken page — the client
-#     swallows the response either way.
+# The counter itself lives in api/rate_limit.py, shared with the password-reset
+# endpoints. Going over here costs a dropped batch, not a broken page — the
+# client swallows the response either way.
 
 RATE_WINDOW_S = 60
 DEFAULT_RATE_MAX = 120
-# Past this many tracked IPs, drop the expired ones. Bounds the dict against a
-# spray of forged X-Forwarded-For values.
-RATE_BUCKETS_MAX = 10_000
 
-_rate_lock = threading.Lock()
-_rate_buckets: dict[str, tuple[float, int]] = {}  # ip -> (window start, count)
+_limiter = Limiter(RATE_WINDOW_S)
 
 
 def rate_max() -> int:
     """Read live, like ANALYTICS_DASHBOARD: tunable without a code change, and
-    settable to 0 to turn the limit off entirely. Public because app.py warns at
-    boot when the limit is on but the proxy config can't tell callers apart."""
+    settable to 0 to turn the limit off entirely."""
     raw = os.environ.get("ANALYTICS_RATE_LIMIT_PER_MIN")
     if not raw:
         return DEFAULT_RATE_MAX
@@ -82,22 +73,7 @@ def rate_max() -> int:
 
 def _over_rate_limit(ip: str) -> bool:
     """Count this request against `ip`'s window. True if it should be refused."""
-    limit = rate_max()
-    if limit == 0:
-        return False
-
-    now = time.monotonic()
-    with _rate_lock:
-        if len(_rate_buckets) > RATE_BUCKETS_MAX:
-            for key, (started, _) in list(_rate_buckets.items()):
-                if now - started >= RATE_WINDOW_S:
-                    del _rate_buckets[key]
-
-        started, count = _rate_buckets.get(ip, (now, 0))
-        if now - started >= RATE_WINDOW_S:
-            started, count = now, 0
-        _rate_buckets[ip] = (started, count + 1)
-        return count >= limit
+    return _limiter.over(ip, rate_max())
 
 
 def _dashboard_enabled() -> bool:
@@ -123,8 +99,17 @@ def collect():
     raw_body = request.get_json(silent=True)
     body = raw_body if isinstance(raw_body, dict) else {}
     user = current_user()
+
+    # Resolved once for the whole batch rather than per event: one request comes
+    # from one address on one device, and the mmdb read (plus its cache lookup)
+    # has no business running twenty times for twenty clicks in one flush.
+    ip = request.remote_addr
     stored = analytics_store.record_events(
-        body.get("events"), user_id=user["id"] if user else None
+        body.get("events"),
+        user_id=user["id"] if user else None,
+        ip=ip,
+        geo=geoip.lookup(ip),
+        device=geoip.device_type(request.headers.get("User-Agent")),
     )
     return jsonify({"stored": stored}), 200
 
@@ -184,11 +169,19 @@ def overview():
     ):
         return jsonify({"error": "Invalid audience"}), 400
 
+    # Upper-cased and length-checked rather than validated against a country
+    # list: the stored codes come from GeoLite2, and an unknown one is an empty
+    # result, not an error worth its own message.
+    country = (request.args.get("country") or "").strip().upper() or None
+    if country and len(country) != 2:
+        return jsonify({"error": "Country must be a two-letter code"}), 400
+
     return jsonify(analytics_store.overview(
         start, end,
         plan=request.args.get("plan") or None,
         account_type=request.args.get("account_type") or None,
         audience=audience,
+        country=country,
     )), 200
 
 

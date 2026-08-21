@@ -15,11 +15,24 @@ account at the time the event lands, never taken from the request body. Two
 reasons: the client must not be able to claim a plan it isn't on, and a user who
 moves from free to pro shouldn't retroactively rewrite what their earlier
 activity is attributed to. Both are null for anonymous rows.
+
+The same goes for the location and device columns below. ``ip_address`` is the
+address the request actually arrived from, the ``country_*``/``region``/``city``
+/lat/lon fields are what GeoLite2 made of it, and ``device_type`` is read off
+the User-Agent header — all written by the server, none of them accepted from
+the event body. A client that could name its own country would make the map
+fiction.
+
+**``ip_address`` is personal data.** It is stored in full at the site owner's
+decision, it is only ever exposed through the admin-only analytics endpoints,
+and it is removed with the rest of the row when ``purge_old_events`` reaches the
+retention window. Location is derived at write time so that reading the map
+never needs the address.
 """
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from models.base import db
@@ -63,6 +76,24 @@ class AnalyticsEvent(db.Model):
     # Server-written snapshots. Null for anonymous rows.
     plan: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     account_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+
+    # ---- where it came from, all server-written ----
+    # 45 characters: the longest an IPv6 address gets, including a v4-mapped
+    # tail. Null when the request had no usable address.
+    ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    # ISO 3166-1 alpha-2. Indexed because the map groups by it.
+    country_code: Mapped[str | None] = mapped_column(String(2), nullable=True, index=True)
+    country_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # The largest subdivision GeoLite2 names — a state, province or region.
+    region: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # The city's centroid, not the visitor's position. GeoLite2 resolves to a
+    # city at best, and storing it as a point is what lets the map plot it.
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # "desktop" | "mobile" | "tablet", classified from the User-Agent. Null when
+    # the header is absent or says nothing useful.
+    device_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
 
     # When it happened in the browser, as reported by the client, clamped
     # server-side to a sane window. Batching means this can be a little older

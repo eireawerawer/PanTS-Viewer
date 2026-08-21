@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "../../contexts/authContext";
 import BarList, { type Bar } from "./analytics/BarList";
+import Donut from "./analytics/Donut";
+import TimeBars from "./analytics/TimeBars";
 import TrendLine from "./analytics/TrendLine";
+import WorldMap from "./analytics/WorldMap";
 import {
 	DashboardDisabled, DashboardForbidden, fetchMeta, fetchOverview,
 	type Audience, type Filters, type Meta, type Overview,
 } from "./analytics/api";
 import {
-	count, dateInput, duration, eventArea, eventLabel, titleCase,
+	count, dateInput, delta, duration, eventArea, eventLabel, titleCase,
 } from "./analytics/format";
 import "./analytics/dashboard.css";
 
-// Usage: what people do in BodyMaps, and how long they spend doing it.
+// Usage: who comes to BodyMaps, where from, and what they do once they're here.
 //
 // Admin-only, and the check is here as well as in the settings nav — hiding a
 // link is not access control, and this URL is guessable. The server refuses too;
@@ -19,6 +22,12 @@ import "./analytics/dashboard.css";
 //
 // Every panel is drawn from a single /analytics/overview response so they can
 // never disagree with each other mid-change.
+//
+// The order follows the shape of the question, which is also the order Wix's
+// traffic overview uses: how many people (with last period beside it), when
+// they came, where they were, what they were using — and only then the
+// feature-level detail this dashboard already had. Someone opening this page
+// wants the first four at a glance; the rest is what they came back for.
 
 const DEFAULT_FILTERS: Filters = {
 	from: dateInput(29),
@@ -27,6 +36,7 @@ const DEFAULT_FILTERS: Filters = {
 	accountType: "",
 	audience: "all",
 	allTime: false,
+	country: "",
 };
 
 const AUDIENCE_LABELS: Record<Audience, string> = {
@@ -35,9 +45,18 @@ const AUDIENCE_LABELS: Record<Audience, string> = {
 	anonymous: "Signed out",
 };
 
+const DEVICE_LABELS: Record<string, string> = {
+	desktop: "Desktop",
+	mobile: "Phone",
+	tablet: "Tablet",
+};
+
 // How many of the quietest features to name. All of them would be the whole
 // vocabulary listed twice, most of it at zero.
 const LEAST_USED_SHOWN = 8;
+// The country list beside the map. Past this the tail is one visit each, and
+// the map is already showing that they exist.
+const COUNTRIES_SHOWN = 12;
 
 const AnalyticsSettings: React.FC = () => {
 	const { user } = useAuth();
@@ -86,6 +105,29 @@ const AnalyticsSettings: React.FC = () => {
 	}
 
 	const totals = data?.totals;
+	const previous = data?.previous;
+
+	// The country currently drilled into, if it's in the response. Read from the
+	// data rather than kept in its own state, so the heading can never name a
+	// country the figures below it aren't actually about.
+	const selectedCountry = filters.country
+		? data?.by_country.find((c) => c.country_code === filters.country)
+		: undefined;
+
+	const countryBars: Bar[] = (data?.by_country ?? [])
+		.slice(0, COUNTRIES_SHOWN)
+		.map((c) => ({
+			label: c.country_name,
+			value: c.sessions,
+			note: `${count(c.people)} ${c.people === 1 ? "person" : "people"}`,
+			title: `${c.country_name}: ${count(c.sessions)} visits by ${count(c.people)} people`,
+		}));
+
+	const cityBars: Bar[] = (data?.by_city ?? []).map((c) => ({
+		label: [c.city, c.region].filter(Boolean).join(", "),
+		value: c.sessions,
+		note: `${count(c.people)} ${c.people === 1 ? "person" : "people"}`,
+	}));
 
 	// Time is reported per route, and a route is how a feature is reached — so
 	// this is "where the time goes", which is the question actually being asked.
@@ -137,15 +179,16 @@ const AnalyticsSettings: React.FC = () => {
 		note: `${count(t.people)} ${t.people === 1 ? "person" : "people"}`,
 	}));
 
-	const filtered = filters.plan || filters.accountType || filters.audience !== "all";
+	const filtered = filters.plan || filters.accountType || filters.audience !== "all"
+		|| filters.country;
 
 	return (
 		<div className="dash">
 			<div className="set-group">
 				<h2 className="set-heading">Usage</h2>
 				<p className="set-sub">
-					What people do in BodyMaps, and how long they spend doing it. Visible to
-					admins only.
+					Who comes to BodyMaps, where from, and what they do once they're here.
+					Visible to admins only.
 				</p>
 			</div>
 
@@ -223,7 +266,7 @@ const AnalyticsSettings: React.FC = () => {
 					<button
 						type="button" className="set-btn dash-reset"
 						onClick={() => setFilters((f) => ({
-							...f, plan: "", accountType: "", audience: "all",
+							...f, plan: "", accountType: "", audience: "all", country: "",
 						}))}
 					>
 						Clear filters
@@ -244,14 +287,37 @@ const AnalyticsSettings: React.FC = () => {
 
 			{data && (
 				<>
+					{/* A country picked on the map filters everything below, so it
+					    is said once here rather than repeated on every panel. */}
+					{selectedCountry && (
+						<div className="dash-scope">
+							Showing <strong>{selectedCountry.country_name}</strong> only.{" "}
+							<button
+								type="button" className="dash-retry"
+								onClick={() => set("country", "")}
+							>
+								Show the whole world
+							</button>
+						</div>
+					)}
+
 					<div className="dash-tiles">
-						<Tile label="Events" value={count(totals!.events)} />
+						<Tile
+							label="Visits"
+							value={count(totals!.sessions)}
+							change={delta(totals!.sessions, previous!.sessions)}
+						/>
 						<Tile
 							label="People"
 							value={count(totals!.people)}
 							note={`${count(totals!.signed_in_people)} signed in`}
+							change={delta(totals!.people, previous!.people)}
 						/>
-						<Tile label="Visits" value={count(totals!.sessions)} />
+						<Tile
+							label="Events"
+							value={count(totals!.events)}
+							change={delta(totals!.events, previous!.events)}
+						/>
 						<Tile label="Time in app" value={duration(totals!.time_ms)} />
 					</div>
 
@@ -259,6 +325,72 @@ const AnalyticsSettings: React.FC = () => {
 						<h2 className="set-heading">Activity</h2>
 						<p className="set-sub">Events per day across the selected range.</p>
 						<TrendLine points={data.daily} />
+					</section>
+
+					<section className="dash-panel">
+						<h2 className="set-heading">Where visitors are</h2>
+						<p className="set-sub">
+							Worked out from each visitor's IP address on our own server.
+							Accurate to a city at best, and a VPN reports wherever it exits.
+							Click a country to see only its traffic.
+						</p>
+						<div className="dash-map-row">
+							<WorldMap
+								rows={data.by_country}
+								selected={filters.country}
+								onSelect={(code) => set("country", code)}
+							/>
+							<div className="dash-map-side">
+								<h3 className="dash-subheading">
+									{selectedCountry ? `Cities in ${selectedCountry.country_name}` : "Top countries"}
+								</h3>
+								<BarList
+									bars={selectedCountry ? cityBars : countryBars}
+									empty={
+										selectedCountry
+											? "No city could be resolved for this country."
+											: "No locations recorded in this range."
+									}
+								/>
+							</div>
+						</div>
+					</section>
+
+					<div className="dash-split">
+						<section className="dash-panel">
+							<h2 className="set-heading">Device</h2>
+							<p className="set-sub">
+								Counted per visit, from the browser's user agent.
+							</p>
+							<Donut
+								slices={data.by_device.map((d) => ({
+									label: DEVICE_LABELS[d.device_type] ?? titleCase(d.device_type),
+									value: d.sessions,
+								}))}
+								empty="No device recorded in this range."
+							/>
+						</section>
+
+						<section className="dash-panel">
+							<h2 className="set-heading">New vs returning</h2>
+							<p className="set-sub">
+								"Returning" means this browser was seen here before the range
+								began — a cleared cookie starts someone over as new.
+							</p>
+							<Donut
+								slices={[
+									{ label: "Returning", value: data.new_vs_returning.returning },
+									{ label: "New", value: data.new_vs_returning.new },
+								]}
+								empty="Nobody visited in this range."
+							/>
+						</section>
+					</div>
+
+					<section className="dash-panel">
+						<h2 className="set-heading">When people visit</h2>
+						<p className="set-sub">Visits by day of the week, or by hour.</p>
+						<TimeBars weekday={data.by_weekday} hour={data.by_hour} />
 					</section>
 
 					<section className="dash-panel">
@@ -310,12 +442,25 @@ const AnalyticsSettings: React.FC = () => {
 	);
 };
 
-const Tile: React.FC<{ label: string; value: string; note?: string }> = ({
-	label, value, note,
-}) => (
+const Tile: React.FC<{
+	label: string;
+	value: string;
+	note?: string;
+	/** Against the previous period of the same length. Null when there is
+	 *  nothing honest to say — see format.delta. */
+	change?: ReturnType<typeof delta>;
+}> = ({ label, value, note, change }) => (
 	<div className="dash-tile">
 		<span className="dash-tile-label">{label}</span>
 		<span className="dash-tile-value">{value}</span>
+		{change && (
+			<span
+				className={`dash-delta${change.up ? " dash-delta--up" : " dash-delta--down"}`}
+				title="Compared with the previous period of the same length"
+			>
+				{change.up ? "▲" : "▼"} {change.label}
+			</span>
+		)}
 		{note && <span className="dash-tile-note">{note}</span>}
 	</div>
 );

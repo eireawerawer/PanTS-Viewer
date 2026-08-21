@@ -36,6 +36,10 @@ ROLES = frozenset({ROLE_ADMIN, ROLE_ANNOTATOR})
 # admin left, which nothing short of shell access can undo.
 LAST_ADMIN = "last_admin"
 SELF_DEMOTE = "self_demote"
+# The same guardrails applied to deleting an account, which is a way of removing
+# an admin too — the difference being that revoke takes a role and this takes
+# the whole account with it.
+SELF_DELETE = "self_delete"
 
 
 class RoleError(ValueError):
@@ -145,6 +149,32 @@ def revoke(user_id: str, role: str, acting_user_id: str | None = None) -> list[s
     return roles_for(user_id)
 
 
+def guard_deletion(user_id: str, acting_user_id: str | None = None) -> None:
+    """Raise RoleError if deleting this account would be a mistake we can't undo.
+
+    Deleting an account is another way of removing an admin, so it inherits
+    revoke()'s two refusals for the same reason: an install with no admin left
+    cannot be repaired through the UI.
+
+    Self-deletion is refused here rather than allowed, even though the account
+    page lets anyone delete their own: on this page the button sits in a row of
+    other people, and "delete" reading as "that person" while doing "you" is the
+    kind of misfire the confirmation dialog exists to prevent. Someone who means
+    to leave can still do it from their own privacy settings.
+    """
+    if acting_user_id is not None and acting_user_id == user_id:
+        raise RoleError(
+            SELF_DELETE,
+            "You can't delete your own account here. Use Settings › Privacy if "
+            "you mean to.",
+        )
+    if has_role(user_id, ROLE_ADMIN) and count_admins() <= 1:
+        raise RoleError(
+            LAST_ADMIN,
+            "This is the only admin account. Make someone else an admin first.",
+        )
+
+
 # ---- the admin UI's account list -------------------------------------------
 
 def search_people(query: str | None = None, limit: int = 25, offset: int = 0) -> dict:
@@ -172,7 +202,20 @@ def search_people(query: str | None = None, limit: int = 25, offset: int = 0) ->
             .order_by(User.created_at.desc())
             .limit(limit).offset(offset)
         ).scalars().all()
-        people = [u.to_public_dict() for u in users]
+        # Not in to_public_dict(): every other caller of it is showing you your
+        # own account, where a pending deletion is already the reason you can't
+        # be signed in. This page is the one place it has to be visible on
+        # someone else's row.
+        people = [
+            {
+                **u.to_public_dict(),
+                "deletion_requested_at": (
+                    u.deletion_requested_at.isoformat()
+                    if u.deletion_requested_at else None
+                ),
+            }
+            for u in users
+        ]
 
     by_user = roles_for_many([p["id"] for p in people])
     for person in people:

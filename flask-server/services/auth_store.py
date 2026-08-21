@@ -1,9 +1,9 @@
 """Account + session access, backed by the user_account / auth_session tables.
 
 The single seam for authentication: password hashing (argon2), user creation,
-credential checks, and opaque session tokens. Endpoints (api/auth_blueprint)
-and the request guard (api/auth) go through here; nothing else touches the
-auth tables directly.
+credential checks, opaque session tokens, and the one-time tokens behind
+"I forgot my password". Endpoints (api/auth_blueprint) and the request guard
+(api/auth) go through here; nothing else touches the auth tables directly.
 """
 
 import hashlib
@@ -13,17 +13,23 @@ from datetime import timedelta
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from models.auth_session import AuthSession
 from models.engine import session_scope
 from models.job import utcnow
 from models.oauth_identity import OAuthIdentity
+from models.password_reset import PasswordResetToken
 from models.user import SYSTEM_USER_EMAIL, SYSTEM_USER_ID, User
 
 _ph = PasswordHasher()
 
 SESSION_TTL_DAYS = 14
+
+# How long an emailed reset link stays redeemable. Short, because unlike a
+# session this is sitting unattended in a mailbox; long enough that finding the
+# mail in a spam folder ten minutes later still works.
+RESET_TTL_MINUTES = 60
 
 # How long a deleted account stays restorable. Until this elapses the row is
 # still there and signing in brings the account back; after it, the account is
@@ -337,6 +343,116 @@ def revoke_all_sessions(user_id: str) -> int:
         return len(live)
 
 
+# ---- password reset -------------------------------------------------------
+
+def create_password_reset(email: str) -> tuple[dict, str] | None:
+    """Start a reset for an email, returning (user, RAW token) or None.
+
+    None covers every "there is nothing to reset here" case: no such address, an
+    OAuth-only account with no password to change, the reserved system user, and
+    an account past its deletion grace. **The caller must answer the same way in
+    all of them** — the endpoint always reports success, or it becomes a way to
+    ask the server which addresses have accounts.
+
+    Any earlier unredeemed token for the account is marked used. Asking for a
+    second link is the ordinary way to say the first one went astray, and two
+    live links to the same account is one more than necessary.
+    """
+    email = _normalize_email(email)
+    if not email:
+        return None
+
+    raw = secrets.token_urlsafe(32)
+    now = utcnow()
+    with session_scope() as s:
+        user = s.execute(select(User).where(User.email == email)).scalar_one_or_none()
+        if user is None or user.is_system or user.password_hash is None:
+            return None
+        if user.deletion_requested_at is not None and _grace_expired(user):
+            return None
+
+        superseded = s.execute(
+            select(PasswordResetToken).where(
+                PasswordResetToken.user_id == user.id,
+                PasswordResetToken.used_at.is_(None),
+            )
+        ).scalars().all()
+        for token in superseded:
+            token.used_at = now
+
+        s.add(PasswordResetToken(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            token_hash=_hash_token(raw),
+            created_at=now,
+            expires_at=now + timedelta(minutes=RESET_TTL_MINUTES),
+        ))
+        return user.to_public_dict(), raw
+
+
+def reset_password(raw_token: str, new_password: str) -> dict | None:
+    """Redeem a reset token and set a new password. Returns the user, or None if
+    the token is unknown, expired, or already used.
+
+    Every other session is revoked. Someone who needed this link may well be
+    locked out *because* another browser is signed in as them; leaving those
+    sessions alive would make the reset cosmetic.
+
+    A pending deletion is cancelled, for the same reason signing in cancels one:
+    proving you control the account is the documented way to change your mind.
+    """
+    if not raw_token or not new_password:
+        return None
+
+    now = utcnow()
+    with session_scope() as s:
+        token = s.execute(
+            select(PasswordResetToken).where(
+                PasswordResetToken.token_hash == _hash_token(raw_token)
+            )
+        ).scalar_one_or_none()
+        if token is None or not token.is_redeemable(now):
+            return None
+
+        user = s.get(User, token.user_id)
+        if user is None or user.is_system:
+            return None
+        if user.deletion_requested_at is not None and _grace_expired(user):
+            return None
+
+        token.used_at = now
+        user.password_hash = _ph.hash(new_password)
+        user.deletion_requested_at = None
+        user_id = user.id
+        public = user.to_public_dict()
+
+    # Outside the transaction above: revoking opens its own session, and the
+    # password change should be committed before the sessions go, not after.
+    revoke_all_sessions(user_id)
+    return public
+
+
+def purge_expired_reset_tokens() -> int:
+    """Drop tokens that can no longer be redeemed. Returns how many went.
+
+    Housekeeping, not security — an expired or used token is already refused by
+    reset_password(). This just stops the table growing forever.
+    """
+    now = utcnow()
+    with session_scope() as s:
+        rows = s.execute(
+            select(PasswordResetToken).where(
+                or_(
+                    PasswordResetToken.expires_at < now,
+                    PasswordResetToken.used_at.is_not(None),
+                )
+            )
+        ).scalars().all()
+        for token in rows:
+            s.delete(token)
+        return len(rows)
+
+
 # ---- account deletion -----------------------------------------------------
 
 def request_deletion(user_id: str) -> dict | None:
@@ -361,6 +477,25 @@ def request_deletion(user_id: str) -> dict | None:
         "restore_by": (requested_at + timedelta(days=DELETION_GRACE_DAYS)).isoformat(),
         "grace_days": DELETION_GRACE_DAYS,
     }
+
+
+def cancel_deletion(user_id: str) -> dict | None:
+    """Undo a pending deletion, returning the restored user (or None if there is
+    no such account, or its grace window has already elapsed).
+
+    ``authenticate`` does the same thing inline when someone signs back in. This
+    is the version for the admin who is undoing it on someone else's behalf —
+    the person whose account it is can't sign in to undo it themselves, which is
+    the whole point of the state they're in.
+    """
+    with session_scope() as s:
+        user = s.get(User, user_id)
+        if user is None or user.is_system:
+            return None
+        if _grace_expired(user):
+            return None
+        user.deletion_requested_at = None
+        return user.to_public_dict()
 
 
 def list_users_pending_purge() -> list[str]:

@@ -404,7 +404,7 @@ export function MenuRow({
 				<>
 					{/* Leaf rows (no rowRef) show a check when selected; rows that
 					 *  open a further grandchild show a chevron instead. */}
-					{!rowRef && open && <IconCheck size={14} stroke={2.5} className="atb-menu-row__check" />}
+					{!rowRef && open && <IconCheck size={14} stroke={2.5} className="atb-menu-row__check" style={{ color: 'cyan' }} />}
 					{rowRef && <IconChevronRight size={13} stroke={2.25} className="atb-menu-row__chevron" />}
 				</>
 			)}

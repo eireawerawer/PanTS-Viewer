@@ -1,6 +1,6 @@
-/* Account control for both nav bars. Ink primary per BRANDING.md;
-   ink fill on the primary "Sign in" action to match the landing
-   page's active tab / primary button. */
+/* Account control for both nav bars. Monochrome to match the BodyMaps header;
+   the JHU Heritage Blue (#002D72) is reused for the primary "Sign in" action to
+   match the landing page's active tab / primary button. */
 
 .signInBtn {
 	padding: 8px 20px;
@@ -10,15 +10,15 @@
 	font-weight: 600;
 	letter-spacing: 0.06em;
 	cursor: pointer;
-	background: var(--ink);
+	background: #002d72;
 	color: #ffffff;
-	border: 1px solid var(--ink);
+	border: 1px solid #002d72;
 	transition: background 0.2s ease, transform 0.2s ease;
 	white-space: nowrap;
 }
 .signInBtn:hover {
-	background: var(--ink-2);
-	border-color: var(--ink-2);
+	background: #00399a;
+	border-color: #00399a;
 	transform: translateY(-1px);
 }
 
@@ -50,7 +50,7 @@
 	height: 26px;
 	flex-shrink: 0;
 	border-radius: 50%;
-	background: var(--ink);
+	background: #002d72;
 	color: #ffffff;
 	display: flex;
 	align-items: center;

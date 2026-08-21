@@ -10,6 +10,9 @@ dnspython==2.7.0
 Flask[async]==3.0.3
 Flask-Cors==6.0.5
 Flask-SQLAlchemy==3.1.1
+# Offline IP -> city lookups for the analytics map. Needs a GeoLite2-City.mmdb
+# on disk (scripts/download_geolite.py); absent, lookups return None.
+geoip2==4.8.0
 greenlet==3.1.1
 gunicorn==23.0.0
 idna==3.10
@@ -36,7 +39,7 @@ setuptools==75.6.0
 SimpleITK>=2.4.0
 SQLAlchemy==2.0.37
 trimesh>=4.0.0
-typing_extensions==4.13.0
+typing_extensions>=4.15.0
 tzlocal==5.2
 urllib3==2.2.3
 Werkzeug==3.0.3

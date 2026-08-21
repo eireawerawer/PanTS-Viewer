@@ -13,6 +13,7 @@ import {
   type SearchItem,
 } from "../../../helpers/search";
 import { prefetchViewer } from "../../../helpers/prefetchViewer";
+import { fetchCurated, getCachedCurated } from "../../../helpers/curatedCache";
 import {
   loadSavedCases,
   SAVED_CASES_EVENT,
@@ -25,15 +26,40 @@ import { CARD_COUNT, PER_PAGE } from "../constants";
 import type { FacetData } from "../types";
 import { track } from "../../../helpers/analytics";
 
+// Pure so it can seed both the lazy initial state (skips the first-paint skeleton
+// entirely when the curated cache is already warm) and the post-fetch ingest path.
+function toPreviewData(items: SearchItem[]) {
+  const ids: CaseId[] = [];
+  const meta: { [key: string]: PreviewType } = {};
+  for (const it of items) {
+    const id = itemToId(it);
+    if (!id) continue;
+    ids.push(id);
+    meta[id] = {
+      sex: it.sex ?? "",
+      age: Number(it.age) || 0,
+      tumor: it.tumor === 1 ? 1 : it.tumor === 0 ? 0 : null,
+    };
+  }
+  return { ids, meta };
+}
+
 export function useDashboard() {
-  const [previewIds, setPreviewIds] = useState<CaseId[]>([]);
   const navigation = useNavigate();
-  const [previewMetadata, setPreviewMetadata] = useState<{ [key: string]: PreviewType }>({});
-  const [loading, setLoading] = useState(true);
-  const [searchId, setSearchId] = useState<number>(0);
   const [searchParams, setSearchParams] = useSearchParams();
-  const [showFilters, setShowFilters] = useState(false);
   const [filters, setFilters] = useState<Filters>(() => parseFiltersFromParams(searchParams));
+  // Only the curated (no-filter) view is cacheable; a filtered/deep-linked URL
+  // always does a live fetch, same as before. `filters` was just initialized from
+  // the same searchParams, so reuse it instead of re-parsing.
+  const initialCached = countActiveFilters(filters) === 0 ? getCachedCurated() : null;
+  const initialData = initialCached ? toPreviewData(initialCached) : null;
+  const [previewIds, setPreviewIds] = useState<CaseId[]>(initialData?.ids ?? []);
+  const [previewMetadata, setPreviewMetadata] = useState<{ [key: string]: PreviewType }>(
+    initialData?.meta ?? {},
+  );
+  const [loading, setLoading] = useState(!initialData);
+  const [searchId, setSearchId] = useState<number>(0);
+  const [showFilters, setShowFilters] = useState(false);
   const [facetData, setFacetData] = useState<FacetData | null>(null);
   const [matchTotal, setMatchTotal] = useState<number | null>(null);
   const [page, setPage] = useState(1);
@@ -89,18 +115,7 @@ export function useDashboard() {
   const handleClearCompare = () => setCompareIds([]);
 
   const ingestItems = (items: SearchItem[]) => {
-    const ids: CaseId[] = [];
-    const meta: { [key: string]: PreviewType } = {};
-    for (const it of items) {
-      const id = itemToId(it);
-      if (!id) continue;
-      ids.push(id);
-      meta[id] = {
-        sex: it.sex ?? "",
-        age: Number(it.age) || 0,
-        tumor: it.tumor === 1 ? 1 : it.tumor === 0 ? 0 : null,
-      };
-    }
+    const { ids, meta } = toPreviewData(items);
     setPreviewMetadata(meta);
     setPreviewIds(ids);
     setLoading(false);
@@ -108,27 +123,20 @@ export function useDashboard() {
   };
 
   // Curated cases: fullest-body scans split half tumor / half no-tumor, interleaved.
+  // Reads the shared module-scope cache first: if the app-boot idle warm-up (or an
+  // earlier mount) already resolved it, this renders synchronously from memory with
+  // no spinner and no network round trip -- the fix for Team/Overview -> Dataset
+  // tab switches paying a full refetch every time despite the data being static.
   const loadCurated = async () => {
+    const cached = getCachedCurated();
+    if (cached) {
+      ingestItems(cached);
+      return;
+    }
     setLoading(true);
     setPreviewMetadata({});
-    const half = CARD_COUNT / 2;
     try {
-      const okJson = (r: Response) => {
-        if (!r.ok) throw new Error(`Curated load failed (${r.status})`);
-        return r.json();
-      };
-      const [tumorRes, noTumorRes] = await Promise.all([
-        fetch(`${API_BASE}/api/search?tumor=1&sort_by=quality&per_page=${half}`).then(okJson),
-        fetch(`${API_BASE}/api/search?tumor=0&sort_by=quality&per_page=${half}`).then(okJson),
-      ]);
-      const tumorItems: SearchItem[] = tumorRes.items ?? [];
-      const noTumorItems: SearchItem[] = noTumorRes.items ?? [];
-      const interleaved: SearchItem[] = [];
-      for (let i = 0; i < Math.max(tumorItems.length, noTumorItems.length); i++) {
-        if (tumorItems[i]) interleaved.push(tumorItems[i]);
-        if (noTumorItems[i]) interleaved.push(noTumorItems[i]);
-      }
-      ingestItems(interleaved);
+      ingestItems(await fetchCurated());
     } catch (e) {
       console.error(e);
       setLoading(false);
