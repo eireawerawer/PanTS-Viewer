@@ -121,17 +121,21 @@ describe("multi-file upload scheduling", () => {
     expect(switches).toHaveLength(1);
   });
 
-  it("dispatches each file to the GPU queue before the next file uploads", async () => {
+  it("dispatches each file to the GPU queue without waiting for the batch", async () => {
     await runTwoFiles();
 
     const firstSid = log[0].sid;
+    const secondSid = log.find((e) => e.sid !== firstSid)!.sid;
     const firstInfer = log.findIndex((e) => e.kind === "infer" && e.sid === firstSid);
-    const secondFileStarts = log.findIndex((e) => e.kind === "chunk" && e.sid !== firstSid);
+    const secondFinalize = log.findIndex((e) => e.kind === "finalize" && e.sid === secondSid);
 
     expect(firstInfer).toBeGreaterThan(-1);
-    // The barrier alternative would put both infers at the very end; this
-    // asserts scan 1 is already queued for the GPU before scan 2 starts uploading.
-    expect(firstInfer).toBeLessThan(secondFileStarts);
+    // Uploads now start the moment a file is picked (not on Run), so scan 2's
+    // chunks can already be on the wire by the time scan 1 dispatches - that's
+    // the point, not a bug. What still must never happen is the barrier
+    // alternative, where nothing dispatches until every file has fully
+    // uploaded: scan 1's dispatch has to land before scan 2 even *finishes*.
+    expect(firstInfer).toBeLessThan(secondFinalize);
   });
 
   it("gives each file its own session so results don't collide", async () => {
