@@ -825,12 +825,22 @@ const UploadPage: React.FC = () => {
   // either is known. "None" (view-only) is excluded on purpose: that mode's
   // whole promise is the file never leaves the browser. preStartUpload is
   // idempotent per item id, so this can safely re-run on every render where
-  // either dependency changed.
+  // any dependency changed.
+  //
+  // Mirrors handleRunEpaiInference's own plan-limit check: a selection that
+  // Run would refuse outright must not upload anything first - sending scan
+  // data for a run the plan won't allow wastes bandwidth and, on a medical
+  // imaging site, transmits patient data pointlessly. Skipping here just
+  // means nothing pre-uploads; Run's existing check still explains why and
+  // blocks the batch exactly as before.
   useEffect(() => {
     if (selectedModel === "None") return;
+    const slots = maxConcurrentScans(plan as PlanId);
+    const running = recentUploads.filter((u) => u.status === "Processing").length;
+    if (selectedItems.length + running > slots) return;
     selectedItems.forEach(preStartUpload);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedModel, selectedItems]);
+  }, [selectedModel, selectedItems, plan, recentUploads]);
 
   // Uploads the file described by `p`, finalizes, then starts inference.
   // Resumable: the file lives in IndexedDB and the chunk cursor is persisted, so
