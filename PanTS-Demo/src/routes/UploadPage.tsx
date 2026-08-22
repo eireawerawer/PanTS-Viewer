@@ -1894,7 +1894,12 @@ const UploadPage: React.FC = () => {
             <button
               className="run-btn"
               onClick={handleRunEpaiInference}
-              disabled={!selectedModel || isUploading}
+              // Not gated on isUploading: that flag now also covers background
+              // pre-uploads (started the moment a file is selected, before Run
+              // is even clickable), and Run needs to stay clickable while one
+              // is in flight - handleRunEpaiInference's own empty-selection
+              // check is what prevents a double-submit, not this.
+              disabled={!selectedModel}
             >
               {selectedModel === "None" ? "View" : "Run"}
             </button>
