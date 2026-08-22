@@ -472,6 +472,7 @@ const UploadPage: React.FC = () => {
         } else if (status === "queued" || status === "running") {
           setPhase(sid, status);
           setQueuePosition(
+            sid,
             status === "queued" && typeof data.queue_position === "number"
               ? data.queue_position
               : undefined,
