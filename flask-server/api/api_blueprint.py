@@ -2269,16 +2269,39 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
     # assumes.
     if model_name != 'ShapeKit' and input_path.lower().endswith(('.nii', '.nii.gz')):
         try:
-            img_shape = nib.load(input_path).shape
-        except Exception:
-            img_shape = None
-        if img_shape is not None and any(d > 1 for d in img_shape[3:]):
+            img = nib.load(input_path)
+            img_shape = img.shape
+        except Exception as e:
+            # Covers the other common way an upload isn't usable: not really
+            # a NIfTI file (wrong format, truncated/corrupted download, a
+            # renamed .zip or .dcm, etc). Without this, it reaches a model's
+            # own reader and fails with whatever obscure parse error that
+            # library happens to raise.
+            return jsonify({
+                "error": (
+                    "This file couldn't be read as a NIfTI (.nii/.nii.gz) scan "
+                    f"— it may be corrupted, incomplete, or not actually a CT "
+                    f"file ({type(e).__name__}). Please check the file and try "
+                    "uploading it again."
+                ),
+            }), 400
+        if any(d > 1 for d in img_shape[3:]):
             return jsonify({
                 "error": (
                     "This file isn't a single 3D CT scan — it has shape "
                     f"{list(img_shape)}, which means it has extra data beyond "
                     "just X/Y/Z (for example a multi-phase scan or a vector "
                     "field). Please upload a single 3D CT phase."
+                ),
+            }), 400
+        if any(d <= 1 for d in img_shape[:3]):
+            # A real CT is never this degenerate (a flat slice or a sliver) —
+            # this is the other end of the same "not a real scan" mistake,
+            # and would otherwise crash deep inside preprocessing instead.
+            return jsonify({
+                "error": (
+                    f"This file's volume is too small to be a CT scan (shape "
+                    f"{list(img_shape)}). Please check the file and try again."
                 ),
             }), 400
 
