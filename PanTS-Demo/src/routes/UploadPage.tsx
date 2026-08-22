@@ -254,6 +254,13 @@ const UploadPage: React.FC = () => {
   const [sessionPhases, setSessionPhases] = useState<Record<string, string>>(
     {},
   );
+  // 1-based GPU queue position while phase is "queued" (server-reported, a
+  // best-effort proxy for real dispatch order - see the backend comment on
+  // _queued_order). Only ever consulted while phase === "queued", but cleared
+  // alongside it anyway so a finished session doesn't hold onto a stale entry.
+  const [queuePositions, setQueuePositions] = useState<Record<string, number>>(
+    {},
+  );
   // Drives the "safe to close this tab" line. `active` = bytes still going up
   // (the tab is needed); `eta` = seconds until that stops, or null while
   // throughput is still being measured.
@@ -278,6 +285,16 @@ const UploadPage: React.FC = () => {
         return rest;
       }
       return prev[sid] === phase ? prev : { ...prev, [sid]: phase };
+    });
+
+  const setQueuePosition = (sid: string, pos?: number) =>
+    setQueuePositions((prev) => {
+      if (pos === undefined) {
+        if (!(sid in prev)) return prev;
+        const { [sid]: _dropped, ...rest } = prev;
+        return rest;
+      }
+      return prev[sid] === pos ? prev : { ...prev, [sid]: pos };
     });
 
   const allowedExtensions = [".nii", ".nii.gz"];
@@ -424,6 +441,7 @@ const UploadPage: React.FC = () => {
           if (notFoundCount >= 3) {
             stopPolling(sid);
             setPhase(sid);
+            setQueuePosition(sid);
             setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
             setMessage(
               "Session no longer exists on the server - marked as Failed.",
@@ -437,19 +455,27 @@ const UploadPage: React.FC = () => {
           throw new Error(data.error || data.status || "Status check failed");
 
         if (status === "completed") {
+          setQueuePosition(sid);
           finishSession(sid, model);
         } else if (status === "failed") {
           stopPolling(sid);
           setPhase(sid);
+          setQueuePosition(sid);
           setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
           setMessage(`Inference failed${data.error ? `: ${data.error}` : ""}`);
         } else if (status === "cancelled") {
           // Cancelled elsewhere (another tab, or the backend) - reflect it.
           stopPolling(sid);
           setPhase(sid);
+          setQueuePosition(sid);
           setRecentUploads(updateRecentUploadStatus(sid, "Cancelled"));
         } else if (status === "queued" || status === "running") {
           setPhase(sid, status);
+          setQueuePosition(
+            status === "queued" && typeof data.queue_position === "number"
+              ? data.queue_position
+              : undefined,
+          );
         }
       } catch (err) {
         // Network blip or proxy error while the backend restarts - the job
@@ -467,6 +493,7 @@ const UploadPage: React.FC = () => {
     track("upload_cancel_inference");
     stopPolling(sid);
     setPhase(sid);
+    setQueuePosition(sid);
 
     const controller = uploadAbortRef.current.get(sid);
     if (controller) controller.abort();
@@ -2097,10 +2124,12 @@ const UploadPage: React.FC = () => {
           // ── A single in-flight scan (not part of a batch) ──
           const ProcessingCard = ({ u }: { u: RecentUpload }) => {
             const phase = sessionPhases[u.sessionId];
+            const queuePos = queuePositions[u.sessionId];
             const phaseLabel =
               phase === "waiting" ? "Waiting to upload…" :
               phase === "uploading" ? "Uploading…" :
-              phase === "queued" ? "Queued for GPU" : "Running…";
+              phase === "queued" ? (queuePos ? `#${queuePos} in queue` : "Queued for GPU") :
+              "Running…";
             return (
               <div style={{
                 background: "#f5f5f5", border: "1px solid rgba(0, 45, 114, 0.14)", borderRadius: "12px",
