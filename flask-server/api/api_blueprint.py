@@ -2259,6 +2259,29 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
     else:
         return jsonify({"error": "No CT file provided. Send MAIN_NIFTI or INPUT_SERVER_PATH."}), 400
 
+    # Reject a file with a real (non-singleton) extra dimension here, with a
+    # plain-English reason, before it costs a plan scan or reaches a model's
+    # own reader — ePAI's, for one, just raises a bare
+    # "AssertionError: only 3d images are supported" deep inside nnU-Net.
+    # A trailing size-1 dimension is a harmless NIfTI header quirk and isn't
+    # flagged; a real one (multi-phase, multi-channel, a vector/deformation
+    # field) means this isn't a single 3D CT scan, which every model here
+    # assumes.
+    if model_name != 'ShapeKit' and input_path.lower().endswith(('.nii', '.nii.gz')):
+        try:
+            img_shape = nib.load(input_path).shape
+        except Exception:
+            img_shape = None
+        if img_shape is not None and any(d > 1 for d in img_shape[3:]):
+            return jsonify({
+                "error": (
+                    "This file isn't a single 3D CT scan — it has shape "
+                    f"{list(img_shape)}, which means it has extra data beyond "
+                    "just X/Y/Z (for example a multi-phase scan or a vector "
+                    "field). Please upload a single 3D CT phase."
+                ),
+            }), 400
+
     # Metered only once the run is definitely going ahead — every early return
     # above is a request that never reached the queue and mustn't cost a scan.
     plan_store.record_inference(user["id"], session_id, model_name)
