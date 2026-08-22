@@ -190,6 +190,14 @@ const UploadPage: React.FC = () => {
   // Monotonic count of bytes actually put on the wire; the ticker below diffs
   // it to measure throughput.
   const bytesSentRef = useRef(0);
+  // Background uploads started the moment a file is selected, keyed by the
+  // selected item's id (not its session id, since Run hasn't created one of
+  // those yet when this starts). Not IndexedDB-resumable: a reload drops
+  // selectedItems entirely (it was never persisted), so there's nothing to
+  // resume - the upload just restarts next time the file is picked.
+  const itemUploadRef = useRef<
+    Map<string, { sid: string; uploadDone: Promise<string | null> }>
+  >(new Map());
 
   const [selectedItems, setSelectedItems] = useState<SelectedItem[]>([]);
   // Which selected item's inline preview is open (null = none). One at a time.
@@ -246,6 +254,13 @@ const UploadPage: React.FC = () => {
   const [sessionPhases, setSessionPhases] = useState<Record<string, string>>(
     {},
   );
+  // 1-based GPU queue position while phase is "queued" (server-reported, a
+  // best-effort proxy for real dispatch order - see the backend comment on
+  // _queued_order). Only ever consulted while phase === "queued", but cleared
+  // alongside it anyway so a finished session doesn't hold onto a stale entry.
+  const [queuePositions, setQueuePositions] = useState<Record<string, number>>(
+    {},
+  );
   // Drives the "safe to close this tab" line. `active` = bytes still going up
   // (the tab is needed); `eta` = seconds until that stops, or null while
   // throughput is still being measured.
@@ -270,6 +285,16 @@ const UploadPage: React.FC = () => {
         return rest;
       }
       return prev[sid] === phase ? prev : { ...prev, [sid]: phase };
+    });
+
+  const setQueuePosition = (sid: string, pos?: number) =>
+    setQueuePositions((prev) => {
+      if (pos === undefined) {
+        if (!(sid in prev)) return prev;
+        const { [sid]: _dropped, ...rest } = prev;
+        return rest;
+      }
+      return prev[sid] === pos ? prev : { ...prev, [sid]: pos };
     });
 
   const allowedExtensions = [".nii", ".nii.gz"];
@@ -330,6 +355,11 @@ const UploadPage: React.FC = () => {
   }, []);
 
   const removeItem = (id: string) => {
+    const pre = itemUploadRef.current.get(id);
+    if (pre) {
+      uploadAbortRef.current.get(pre.sid)?.abort();
+      itemUploadRef.current.delete(id);
+    }
     setSelectedItems((prev) => prev.filter((item) => item.id !== id));
     setPreviewItemId((prev) => (prev === id ? null : prev));
   };
@@ -411,6 +441,7 @@ const UploadPage: React.FC = () => {
           if (notFoundCount >= 3) {
             stopPolling(sid);
             setPhase(sid);
+            setQueuePosition(sid);
             setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
             setMessage(
               "Session no longer exists on the server - marked as Failed.",
@@ -424,19 +455,27 @@ const UploadPage: React.FC = () => {
           throw new Error(data.error || data.status || "Status check failed");
 
         if (status === "completed") {
+          setQueuePosition(sid);
           finishSession(sid, model);
         } else if (status === "failed") {
           stopPolling(sid);
           setPhase(sid);
+          setQueuePosition(sid);
           setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
           setMessage(`Inference failed${data.error ? `: ${data.error}` : ""}`);
         } else if (status === "cancelled") {
           // Cancelled elsewhere (another tab, or the backend) - reflect it.
           stopPolling(sid);
           setPhase(sid);
+          setQueuePosition(sid);
           setRecentUploads(updateRecentUploadStatus(sid, "Cancelled"));
         } else if (status === "queued" || status === "running") {
           setPhase(sid, status);
+          setQueuePosition(
+            status === "queued" && typeof data.queue_position === "number"
+              ? data.queue_position
+              : undefined,
+          );
         }
       } catch (err) {
         // Network blip or proxy error while the backend restarts - the job
@@ -454,6 +493,7 @@ const UploadPage: React.FC = () => {
     track("upload_cancel_inference");
     stopPolling(sid);
     setPhase(sid);
+    setQueuePosition(sid);
 
     const controller = uploadAbortRef.current.get(sid);
     if (controller) controller.abort();
@@ -691,6 +731,143 @@ const UploadPage: React.FC = () => {
       }
     }
   };
+
+  // Uploads a single NIfTI file the moment it's selected, before Run is
+  // clicked and before a model is even chosen - just the bytes + finalize,
+  // no dispatchInference (there's no model yet to dispatch with). Reuses
+  // isUploading/uploadProgress/message, the SAME state the foreground runUpload
+  // path drives: only one upload is ever active at a time (both routes go
+  // through uploadChainRef), so there is exactly one "Upload Progress" bar
+  // for whichever file is currently on the wire, whether or not Run has been
+  // pressed yet. Returns the uploaded filename, or null on failure/abort.
+  const preUploadOnly = async (
+    sid: string,
+    file: File,
+  ): Promise<string | null> => {
+    const controller = new AbortController();
+    uploadAbortRef.current.set(sid, controller);
+    uploadRemainingRef.current.set(sid, file.size);
+    // Not resumable (no IndexedDB record for a pre-upload) - closing the tab
+    // now really does lose progress, so the unload warning should fire.
+    uploadResumableRef.current = false;
+    foregroundUploadSidRef.current = sid;
+    setIsUploading(true);
+    setUploadProgress(0);
+    setMessage(`Uploading ${file.name}...`);
+    let completedCount = 0;
+    try {
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+      const CONCURRENCY = 6;
+      let nextIndexToStart = 0;
+      const uploadOneChunk = async (i: number) => {
+        const chunk = file.slice(
+          i * CHUNK_SIZE,
+          Math.min((i + 1) * CHUNK_SIZE, file.size),
+        );
+        const formData = new FormData();
+        formData.append("session_id", sid);
+        formData.append("chunk_index", i.toString());
+        formData.append("total_chunks", totalChunks.toString());
+        formData.append("file", chunk);
+        const res = await postWithRetry(
+          `${API_BASE}/api/upload-inference-chunk`,
+          { method: "POST", body: formData, signal: controller.signal },
+        );
+        if (res.status === 413)
+          throw new Error(
+            "Upload chunk too large for server/proxy limit (HTTP 413).",
+          );
+        const data = await parseApiResponse(res);
+        if (!res.ok) throw new Error(data.error || "Chunk upload failed");
+        completedCount++;
+        bytesSentRef.current += chunk.size;
+        uploadRemainingRef.current.set(
+          sid,
+          Math.max(0, (uploadRemainingRef.current.get(sid) ?? 0) - chunk.size),
+        );
+        setUploadProgress(Math.round((completedCount / totalChunks) * 100));
+      };
+      const worker = async () => {
+        while (true) {
+          const i = nextIndexToStart++;
+          if (i >= totalChunks) return;
+          await uploadOneChunk(i);
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, totalChunks) }, worker),
+      );
+
+      const finalizeRes = await fetch(`${API_BASE}/api/finalize-upload`, {
+        method: "POST",
+        signal: controller.signal,
+        body: new URLSearchParams({
+          session_id: sid,
+          total_chunks: totalChunks.toString(),
+          output_filename: file.name,
+        }),
+      });
+      const finalizeData = await parseApiResponse(finalizeRes);
+      if (!finalizeRes.ok) throw new Error(finalizeData.error);
+      return finalizeData.uploaded_filename || file.name;
+    } catch (err) {
+      if (controller.signal.aborted) return null;
+      console.error("Background upload failed:", err);
+      return null;
+    } finally {
+      if (foregroundUploadSidRef.current === sid) {
+        foregroundUploadSidRef.current = null;
+        setIsUploading(false);
+        setMessage("");
+      }
+      uploadRemainingRef.current.delete(sid);
+      if (uploadAbortRef.current.get(sid) === controller) {
+        uploadAbortRef.current.delete(sid);
+      }
+    }
+  };
+
+  // Kick off a NIfTI item's upload in the background, keyed by item id.
+  // Idempotent - safe to call repeatedly for the same item (e.g. once from
+  // selection and again from the selectedModel-changed effect).
+  const preStartUpload = (item: SelectedItem) => {
+    if (item.kind !== "nifti") return; // DICOM still starts on Run
+    if (itemUploadRef.current.has(item.id)) return;
+    const sid = crypto.randomUUID();
+    let resolveDone!: (name: string | null) => void;
+    const uploadDone = new Promise<string | null>((res) => {
+      resolveDone = res;
+    });
+    itemUploadRef.current.set(item.id, { sid, uploadDone });
+    const file = item.file;
+    enqueueUpload(async () => {
+      resolveDone(await preUploadOnly(sid, file));
+    });
+  };
+
+  // Start uploading every selected NIfTI file as soon as there's a model to
+  // run it with, instead of waiting for Run - re-checked whenever a file is
+  // added or the model changes, so picking the file first then the model (or
+  // the other way around) both start the transfer at the earliest point
+  // either is known. "None" (view-only) is excluded on purpose: that mode's
+  // whole promise is the file never leaves the browser. preStartUpload is
+  // idempotent per item id, so this can safely re-run on every render where
+  // any dependency changed.
+  //
+  // Mirrors handleRunEpaiInference's own plan-limit check: a selection that
+  // Run would refuse outright must not upload anything first - sending scan
+  // data for a run the plan won't allow wastes bandwidth and, on a medical
+  // imaging site, transmits patient data pointlessly. Skipping here just
+  // means nothing pre-uploads; Run's existing check still explains why and
+  // blocks the batch exactly as before.
+  useEffect(() => {
+    if (selectedModel === "None") return;
+    const slots = maxConcurrentScans(plan as PlanId);
+    const running = recentUploads.filter((u) => u.status === "Processing").length;
+    if (selectedItems.length + running > slots) return;
+    selectedItems.forEach(preStartUpload);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedModel, selectedItems, plan, recentUploads]);
 
   // Uploads the file described by `p`, finalizes, then starts inference.
   // Resumable: the file lives in IndexedDB and the chunk cursor is persisted, so
@@ -996,7 +1173,11 @@ const UploadPage: React.FC = () => {
     model: string,
     batch?: { batchId: string; batchLabel: string },
   ) => {
-    const sid = crypto.randomUUID();
+    // A NIfTI file already has a background upload in flight (or finished) if
+    // one was started at selection time - reuse its session id and skip
+    // straight to waiting on it instead of re-uploading from scratch.
+    const pre = item.kind === "nifti" ? itemUploadRef.current.get(item.id) : undefined;
+    const sid = pre?.sid ?? crypto.randomUUID();
     const ts = Date.now();
     // Keep the raw filename for reference, but name the scan meaningfully by
     // default (model + date); the user can rename it later.
@@ -1017,13 +1198,30 @@ const UploadPage: React.FC = () => {
         batchLabel: batch?.batchLabel,
       }),
     );
+
+    if (pre) {
+      itemUploadRef.current.delete(item.id);
+      setPhase(sid, "uploading"); // harmless if the background upload already finished
+      (async () => {
+        const uploadedName = await pre.uploadDone;
+        if (!uploadedName) {
+          setPhase(sid);
+          setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
+          return;
+        }
+        await dispatchInference(sid, model, uploadedName, false);
+      })();
+      return;
+    }
+
     // Sits behind other files on the upload chain until its turn.
     setPhase(sid, "waiting");
 
     // The caller clears the whole selection before looping, so there's nothing to
     // consume here. A DICOM folder uploads its slices and converts server-side; a
     // NIfTI file rides the resumable path (stashed in IndexedDB so an interrupted
-    // upload can resume).
+    // upload can resume). Reached only when no background upload was already
+    // started for this item (e.g. it was selected while the model was "None").
     if (item.kind === "dicom") {
       const bytes = item.files.reduce((sum, f) => sum + f.size, 0);
       uploadRemainingRef.current.set(sid, bytes);
@@ -1733,7 +1931,12 @@ const UploadPage: React.FC = () => {
             <button
               className="run-btn"
               onClick={handleRunEpaiInference}
-              disabled={!selectedModel || isUploading}
+              // Not gated on isUploading: that flag now also covers background
+              // pre-uploads (started the moment a file is selected, before Run
+              // is even clickable), and Run needs to stay clickable while one
+              // is in flight - handleRunEpaiInference's own empty-selection
+              // check is what prevents a double-submit, not this.
+              disabled={!selectedModel}
             >
               {selectedModel === "None" ? "View" : "Run"}
             </button>
@@ -1921,10 +2124,12 @@ const UploadPage: React.FC = () => {
           // ── A single in-flight scan (not part of a batch) ──
           const ProcessingCard = ({ u }: { u: RecentUpload }) => {
             const phase = sessionPhases[u.sessionId];
+            const queuePos = queuePositions[u.sessionId];
             const phaseLabel =
               phase === "waiting" ? "Waiting to upload…" :
               phase === "uploading" ? "Uploading…" :
-              phase === "queued" ? "Queued for GPU" : "Running…";
+              phase === "queued" ? (queuePos ? `#${queuePos} in queue` : "Queued for GPU") :
+              "Running…";
             return (
               <div style={{
                 background: "#f5f5f5", border: "1px solid rgba(0, 45, 114, 0.14)", borderRadius: "12px",
@@ -1957,10 +2162,15 @@ const UploadPage: React.FC = () => {
                   </div>
                 </div>
                 {/* No real percent-complete exists for inference, so this is an
-                    indeterminate sweep — honest motion, not a fabricated number. */}
-                <div className="progress-track">
-                  <div className="progress-fill progress-fill--indeterminate" />
-                </div>
+                    indeterminate sweep — honest motion, not a fabricated number.
+                    Suppressed during waiting/uploading: the real Upload Progress
+                    bar above already covers this scan, so both at once was two
+                    progress bars for one event. */}
+                {phase !== "waiting" && phase !== "uploading" && (
+                  <div className="progress-track">
+                    <div className="progress-fill progress-fill--indeterminate" />
+                  </div>
+                )}
               </div>
             );
           };

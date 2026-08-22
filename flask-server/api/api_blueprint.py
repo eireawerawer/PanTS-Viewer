@@ -2094,6 +2094,12 @@ inference_jobs = {}  # {session_id: {status, model, error, session_path, zip_pat
 # threads and request handlers touch inference_jobs concurrently, and the
 # get/update/set below is not atomic without a lock (updates would be lost).
 _inference_jobs_lock = threading.Lock()
+# session_ids currently "queued", oldest first - powers the "#N in queue"
+# position surfaced by get_inference_status. This is a best-effort proxy for
+# real GPU-lock order (creation order, not lock-grant order), since the
+# underlying run_auto_segmentation lock makes no FIFO guarantee - close
+# enough for a UI hint, not meant as an exact promise.
+_queued_order = []
 
 
 def _job_meta_path(session_id):
@@ -2127,6 +2133,15 @@ def _set_inference_job(session_id, **kwargs):
         current.update(kwargs)
         inference_jobs[session_id] = current
         snapshot = dict(current)
+        # Track queue membership here, not per call site, so every path that
+        # moves a job in or out of "queued" (initial dispatch, GPU-slot grant,
+        # cancel, failure) keeps _queued_order correct automatically.
+        status = (snapshot.get("status") or "").lower()
+        if status == "queued":
+            if session_id not in _queued_order:
+                _queued_order.append(session_id)
+        elif session_id in _queued_order:
+            _queued_order.remove(session_id)
     _persist_inference_job(session_id, snapshot)
     # A run that has stopped no longer occupies one of the plan's concurrent
     # slots. Best-effort: a bookkeeping failure must not break the status write
@@ -2440,7 +2455,15 @@ def get_inference_status(session_id):
     job = _get_inference_job(session_id)
     if job is None:
         return jsonify({"status": "not_found", "session_id": session_id}), 404
-    return jsonify({"session_id": session_id, **job}), 200
+    resp = {"session_id": session_id, **job}
+    # 1-based: "queue_position": 1 means next in line for the GPU slot.
+    if (job.get("status") or "").lower() == "queued":
+        with _inference_jobs_lock:
+            try:
+                resp["queue_position"] = _queued_order.index(session_id) + 1
+            except ValueError:
+                pass
+    return jsonify(resp), 200
 
 
 @api_blueprint.route('/cancel-inference/<session_id>', methods=['POST'])
