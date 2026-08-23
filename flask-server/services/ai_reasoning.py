@@ -194,6 +194,21 @@ _BASE_PROMPT = (
     "patient demographics are off topic and must be left out.\n"
     "- If you genuinely cannot answer, say what is missing and ask for it. "
     "Never emit a bare list of numbers in place of an answer.\n\n"
+    "LESIONS AND TUMOURS (absolute)\n"
+    "- Whether a lesion, tumour, mass, or cancer exists in this case is "
+    "decided ONLY by a line in the Facts beginning 'SEGMENTATION FACT'. "
+    "That line is measured from the segmentation and overrides everything "
+    "else, including anything you think you see.\n"
+    "- If a SEGMENTATION FACT says no lesion is present, say so plainly and "
+    "do not hedge, speculate about one, or point at any structure as a "
+    "possible lesion.\n"
+    "- If a SEGMENTATION FACT says a lesion IS present, report its location, "
+    "volume, and size exactly as given.\n"
+    "- NEVER identify a lesion from a colour, a shape, or a mask outline. A "
+    "colour in the legend names an organ, never a tumour.\n"
+    "- If no SEGMENTATION FACT about lesions is present, say the "
+    "segmentation could not be checked and ask the user to confirm the case "
+    "is loaded. Do not guess either way.\n\n"
     "LENGTH\n"
     "- Simple question: 1-3 sentences. Clinical question or case vignette: one "
     "focused paragraph (~4-8 sentences).\n"
@@ -262,6 +277,13 @@ _VISION_PROMPT = (
     "cranial/caudal) and relative to neighboring structures.\n"
     "- Compare paired structures (the two kidneys) for size, level, and "
     "symmetry when relevant.\n\n"
+    "LESIONS IN THE IMAGES\n"
+    "- A screenshot cannot establish that a lesion exists. Only a "
+    "'SEGMENTATION FACT' line in the Facts can. Never call a coloured "
+    "region a tumour, lesion, or mass because of how it looks.\n"
+    "- When a SEGMENTATION FACT places a lesion, you may point to where it "
+    "would appear in these panes — but the finding itself comes from the "
+    "fact, not from the pixels.\n\n"
     "HONESTY ABOUT WHAT A SCREENSHOT CANNOT SHOW (required)\n"
     "- A single captured slice cannot establish contrast phase, lesion "
     "conspicuity below screen resolution, true HU values, or anything outside "
@@ -504,3 +526,123 @@ def model_offline_reply(
         "still work.\n\n"
         "Would you like me to retry the same question?"
     )
+
+
+# ---------------------------------------------------------------------------
+# Lesion questions
+#
+# These are the questions that must never be answered from the model's own
+# impression: "where is the pancreatic lesion", "does this case have a tumour".
+# Detection here decides whether the request is grounded in the labelmap at all,
+# so it is deliberately broad — a false positive costs one cheap lookup, a false
+# negative costs a fabricated finding.
+# ---------------------------------------------------------------------------
+
+_LESION_WORDS = (
+    "lesion", "tumor", "tumour", "mass", "cancer", "carcinoma", "neoplasm",
+    "malignan", "metasta", "nodule", "growth", "oncolog", "pdac", "cyst",
+)
+
+# Organs that have a lesion class in the segmentation.
+_LESION_ORGANS = ("pancreas", "liver", "kidney", "colon")
+
+
+def asks_about_lesion(message: str) -> bool:
+    """Whether the question is about a lesion, tumour, or mass."""
+    norm = normalize(message)
+    return any(word in norm for word in _LESION_WORDS)
+
+
+def lesion_focus_organs(message: str) -> list[str]:
+    """Which lesion-bearing organs the question is about.
+
+    An empty list means "no organ named" — the caller should then report every
+    lesion class, because "is there a tumour?" is a question about all of them.
+    """
+    mentioned = organs_mentioned(message)
+    return [organ for organ in mentioned if organ in _LESION_ORGANS]
+
+
+# Phrases by which a reply asserts a lesion exists, used only to catch a model
+# contradicting a measured absence.
+_PRESENCE_RE = re.compile(
+    r"\b(?:there (?:is|appears to be)|i can see|shows?|reveals?|demonstrates?|"
+    r"consistent with|identified|visible|present)\b[^.?!]{0,60}\b"
+    r"(?:lesion|tumou?r|mass|carcinoma|neoplasm|nodule)\b",
+    re.IGNORECASE,
+)
+
+_ABSENCE_RE = re.compile(
+    r"\bno\b[^.?!]{0,40}\b(?:lesion|tumou?r|mass|carcinoma|neoplasm|nodule)\b"
+    r"|\b(?:lesion|tumou?r|mass)\b[^.?!]{0,30}\b(?:absent|not present|not seen)\b",
+    re.IGNORECASE,
+)
+
+
+def reconcile_lesion_answer(
+    reply: str,
+    *,
+    absent_displays: Sequence[str],
+    present_displays: Sequence[str],
+) -> str:
+    """Stop a reply contradicting what the segmentation measured.
+
+    The prompt already forbids this, but a small local model asked "where is the
+    pancreatic lesion?" will sometimes produce one anyway — and a fabricated
+    tumour is the single worst output this product can emit. When the reply
+    contradicts a measured absence, it is replaced rather than patched: a
+    corrected sentence bolted onto invented prose still reads as a finding.
+    """
+    text = str(reply or "").strip()
+    if not text:
+        return text
+
+    plain = _strip_markdown(text)
+
+    # Absence is checked first and wins: "there is no pancreatic lesion" also
+    # matches the presence pattern ("there is ... lesion"), so reading presence
+    # first would score a correct denial as a claim and rewrite a good answer.
+    denies = bool(_ABSENCE_RE.search(plain))
+    asserts = bool(_PRESENCE_RE.search(plain)) and not denies
+
+    if absent_displays and not present_displays:
+        if asserts:
+            names = ", ".join(absent_displays)
+            return (
+                f"There is no {names} in this case. The segmentation contains no "
+                f"voxels for that class, so nothing is marked as a lesion here — "
+                "any region you are looking at is normal anatomy or a different "
+                "labelled organ.\n\n"
+                "Would you like me to isolate the pancreas in the viewer so you "
+                "can look through it slice by slice?"
+            )
+
+    if present_displays and denies:
+        names = ", ".join(present_displays)
+        return (
+            f"This case does contain a {names} in the segmentation. Let me give "
+            "you the measured details rather than the summary above.\n\n"
+            "Which would help more — its size and location, or the structures it "
+            "sits against?"
+        )
+
+    return text
+
+
+# Facts are written to be read by the model, not by the user: the lesion ones
+# carry a "SEGMENTATION FACT:" marker so the prompt can point at them, and the
+# unavailable case carries an instruction. Anything appended to a user-visible
+# reply has to be cleaned of both, or the scaffolding shows through.
+_FACT_PREFIX_RE = re.compile(r"^\s*SEGMENTATION FACT:\s*", re.IGNORECASE)
+
+_INSTRUCTION_MARKERS = ("say the", "do not state", "do not guess")
+
+
+def presentable_fact(fact: str) -> str:
+    """A fact sentence safe to show the user, or "" if it is instruction-only."""
+    text = _FACT_PREFIX_RE.sub("", str(fact or "")).strip()
+    if not text:
+        return ""
+    if any(marker in text.lower() for marker in _INSTRUCTION_MARKERS):
+        return ""
+    return text[0].upper() + text[1:]
