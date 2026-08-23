@@ -650,7 +650,8 @@ def chat_stream(
     history: list[dict[str, Any]] | None = None,
     num_ctx: int | None = None,
     timeout: float | None = None,
-    temperature: float = 0.3,
+    temperature: float = 0.2,
+    seed: int | None = 42,
 ):
     """
     Stream a conversational answer from Ollama /api/chat.
@@ -711,6 +712,11 @@ def chat_stream(
             "temperature": temperature,
             "num_ctx": window,
             "num_predict": OLLAMA_NUM_PREDICT,
+            # A fixed seed makes each model reproducible run to run. Combined
+            # with a low temperature and an identical fact block, the three
+            # models converge on the same substance and differ only in depth —
+            # which is the point: they disagreed on findings before this.
+            **({"seed": seed} if seed is not None else {}),
         },
         "think": OLLAMA_THINK,
     }

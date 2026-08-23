@@ -26,6 +26,7 @@ from services.ollama_client import (
     resolve_vision_model,
 )
 from services import ai_reasoning
+from services import lesion_grounding
 from services.segmentation_metrics import calculate_session_metrics
 from services.search_ranking import rank_quality_results, select_balanced_tumor_results
 from services.site_normalization import site_country_label, split_site_codes
@@ -3802,6 +3803,64 @@ def _ai_compute_organ_metrics_from_labels(case_id):
 _AI_METRICS_CACHE = {}
 
 
+def _ai_mask_path_for(case_id):
+    """Labelmap for a dataset case OR an uploaded session, whichever this is.
+
+    Uploaded scans are segmented by the JHU models into a session directory, so
+    lesion grounding has to work for them exactly as it does for PanTS cases.
+    """
+    identifier = str(case_id or "").strip()
+    if not identifier:
+        return None
+    if identifier.isdigit():
+        return _ai_local_mask_path(identifier)
+    try:
+        return _session_seg_path(identifier)
+    except Exception as error:
+        print("[ai lesion] session mask lookup failed:", type(error).__name__, error)
+        return None
+
+
+def _ai_lesion_context(case_id, message):
+    """Measured lesion findings for this case, ready to put in the prompt.
+
+    Returns the authoritative fact sentences plus which lesion classes are
+    present and absent, so the answer can be checked against them afterwards.
+    When the labelmap cannot be read this reports `available: False` and the
+    assistant must say the segmentation was not checked — never guess.
+    """
+    focus = ai_reasoning.lesion_focus_organs(message)
+    mask_path = _ai_mask_path_for(case_id)
+    analysis = lesion_grounding.analyze_lesions(mask_path, cache_key=str(case_id))
+
+    absent, present = [], []
+    if analysis.get("available"):
+        wanted = set(focus)
+        for entry in analysis.get("lesions", []):
+            if wanted and entry.get("organ") not in wanted:
+                continue
+            (present if entry.get("present") else absent).append(entry["display"])
+
+    facts = lesion_grounding.lesion_facts(analysis, focus)
+    if not analysis.get("available"):
+        reason = str(analysis.get("reason") or "the segmentation is unavailable")
+        facts = [
+            "SEGMENTATION FACT: the lesion classes could not be checked for this "
+            f"case ({reason}). Say the segmentation could not be verified and do "
+            "not state whether a lesion exists."
+        ]
+
+    return {
+        "facts": facts,
+        "absent": absent,
+        "present": present,
+        "available": bool(analysis.get("available")),
+        # Same information as prose, used when no model is reachable so a lesion
+        # question still gets a correct answer instead of an outage message.
+        "summary": lesion_grounding.lesion_summary(analysis, focus),
+    }
+
+
 def _ai_load_metrics(case_id, supplied_metrics):
     """
     Prefer server-computed segmentation metrics.
@@ -5388,6 +5447,24 @@ def _ai_normalize_legend(raw):
     return legend
 
 
+def _ai_reconcile_command_lesion(reply, lesion_ctx):
+    """Hold the non-streaming reply to the same measured lesion state."""
+    if not lesion_ctx or not lesion_ctx.get("available"):
+        return reply
+    corrected = ai_reasoning.reconcile_lesion_answer(
+        reply,
+        absent_displays=lesion_ctx["absent"],
+        present_displays=lesion_ctx["present"],
+    )
+    if corrected != reply:
+        return corrected
+    # The model may simply have ignored the facts; lead with what was measured.
+    summary = lesion_ctx.get("summary") or ""
+    if summary and not str(reply or "").strip():
+        return summary
+    return reply
+
+
 def _ai_command_vision_reply(*, message, images, body, case_id, selected_model):
     """Non-streaming answer for a message that carries CT screenshots.
 
@@ -5626,9 +5703,21 @@ def ai_command():
         }:
             rule_suggestion_reply = fallback.get("reply")
 
+        # Same measured lesion grounding as the streaming endpoint. Without it
+        # the fallback path could answer a tumour question differently from the
+        # primary one, which is exactly the inconsistency being fixed.
+        cmd_lesion_ctx = (
+            _ai_lesion_context(case_id, message)
+            if (case_id and ai_reasoning.asks_about_lesion(message))
+            else None
+        )
+
         prompt_payload = {
             "request_mode": question_mode,
             "user_message": message,
+            "segmentation_lesion_facts": (
+                cmd_lesion_ctx["facts"] if cmd_lesion_ctx else []
+            ),
             "current_case": {
                 "case_id": case_id or None,
                 "available_organs": available_organs,
@@ -5710,7 +5799,8 @@ def ai_command():
             )
 
         reply = ai_reasoning.ensure_followup(
-            _ai_grounded_reply(
+            _ai_reconcile_command_lesion(
+                _ai_grounded_reply(
                 message=message,
                 actions=actions,
                 metrics=metrics,
@@ -5718,6 +5808,8 @@ def ai_command():
                 metadata=metadata,
                 candidate_reply=candidate_reply,
                 question_mode=question_mode,
+                ),
+                cmd_lesion_ctx,
             ),
             message,
             has_images=False,
@@ -5940,6 +6032,14 @@ def ai_command_stream():
             fallback_actions = _ai_sanitize_actions(fallback.get("actions", []), available_organs)
             question_mode = _ai_question_mode(message, fallback_actions)
 
+            # "Where is the pancreatic lesion?" names no case, so the phrase test
+            # above scored it as a general question and skipped every lookup —
+            # leaving the model to invent a finding, differently in each model.
+            # A lesion question about an open case is ALWAYS a case question.
+            lesion_question = bool(case_id) and ai_reasoning.asks_about_lesion(message)
+            if lesion_question:
+                references_case = True
+
             # Only load organ metrics (which may download the NIfTI and compute)
             # when the question is actually about this case. General questions
             # like "what is BMI?" skip this entirely and answer immediately.
@@ -5948,7 +6048,8 @@ def ai_command_stream():
                 "isolate_organs", "focus_organ", "show_organs",
             }
             needs_metrics = bool(case_id) and (
-                references_case
+                lesion_question
+                or references_case
                 or question_mode in {"case_measurement", "case_metadata", "case_health_context"}
                 or any(a.get("type") in _organ_action_types for a in fallback_actions)
             )
@@ -5980,6 +6081,14 @@ def ai_command_stream():
             # patient's bilirubin and MRCP report came back with the open scan's
             # liver volume and the patient's age — correct numbers, and a
             # complete non-answer to what was asked.
+            # Measured lesion findings. These are authoritative and bypass the
+            # relevance gate: a question that mentions a tumour is by definition
+            # about them, and the negative ("no lesion is present") is the fact
+            # that stops a model inventing one.
+            lesion_ctx = _ai_lesion_context(case_id, message) if lesion_question else None
+            if lesion_ctx:
+                yield sse({"type": "status", "text": "Checking the segmentation for lesions"})
+
             conversation_text = " ".join(turn["content"] for turn in conversation[-4:])
             candidate_facts = _ai_case_facts(message, metrics, metadata) if references_case else []
             forced_facts = (
@@ -5994,7 +6103,7 @@ def ai_command_stream():
                 candidate_facts + required_facts,
                 message,
                 conversation_text=conversation_text,
-                always_include=forced_facts,
+                always_include=(lesion_ctx["facts"] if lesion_ctx else []) + forced_facts,
             )
             required_facts = forced_facts
 
@@ -6019,6 +6128,10 @@ def ai_command_stream():
                 bool(case_id)
                 and bool(message)
                 and not images
+                # A lesion answer is already fully determined by the facts above.
+                # Skipping the tool loop keeps all three models on the identical
+                # substance instead of each investigating its own way.
+                and not lesion_question
                 and not conversational_reply
                 and not rule_already_answered
                 and (
@@ -6248,6 +6361,9 @@ def ai_command_stream():
                     user_prompt=user_prompt,
                     images=images or None,
                     history=history,
+                    # Grounded questions get the tightest decoding, so a measured
+                    # fact is reported the same way whichever model is selected.
+                    temperature=0.1 if facts_lines else 0.2,
                 ):
                     if not text:
                         continue
@@ -6316,7 +6432,11 @@ def ai_command_stream():
                         if "." in token and any(ch.isdigit() for ch in token)
                     ]
                     if numbers and not any(num and num in final_reply for num in numbers):
-                        final_reply += "\n\n" + fact
+                        # Strip the prompt-side marker before this reaches a
+                        # reader; an instruction-only fact is dropped entirely.
+                        shown = ai_reasoning.presentable_fact(fact)
+                        if shown:
+                            final_reply += "\n\n" + shown
             except Exception as error:
                 print("[ai_command_stream fact-check]", type(error).__name__, str(error))
 
@@ -6324,6 +6444,16 @@ def ai_command_stream():
             # local models drop it exactly when it matters — right after saying
             # something could not be determined. On vision turns it is always
             # appended, because there is always a next thing worth looking at.
+            # A fabricated tumour is the worst output this product can emit, so
+            # the answer is checked against the measured lesion state and
+            # replaced if it contradicts it.
+            if lesion_ctx and lesion_ctx["available"]:
+                final_reply = ai_reasoning.reconcile_lesion_answer(
+                    final_reply,
+                    absent_displays=lesion_ctx["absent"],
+                    present_displays=lesion_ctx["present"],
+                )
+
             final_reply = ai_reasoning.ensure_followup(
                 final_reply,
                 message,
@@ -6343,17 +6473,33 @@ def ai_command_stream():
             parts = []
             if action_confirmation:
                 parts.append(action_confirmation)
+
+            # The lesion answer is measured, not generated, so it stands on its
+            # own when the model is offline. Saying it and THEN apologising for
+            # having no answer would contradict a reply that is fully correct.
+            grounded_answer = (
+                lesion_ctx["summary"]
+                if (lesion_ctx and lesion_ctx["available"] and lesion_ctx["summary"])
+                else ""
+            )
+            if grounded_answer:
+                parts.append(grounded_answer)
+                parts.append(
+                    "Would you like me to isolate that region in the viewer so "
+                    "you can look through it slice by slice?"
+                )
             if images and mask_legend and _ai_norm(message):
                 legend_reply = _ai_legend_answer(message, mask_legend)
                 if legend_reply:
                     parts.append(legend_reply)
-            parts.append(
-                ai_reasoning.model_offline_reply(
-                    has_images=bool(images),
-                    vision_model_missing=stream_error_missing_model and bool(images),
-                    configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+            if not grounded_answer:
+                parts.append(
+                    ai_reasoning.model_offline_reply(
+                        has_images=bool(images),
+                        vision_model_missing=stream_error_missing_model and bool(images),
+                        configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+                    )
                 )
-            )
             final_reply = " ".join(part for part in parts if part).strip()
 
         if not final_reply:
