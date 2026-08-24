@@ -343,3 +343,61 @@ def test_a_scattered_class_states_no_location():
     assert "104.42" in text
     assert "no single lesion location" in text.lower()
     assert "slice" not in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Case relevance: the assistant must not depend on enumerating question shapes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "what is the biggest structure in this case?",
+        "is the liver enlarged?",
+        "which organs are on slice 45?",
+        "compare the pancreas and the spleen",
+        "how many organs were segmented?",
+        "what is the smallest structure here?",
+        "does this scan show both kidneys?",
+        "what is the mean HU of the kidney?",
+        "what values do you have for this case?",
+    ],
+)
+def test_case_questions_are_recognised(question):
+    assert ai_reasoning.touches_case(question)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What is BMI?",
+        "explain hemochromatosis",
+        "what causes obstructive jaundice?",
+    ],
+)
+def test_general_questions_do_not_pull_in_the_case(question):
+    assert not ai_reasoning.touches_case(question)
+
+
+# ---------------------------------------------------------------------------
+# A parent structure segmented only in parts
+# ---------------------------------------------------------------------------
+
+def test_a_reply_that_is_only_a_question_is_detected():
+    assert ai_reasoning.is_only_a_question(
+        "What is the window preset used to display the pancreatic lesion?"
+    )
+
+
+def test_an_answer_with_a_closing_question_is_fine():
+    assert not ai_reasoning.is_only_a_question(
+        "The pancreas measures 64.93 cm3 in total. Want the slice range?"
+    )
+
+
+def test_facts_become_an_answer_when_the_model_gives_none():
+    out = ai_reasoning.answer_from_facts([
+        "SEGMENTATION FACT: the pancreas is segmented in parts, totalling **64.93 cm³**."
+    ])
+    assert "SEGMENTATION FACT" not in out
+    assert "64.93" in out
