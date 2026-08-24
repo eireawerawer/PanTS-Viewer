@@ -232,3 +232,114 @@ def test_a_clean_case_reports_no_lesion(tmp_path):
 def test_a_missing_labelmap_is_reported_as_unavailable():
     analysis = lesion_grounding.analyze_lesions("/nonexistent/mask.nii.gz")
     assert analysis["available"] is False
+
+
+# ---------------------------------------------------------------------------
+# Structure inventory and slice level (the questions that returned nothing)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "what are the segmentation values of this case and how many structures are there?",
+        "how many structures are there?",
+        "list the structures in this scan",
+        "what organs are segmented?",
+    ],
+)
+def test_inventory_questions_are_detected(question):
+    assert ai_reasoning.asks_for_inventory(question)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What is the slice level of the pancreas head?",
+        "which slice is the liver on?",
+        "where is the pancreas head?",
+    ],
+)
+def test_slice_level_questions_are_detected(question):
+    assert ai_reasoning.asks_for_slice_level(question)
+
+
+def test_a_volume_question_is_not_a_slice_question():
+    assert not ai_reasoning.asks_for_slice_level("what is the volume of the pancreas?")
+
+
+def test_structures_are_measured_from_the_labelmap(tmp_path):
+    np = pytest.importorskip("numpy")
+    nib = pytest.importorskip("nibabel")
+    pytest.importorskip("scipy")
+
+    volume = np.zeros((64, 64, 64), dtype=np.int16)
+    volume[10:30, 10:30, 10:40] = 14   # liver
+    volume[30:38, 30:38, 28:36] = 17   # pancreas
+    path = tmp_path / "structures.nii.gz"
+    nib.save(nib.Nifti1Image(volume, np.diag([1.5, 1.5, 2.0, 1.0])), str(path))
+
+    analysis = lesion_grounding.analyze_structures(str(path))
+    assert analysis["available"]
+    assert 14 in analysis["structures"] and 17 in analysis["structures"]
+    liver = analysis["structures"][14]
+    assert liver["volume_cm3"] > 0
+    assert liver["slice_range"] == [10, 39]
+    assert liver["centre_slice"] == pytest.approx(24, abs=2)
+
+
+def test_a_missing_labelmap_yields_no_structures():
+    assert lesion_grounding.analyze_structures("/nonexistent.nii.gz")["available"] is False
+
+
+# ---------------------------------------------------------------------------
+# Implausible "lesions" must not be given a precise location
+# ---------------------------------------------------------------------------
+
+def _lesion_mask(tmp_path, filler, name):
+    np = pytest.importorskip("numpy")
+    nib = pytest.importorskip("nibabel")
+    pytest.importorskip("scipy")
+    volume = np.zeros((80, 80, 90), dtype=np.int16)
+    volume[30:38, 40:48, 40:50] = 17
+    filler(volume, np)
+    path = tmp_path / name
+    nib.save(nib.Nifti1Image(volume, np.diag([1.5, 1.5, 2.0, 1.0])), str(path))
+    return str(path)
+
+
+def test_an_enormous_blob_is_flagged_as_scattered(tmp_path):
+    def fill(volume, np):
+        volume[5:75, 5:75, 5:85] = 22   # a "lesion" filling the abdomen
+    analysis = lesion_grounding.analyze_lesions(_lesion_mask(tmp_path, fill, "blob.nii.gz"))
+    entry = next(e for e in analysis["lesions"] if e["organ"] == "pancreas")
+    assert entry["present"] and entry["diffuse"]
+
+
+def test_speckled_false_positives_are_flagged(tmp_path):
+    def fill(volume, np):
+        noise = np.random.RandomState(0).rand(70, 70, 80) > 0.997
+        region = volume[5:75, 5:75, 5:85]
+        volume[5:75, 5:75, 5:85] = np.where(noise, 22, region)
+    analysis = lesion_grounding.analyze_lesions(_lesion_mask(tmp_path, fill, "speckle.nii.gz"))
+    entry = next(e for e in analysis["lesions"] if e["organ"] == "pancreas")
+    assert entry["present"] and entry["diffuse"]
+
+
+def test_a_compact_lesion_is_not_flagged(tmp_path):
+    def fill(volume, np):
+        volume[32:36, 42:46, 43:47] = 22
+    analysis = lesion_grounding.analyze_lesions(_lesion_mask(tmp_path, fill, "compact.nii.gz"))
+    entry = next(e for e in analysis["lesions"] if e["organ"] == "pancreas")
+    assert entry["present"] and not entry.get("diffuse")
+
+
+def test_a_scattered_class_states_no_location():
+    entry = {
+        "key": "pancreatic_lesion", "display": "pancreatic lesion",
+        "organ": "pancreas", "present": True, "volume_cm3": 104.42, "diffuse": True,
+    }
+    facts = lesion_grounding.lesion_facts({"available": True, "lesions": [entry]}, ["pancreas"])
+    text = " ".join(facts)
+    assert "104.42" in text
+    assert "no single lesion location" in text.lower()
+    assert "slice" not in text.lower()
