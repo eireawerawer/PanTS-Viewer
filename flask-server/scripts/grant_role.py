@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Grant or revoke a role from the command line.
 
-The escape hatch for the two cases the UI can't cover: the very first admin when
-ADMIN_EMAILS wasn't set (or the account didn't exist yet at boot), and handing
-out `annotator` before anything reads it.
+The escape hatch for the case the UI can't cover: the very first admin, when
+ADMIN_EMAILS wasn't set (or the account didn't exist yet at boot).
 
     python flask-server/scripts/grant_role.py --email you@example.com --role admin
     python flask-server/scripts/grant_role.py --email them@example.com --role admin --revoke

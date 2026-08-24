@@ -86,15 +86,6 @@ def test_an_admin_gets_the_list(client):
     assert r.get_json()["people"][0]["email"] == "admin@b.com"
 
 
-def test_the_annotator_role_does_not_open_this(client):
-    """It gates nothing today, and admin is emphatically not one of the things
-    it will gate when it does."""
-    from services import role_store
-    user_id = sign_up(client, "editor@b.com")
-    role_store.grant(user_id, role_store.ROLE_ANNOTATOR)
-    assert client.get("/api/admin/people").status_code == 403
-
-
 def test_writes_are_gated_too(client):
     """Not just the read — a 403 on the list and an open POST is the worst case."""
     target = sign_up(client, "nobody@b.com")
@@ -110,7 +101,7 @@ def test_the_list_carries_roles_and_the_vocabulary(client):
     make_admin(client)
     body = client.get("/api/admin/people").get_json()
     assert body["people"][0]["roles"] == ["admin"]
-    assert body["roles"] == ["admin", "annotator"]
+    assert body["roles"] == ["admin"]
 
 
 def test_search_narrows_the_list(client):
@@ -136,11 +127,11 @@ def test_grant_then_revoke_round_trip(client):
     target = sign_up(client, "them@b.com")
     make_admin(client)
 
-    granted = client.post(f"/api/admin/people/{target}/roles", json={"role": "annotator"})
+    granted = client.post(f"/api/admin/people/{target}/roles", json={"role": "admin"})
     assert granted.status_code == 200
-    assert granted.get_json()["roles"] == ["annotator"]
+    assert granted.get_json()["roles"] == ["admin"]
 
-    revoked = client.delete(f"/api/admin/people/{target}/roles/annotator")
+    revoked = client.delete(f"/api/admin/people/{target}/roles/admin")
     assert revoked.status_code == 200
     assert revoked.get_json()["roles"] == []
 

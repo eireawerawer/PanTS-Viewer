@@ -54,16 +54,9 @@ def test_grant_then_read_back(store, make_user):
 
 def test_granting_twice_is_a_no_op(store, make_user):
     user_id = make_user("a@b.com")
-    store.grant(user_id, store.ROLE_ANNOTATOR)
-    assert store.grant(user_id, store.ROLE_ANNOTATOR) == ["annotator"]
-    assert store.count_admins() == 0
-
-
-def test_both_roles_at_once(store, make_user):
-    user_id = make_user("a@b.com")
     store.grant(user_id, store.ROLE_ADMIN)
-    store.grant(user_id, store.ROLE_ANNOTATOR)
-    assert store.roles_for(user_id) == ["admin", "annotator"]
+    assert store.grant(user_id, store.ROLE_ADMIN) == ["admin"]
+    assert store.count_admins() == 1
 
 
 def test_an_unknown_role_is_refused(store, make_user):
@@ -87,7 +80,7 @@ def test_the_system_account_cannot_hold_a_role(store):
 def test_granted_by_is_recorded(store, make_user):
     granter = make_user("boss@b.com")
     subject = make_user("new@b.com")
-    store.grant(subject, store.ROLE_ANNOTATOR, granted_by=granter)
+    store.grant(subject, store.ROLE_ADMIN, granted_by=granter)
 
     from models.engine import session_scope
     from models.user_role import UserRole
@@ -108,7 +101,7 @@ def test_revoke_removes_it(store, make_user):
 
 def test_revoking_something_not_held_is_a_no_op(store, make_user):
     user_id = make_user("a@b.com")
-    assert store.revoke(user_id, store.ROLE_ANNOTATOR) == []
+    assert store.revoke(user_id, store.ROLE_ADMIN) == []
 
 
 def test_the_last_admin_cannot_be_removed(store, make_user):
@@ -129,13 +122,6 @@ def test_you_cannot_remove_your_own_admin(store, make_user):
         store.revoke(a, store.ROLE_ADMIN, acting_user_id=a)
     assert e.value.reason == store.SELF_DEMOTE
     assert store.roles_for(a) == ["admin"]
-
-
-def test_the_guards_only_apply_to_admin(store, make_user):
-    """Annotator has no lock-out to protect against — you can drop your own."""
-    user_id = make_user("a@b.com")
-    store.grant(user_id, store.ROLE_ANNOTATOR)
-    assert store.revoke(user_id, store.ROLE_ANNOTATOR, acting_user_id=user_id) == []
 
 
 # ---- the account list -------------------------------------------------------

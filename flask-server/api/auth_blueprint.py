@@ -243,10 +243,20 @@ def set_my_plan():
 
     No payment step: pricing hasn't been set, so this is a column write. The
     limits attached to the plan are enforced for real from the next request on.
+
+    The paid plans aren't open yet, so everyone but an admin is held on Free.
+    Refused here and not only greyed out in the picker — a disabled button stops
+    a click, not a POST.
     """
     plan = (_json().get("plan") or "").strip()
+    user_id = current_user()["id"]
+    # Only the real, closed plans are refused here; an unknown id falls through
+    # to set_plan below and comes back a 400, which is what it is.
+    locked = plan in plan_store.PLAN_IDS and plan != plan_store.DEFAULT_PLAN
+    if locked and not role_store.has_role(user_id, role_store.ROLE_ADMIN):
+        return jsonify({"error": "That plan isn't available yet."}), 403
     try:
-        user = plan_store.set_plan(current_user()["id"], plan)
+        user = plan_store.set_plan(user_id, plan)
     except ValueError:
         return jsonify({"error": "Unknown plan"}), 400
     if user is None:

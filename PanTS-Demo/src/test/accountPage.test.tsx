@@ -22,6 +22,7 @@ const USER = {
 	name: null as string | null,
 	plan: "free",
 	account_type: null as string | null,
+	roles: [] as string[],
 };
 
 const USAGE = {
@@ -48,6 +49,7 @@ beforeEach(() => {
 	USER.name = null;
 	USER.plan = "free";
 	USER.account_type = null;
+	USER.roles = [];
 	URL.createObjectURL = vi.fn(() => "blob:stub");
 	URL.revokeObjectURL = vi.fn();
 
@@ -240,7 +242,18 @@ describe("plan", () => {
 		expect(screen.getByRole("button", { name: "Current plan" })).toBeDisabled();
 	});
 
+	it("offers the paid plans as coming soon, and won't send anything", async () => {
+		const user = userEvent.setup();
+		renderAt("/account/plan");
+
+		const cta = await screen.findByRole("button", { name: "Coming soon" });
+		expect(cta).toBeDisabled();
+		await user.click(cta);
+		expect(lastCall("POST", "/api/me/plan")).toBeUndefined();
+	});
+
 	it("upgrades through the server, not local state", async () => {
+		USER.roles = ["admin"]; // the paid plans are closed to everyone else
 		const user = userEvent.setup();
 		renderAt("/account/plan");
 

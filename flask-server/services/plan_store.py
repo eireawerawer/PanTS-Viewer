@@ -12,6 +12,11 @@ in step; a drifted frontend is a cosmetic bug, a drifted backend is a real one.
 
 ``None`` as a limit means unlimited.
 
+Admins are outside the table: they get ``UNLIMITED`` whatever plan their account
+is on, because the people running the site have to be able to exercise every
+part of it. ``limits_for_user`` is where that happens, and every check goes
+through it.
+
 Nothing is charged. Upgrading is a plain column write (``set_plan``) with no
 payment step, because pricing hasn't been set — but the limits on the plan you
 are on are applied for real.
@@ -26,6 +31,7 @@ from models.engine import session_scope
 from models.job import utcnow
 from models.usage_event import KIND_AI_MESSAGE, KIND_INFERENCE, UsageEvent
 from models.user import User
+from services import role_store
 
 # Quotas are a rolling window rather than a calendar day: "3 a day" that resets
 # at a fixed hour hands out 6 runs to anyone who waits until 23:59.
@@ -87,9 +93,39 @@ PLAN_IDS = tuple(PLAN_LIMITS)
 POSTPROCESSING_MODELS = frozenset({"ShapeKit"})
 
 
+# What an admin gets. Spelled out rather than aliased to the enterprise row: an
+# admin's access shouldn't quietly change the day someone edits a plan's limits.
+UNLIMITED: dict = {
+    "daily_scans": None,
+    "concurrent_scans": None,
+    "models": None,
+    "postprocessing": True,
+    "daily_ai_messages": None,
+    "create_reports": True,
+    "retention_days": None,
+    "priority_queue": True,
+}
+
+
 def limits_for(plan: str | None) -> dict:
     """The limit dict for a plan id, falling back to free for anything unknown."""
     return PLAN_LIMITS.get(plan or DEFAULT_PLAN, PLAN_LIMITS[DEFAULT_PLAN])
+
+
+def limits_for_user(user_id: str) -> tuple[str, dict]:
+    """The plan an account is on, and the limits actually applied to it.
+
+    The two come apart for admins, who bypass their plan's limits entirely. The
+    plan id is still the real stored one — it is what the UI names on the
+    settings page, and reporting an admin as "Enterprise" because they happen to
+    hold the role would be a lie about their account.
+
+    Mirrored in the frontend by helpers/accountProfile.ts (``gatingPlan``).
+    """
+    plan = get_plan(user_id)
+    if role_store.has_role(user_id, role_store.ROLE_ADMIN):
+        return plan, UNLIMITED
+    return plan, limits_for(plan)
 
 
 # ---- plan ------------------------------------------------------------------
@@ -160,8 +196,7 @@ def _resets_at(s, user_id: str, kind: str) -> str | None:
 # what it needs to write a sentence without hardcoding the numbers.
 
 def check_inference(user_id: str, model: str) -> dict | None:
-    plan = get_plan(user_id)
-    limits = limits_for(plan)
+    plan, limits = limits_for_user(user_id)
     postprocessing = model in POSTPROCESSING_MODELS
 
     if postprocessing:
@@ -223,8 +258,8 @@ def check_assistant(user_id: str | None) -> dict | None:
 
 
 def check_ai_message(user_id: str) -> dict | None:
-    plan = get_plan(user_id)
-    daily = limits_for(plan)["daily_ai_messages"]
+    plan, limits = limits_for_user(user_id)
+    daily = limits["daily_ai_messages"]
     if daily is None:
         return None
     with session_scope() as s:
@@ -289,8 +324,7 @@ def record_ai_message(user_id: str) -> None:
 def usage_summary(user_id: str) -> dict:
     """What the settings page shows: plan, its limits, and what's been used of
     the metered ones in the current window."""
-    plan = get_plan(user_id)
-    limits = limits_for(plan)
+    plan, limits = limits_for_user(user_id)
     with session_scope() as s:
         return {
             "plan": plan,

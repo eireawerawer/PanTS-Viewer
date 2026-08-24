@@ -11,10 +11,9 @@ import "./analytics/dashboard.css";
 // Admin-only, checked here as well as on the server — the settings nav hides the
 // link for everyone else, but a hidden link is not access control.
 //
-// The two roles do very different things and the page says so, because
-// "annotator" currently grants nothing: it marks who *will* be able to edit
-// segmentation masks once that exists. Promising access this page can't yet
-// deliver is worse than saying it plainly.
+// Admin is the only role there is. The vocabulary comes from the server
+// (body.roles) rather than a list here, so the menu follows whatever the server
+// is actually willing to grant.
 //
 // Every row's actions sit behind one Edit button, and every action behind a
 // confirmation. The toggles this replaced were a single click from making a
@@ -79,30 +78,18 @@ const explain = (person: Person, action: Action): { title: string; body: string 
 			body: "The account becomes usable again and they can sign in as before.",
 		};
 	}
-	if (action.role === "admin") {
-		return action.held
-			? {
-				title: `Remove admin from ${person.email}?`,
-				body: "They'll lose the usage dashboard and this page, and can no "
-					+ "longer grant or remove roles.",
-			}
-			: {
-				title: `Make ${person.email} an admin?`,
-				body: "Admins can see every account's email address and usage data, "
-					+ "and can grant or remove roles — including yours. Only do this "
-					+ "for someone you'd trust with the whole site.",
-			};
-	}
 	return action.held
 		? {
-			title: `Remove annotator from ${person.email}?`,
-			body: "Nothing currently reads this role, so nothing changes today.",
+			title: `Remove admin from ${person.email}?`,
+			body: "They'll lose the usage dashboard and this page, can no longer "
+				+ "grant or remove roles, and go back to their plan's limits.",
 		}
 		: {
-			title: `Make ${person.email} an annotator?`,
-			body: "This marks them as someone who will be able to edit segmentation "
-				+ "masks. Mask editing isn't built yet, so the role grants no access "
-				+ "today — it's a note for when it does.",
+			title: `Make ${person.email} an admin?`,
+			body: "Admins can see every account's email address and usage data, can "
+				+ "grant or remove roles — including yours — and are not held to any "
+				+ "plan limit. Only do this for someone you'd trust with the whole "
+				+ "site.",
 		};
 };
 
@@ -223,9 +210,8 @@ const PeopleSettings: React.FC = () => {
 			<div className="set-group">
 				<h2 className="set-heading">People</h2>
 				<p className="set-sub">
-					Every account, and what it can do. Admins see usage and manage roles.
-					Annotators will be able to edit and create segmentation masks — the role
-					can be granted now, but nothing reads it yet.
+					Every account, and what it can do. Admins see usage, manage roles, and
+					are not held to any plan limit.
 				</p>
 
 				<input

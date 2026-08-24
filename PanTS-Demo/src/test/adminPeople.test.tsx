@@ -61,7 +61,7 @@ beforeEach(() => {
 		if (u.includes("/api/auth/me")) return json({ user: { ...ME } });
 		if (u.includes("/api/auth/oauth/providers")) return json({ google: true, github: true });
 		if (u.includes("/api/admin/people") && method === "GET") {
-			return json({ people: PEOPLE, roles: ["admin", "annotator"], total: 1 });
+			return json({ people: PEOPLE, roles: ["admin"], total: 1 });
 		}
 		if (u.includes("/roles")) return json({ user_id: "u2", roles: ["admin"] });
 		if (u.includes("/restore")) return json({ user_id: "u2", deletion_requested_at: null });

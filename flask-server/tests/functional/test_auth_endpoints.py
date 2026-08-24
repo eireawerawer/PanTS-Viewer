@@ -180,7 +180,28 @@ def test_plan_and_usage_require_auth(client):
     assert client.post("/api/me/plan", json={"plan": "pro"}).status_code == 401
 
 
+def _register_admin(client, email="p@q.com"):
+    """Register, stay signed in, and hold admin. The paid plans are closed to
+    everyone else, so this is the only account that can change plan."""
+    from services import role_store
+    r = client.post("/api/auth/register", json={"email": email, "password": "password1"})
+    user_id = r.get_json()["user"]["id"]
+    role_store.grant(user_id, role_store.ROLE_ADMIN)
+    return user_id
+
+
 def test_changing_plan_changes_the_reported_limits(client):
+    _register_admin(client)
+
+    r = client.post("/api/me/plan", json={"plan": "pro"})
+    assert r.status_code == 200
+    assert r.get_json()["user"]["plan"] == "pro"
+    assert client.get("/api/auth/me").get_json()["user"]["plan"] == "pro"
+
+
+def test_an_ordinary_account_is_held_on_free(client):
+    """The paid plans aren't open yet. The picker greys them out; this is the
+    half that matters, because a disabled button only stops a click."""
     client.post("/api/auth/register", json={"email": "p@q.com", "password": "password1"})
 
     before = client.get("/api/me/usage").get_json()
@@ -188,17 +209,24 @@ def test_changing_plan_changes_the_reported_limits(client):
     assert before["limits"]["daily_scans"] == 3
     assert before["limits"]["models"] == ["LesionSegmenter"]
 
-    r = client.post("/api/me/plan", json={"plan": "pro"})
-    assert r.status_code == 200
-    assert r.get_json()["user"]["plan"] == "pro"
+    for plan in ("pro", "team", "enterprise"):
+        assert client.post("/api/me/plan", json={"plan": plan}).status_code == 403
 
-    after = client.get("/api/me/usage").get_json()
-    assert after["plan"] == "pro"
-    assert after["limits"]["models"] is None  # every model
-    assert client.get("/api/auth/me").get_json()["user"]["plan"] == "pro"
+    # Still free, and still on free's limits.
+    assert client.get("/api/me/usage").get_json()["plan"] == "free"
+    assert client.post("/api/me/plan", json={"plan": "free"}).status_code == 200
+
+
+def test_an_admin_reports_unlimited_whatever_plan_they_are_on(client):
+    """Admins bypass the limits without their account changing plan."""
+    _register_admin(client)
+    usage = client.get("/api/me/usage").get_json()
+    assert usage["plan"] == "free"
+    assert usage["limits"]["daily_scans"] is None
+    assert usage["limits"]["models"] is None
 
 
 def test_unknown_plan_is_rejected(client):
-    client.post("/api/auth/register", json={"email": "p@q.com", "password": "password1"})
+    _register_admin(client)
     assert client.post("/api/me/plan", json={"plan": "platinum"}).status_code == 400
     assert client.post("/api/me/plan", json={}).status_code == 400
