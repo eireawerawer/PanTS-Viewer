@@ -15,7 +15,7 @@ def test_dataset_volume_uses_only_approved_nginx_internal_path(tmp_path, monkeyp
     monkeypatch.setenv("BODYMAPS_ACCEL_REDIRECT_ENABLED", "true")
 
     app = Flask(__name__)
-    with app.app_context():
+    with app.test_request_context("/"):
         response = api_routes._serve_dataset_volume(str(volume))
 
     assert response.status_code == 200
@@ -33,7 +33,7 @@ def test_dataset_volume_never_redirects_an_unmapped_path(tmp_path, monkeypatch):
     monkeypatch.setenv("BODYMAPS_ACCEL_REDIRECT_ENABLED", "true")
 
     app = Flask(__name__)
-    with app.app_context():
+    with app.test_request_context("/"):
         response = api_routes._serve_dataset_volume(str(volume))
 
     assert "X-Accel-Redirect" not in response.headers
