@@ -52,7 +52,7 @@ import OrganCheckbox from "../components/OrganCheckbox";
 import PercentileBar from "../components/PercentileBar";
 import SessionHUD from "../components/ReadingSession/SessionHUD";
 import SessionSummary from "../components/ReadingSession/SessionSummary";
-import ReportScreen from "../components/ReportScreen/ReportScreen";
+import ReportScreen, { prefetchReportData } from "../components/ReportScreen/ReportScreen";
 import SliceJumpInput from "../components/SliceJumpInput";
 import { SoloChallengeDock, SoloChallengeHeader } from "../education/SoloChallengeChrome";
 import { QuizPracticeDock, QuizPracticeHeader } from "../education/QuizPracticeChrome";
@@ -479,10 +479,9 @@ function CloseLoopHint({ nearClose, anchor }: { nearClose: boolean; anchor: [num
 const INCLUDE_3D_PANE_IN_SNAPSHOTS: boolean = false;
 
 // A stalled volume request used to leave the full viewer on a black "Preparing
-// case" screen forever. Two minutes is long enough for a legitimate slow link,
-// while still giving the reader a clear recovery path when a proxy resets or
-// abandons the request.
-const VIEWER_LOAD_TIMEOUT_MS = 120_000;
+// case" screen forever. Give a genuinely slow connection five full minutes
+// before exposing recovery controls; only an abandoned request should retry.
+const VIEWER_LOAD_TIMEOUT_MS = 300_000;
 
 // Cornerstone's NIfTI loader starts a second, full-volume request after it has
 // read the header. That later request does not accept the viewer AbortSignal,
@@ -825,6 +824,36 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		setAcceptedViewerVolumeId(null);
 		setLoading(true);
 	}, [caseId, liveRoomMaskUrl, quizPracticeMaskUrl, soloChallengeMaskUrl]);
+	// Do not make the report request part of the critical imaging path. Once the
+	// CT and viewer are visible, prepare the compact report payload while the
+	// browser is idle. The shared helper de-duplicates the eventual Report button
+	// request, and the backend already caches completed reports per case.
+	useEffect(() => {
+		if (
+			!viewerReady ||
+			!pantsCase ||
+			isLocal ||
+			isCvCase ||
+			isLiveRoom ||
+			isSoloChallenge ||
+			isQuizPractice
+		) {
+			return;
+		}
+
+		const prepare = () => { void prefetchReportData(String(pantsCase)); };
+		const idleWindow = window as Window & {
+			requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+			cancelIdleCallback?: (handle: number) => void;
+		};
+		if (idleWindow.requestIdleCallback) {
+			const handle = idleWindow.requestIdleCallback(prepare, { timeout: 10_000 });
+			return () => idleWindow.cancelIdleCallback?.(handle);
+		}
+
+		const handle = window.setTimeout(prepare, 2_000);
+		return () => window.clearTimeout(handle);
+	}, [viewerReady, pantsCase, isLocal, isCvCase, isLiveRoom, isSoloChallenge, isQuizPractice]);
 	const [crosshairMm, setCrosshairMm] = useState<[number, number, number] | null>(null);
 	const [labelColorMap, setLabelColorMap] = useState<{ [key: number]: Color }>(
 		segmentation_category_colors
@@ -2431,7 +2460,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			console.error(error);
 			setDicomError(
 				loadTimedOut
-					? "The scan connection took too long to start. Please retry this case."
+					? "This scan has not finished after five minutes. You can retry this case."
 					: error instanceof Error && error.message
 						? error.message
 						: fallback
