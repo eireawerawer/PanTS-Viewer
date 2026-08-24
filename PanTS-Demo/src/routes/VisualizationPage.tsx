@@ -482,6 +482,33 @@ const INCLUDE_3D_PANE_IN_SNAPSHOTS: boolean = false;
 // case" screen forever. Give a genuinely slow connection five full minutes
 // before exposing recovery controls; only an abandoned request should retry.
 const VIEWER_LOAD_TIMEOUT_MS = 300_000;
+const VIEWER_RETRY_BASE_DELAY_MS = 2_000;
+const VIEWER_RETRY_MAX_DELAY_MS = 30_000;
+
+function isRetryableViewerLoadError(error: unknown): boolean {
+	if (error instanceof DOMException && error.name === "AbortError") return false;
+	if (error instanceof TypeError) return true;
+	const message = error instanceof Error ? error.message : String(error ?? "");
+	return /network|fetch|connection|timeout|timed out|err_|unexpected end|status (408|429|5\d\d)/i.test(message);
+}
+
+function waitForViewerRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal.aborted) {
+			reject(new DOMException("Viewer load was aborted", "AbortError"));
+			return;
+		}
+		const onAbort = () => {
+			window.clearTimeout(timer);
+			reject(new DOMException("Viewer load was aborted", "AbortError"));
+		};
+		const timer = window.setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		}, delayMs);
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+}
 
 // Cornerstone's NIfTI loader starts a second, full-volume request after it has
 // read the header. That later request does not accept the viewer AbortSignal,
@@ -2594,24 +2621,56 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			}
 
 			try {
+				const loadDeadlineAt = Date.now() + VIEWER_LOAD_TIMEOUT_MS;
 				startLoadDeadline();
-				const result = await awaitViewerLoadOrAbort(
-					renderVisualization(
-						axial_ref.current,
-						sagittal_ref.current,
-						coronal_ref.current,
-						cmap,
-						ctUrl,
-						segUrl ?? undefined,
-						setLoading,
-						{ resourceKey: ctUrl, signal: controller.signal }
-					),
-					controller.signal,
-					(result) => result.dispose()
-				);
+				let attempt = 0;
+				while (!cancelled) {
+					try {
+						const result = await awaitViewerLoadOrAbort(
+							renderVisualization(
+								axial_ref.current,
+								sagittal_ref.current,
+								coronal_ref.current,
+								cmap,
+								ctUrl,
+								segUrl ?? undefined,
+								setLoading,
+								{ resourceKey: ctUrl, signal: controller.signal }
+							),
+							controller.signal,
+							(result) => result.dispose()
+						);
 
-				clearLoadDeadline();
-				acceptLoadedViewer(result);
+						clearLoadDeadline();
+						acceptLoadedViewer(result);
+						break;
+					} catch (e) {
+						const remainingMs = loadDeadlineAt - Date.now();
+						if (
+							controller.signal.aborted ||
+							!isRetryableViewerLoadError(e) ||
+							remainingMs <= 0
+						) {
+							clearLoadDeadline();
+							reportLoadError(e, "Failed to load the viewer.");
+							break;
+						}
+
+						const retryDelay = Math.min(
+							VIEWER_RETRY_MAX_DELAY_MS,
+							VIEWER_RETRY_BASE_DELAY_MS * 2 ** attempt,
+							remainingMs
+						);
+						attempt += 1;
+						try {
+							await waitForViewerRetry(retryDelay, controller.signal);
+						} catch (retryError) {
+							clearLoadDeadline();
+							reportLoadError(retryError, "Failed to load the viewer.");
+							break;
+						}
+					}
+				}
 			} catch (e) {
 				clearLoadDeadline();
 				reportLoadError(e, "Failed to load the viewer.");
