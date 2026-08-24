@@ -35,6 +35,46 @@ type Lang = 'patient' | 'clinical';
 type Step = number;
 
 export const cache: { [key: string]: ReportData } = {};
+const reportDataRequests = new Map<string, Promise<ReportData | null>>();
+
+/**
+ * Starts (or joins) the one report-data request for a case.  The viewer calls
+ * this only after its CT is visible, so report preparation never competes with
+ * the volume download.  Keeping the promise here also prevents a report-button
+ * click from starting a duplicate request while the warm-up is still running.
+ */
+export function prefetchReportData(id: string): Promise<ReportData | null> {
+  const cached = cache[id];
+  if (cached) return Promise.resolve(cached);
+
+  const inFlight = reportDataRequests.get(id);
+  if (inFlight) return inFlight;
+
+  const request = fetch(`${APP_CONSTANTS.API_ORIGIN}/api/get-report-data/${encodeURIComponent(id)}`)
+    .then(async (response) => {
+      if (!response.ok) return null;
+      const payload: unknown = await response.json();
+      if (
+        !payload ||
+        typeof payload !== 'object' ||
+        'error' in payload ||
+        !('organ_volumes' in payload)
+      ) {
+        return null;
+      }
+
+      const report = payload as ReportData;
+      cache[id] = report;
+      return report;
+    })
+    // Report preparation is optional. The Report button remains usable and can
+    // request the data again if a background request fails.
+    .catch(() => null)
+    .finally(() => reportDataRequests.delete(id));
+
+  reportDataRequests.set(id, request);
+  return request;
+}
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
@@ -585,17 +625,17 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
   const startRef = useRef(Date.now());
 
   useEffect(() => {
-    if (cache[id]) { setData(cache[id]); setLoading(false); return; }
-    fetch(`${APP_CONSTANTS.API_ORIGIN}/api/get-report-data/${id}`)
-      .then(r => r.json())
-      .then(j => {
-        if (j.error) { setLoading(false); return; }
-        cache[id] = j;
-        setData(j);
-        setLoading(false);
+    let active = true;
+    setLoading(true);
+    void prefetchReportData(id).then((report) => {
+      if (!active) return;
+      if (report) {
+        setData(report);
         startRef.current = Date.now();
-      })
-      .catch(() => setLoading(false));
+      }
+      setLoading(false);
+    });
+    return () => { active = false; };
   }, [id]);
 
   // Reset any previously-minted link when the case changes, so a stale
