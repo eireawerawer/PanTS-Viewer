@@ -3790,10 +3790,14 @@ def _ai_compute_organ_metrics_from_labels(case_id):
     mesh-generation label ids (1-indexed, liver = 14), which match
     combined_labels.nii.gz. Returns {"organ_metrics": [...]} or None.
     """
-    if not str(case_id).isdigit() or not MESH_LABELS:
+    if not MESH_LABELS:
         return None
 
-    mask_path = _ai_local_mask_path(case_id)
+    # Uploaded scans reach this too. calculate_session_metrics is a stub that
+    # always reports "unavailable", so before this an upload could never answer
+    # "what is the volume of the pancreas in this scan?" — even though its
+    # labelmap sits on disk and lesion grounding reads it without trouble.
+    mask_path = _ai_mask_path_for(case_id)
     if not mask_path:
         return None
 
@@ -3861,6 +3865,71 @@ def _ai_mask_path_for(case_id):
         return None
 
 
+def _ai_structure_facts(case_id, message):
+    """Exact inventory and slice-level answers, straight from the labelmap.
+
+    Covers the two questions that previously returned nothing: what the
+    segmentation contains, and where a named structure sits along the scan.
+    """
+    wants_inventory = ai_reasoning.asks_for_inventory(message)
+    wants_slice = ai_reasoning.asks_for_slice_level(message)
+    if not (wants_inventory or wants_slice):
+        return []
+
+    analysis = lesion_grounding.analyze_structures(
+        _ai_mask_path_for(case_id), cache_key=str(case_id)
+    )
+    if not analysis.get("available"):
+        return []
+
+    structures = analysis.get("structures") or {}
+    if not structures:
+        return []
+
+    named = []
+    for label_id, entry in sorted(structures.items()):
+        meta = MESH_LABELS.get(label_id) if MESH_LABELS else None
+        if not meta:
+            continue
+        named.append((meta["name"], meta["key"], entry))
+
+    facts = []
+
+    if wants_inventory and named:
+        listing = ", ".join(
+            f"{name} {entry['volume_cm3']:.2f} cm³" for name, _key, entry in named
+        )
+        facts.append(
+            f"SEGMENTATION FACT: this case has **{len(named)} segmented "
+            f"structures**, with these measured volumes — {listing}."
+        )
+
+    if wants_slice:
+        norm = _ai_norm(message)
+        # Longest key first so "pancreas head" wins over "pancreas".
+        lesion_keys = {meta["key"] for meta in lesion_grounding.LESION_LABELS.values()}
+        for name, key, entry in sorted(named, key=lambda item: -len(item[1])):
+            # Lesions are answered by the lesion path, which checks whether the
+            # class is a discrete finding at all. Quoting a slice range here
+            # would state a precise location for scattered false positives.
+            if key in lesion_keys:
+                continue
+            if _ai_norm(key) not in norm and _ai_norm(name) not in norm:
+                continue
+            rng = entry.get("slice_range")
+            if not rng:
+                continue
+            facts.append(
+                f"SEGMENTATION FACT: the {name} spans axial slices "
+                f"**{rng[0]}–{rng[1]}**, centred on slice "
+                f"**{entry.get('centre_slice', rng[0])}**, and measures "
+                f"**{entry['volume_cm3']:.2f} cm³**."
+            )
+            break
+
+    return facts
+
+
 def _ai_lesion_context(case_id, message):
     """Measured lesion findings for this case, ready to put in the prompt.
 
@@ -3878,6 +3947,11 @@ def _ai_lesion_context(case_id, message):
         wanted = set(focus)
         for entry in analysis.get("lesions", []):
             if wanted and entry.get("organ") not in wanted:
+                continue
+            # A scattered class is neither a clean finding nor a clean absence,
+            # so it takes part in no contradiction check: saying "no single
+            # lesion location" about it is correct, not a denial to overturn.
+            if entry.get("diffuse"):
                 continue
             (present if entry.get("present") else absent).append(entry["display"])
 
@@ -3952,6 +4026,10 @@ def _ai_load_metrics(case_id, supplied_metrics):
                     identifier,
                     Constants.SESSIONS_DIR_NAME,
                 )
+                if not isinstance(result, dict) or result.get("error") or not result.get("organ_metrics"):
+                    robust = _ai_compute_organ_metrics_from_labels(identifier)
+                    if robust and robust.get("organ_metrics"):
+                        result = robust
                 source = "session_mask_data"
 
             if isinstance(result, dict) and not result.get("error"):
@@ -6087,8 +6165,16 @@ def ai_command_stream():
                 "get_organ_metric", "get_largest_structure", "get_smallest_structure",
                 "isolate_organs", "focus_organ", "show_organs",
             }
+            structure_question = bool(case_id) and (
+                ai_reasoning.asks_for_inventory(message)
+                or ai_reasoning.asks_for_slice_level(message)
+            )
+            if structure_question:
+                references_case = True
+
             needs_metrics = bool(case_id) and (
                 lesion_question
+                or structure_question
                 or references_case
                 or question_mode in {"case_measurement", "case_metadata", "case_health_context"}
                 or any(a.get("type") in _organ_action_types for a in fallback_actions)
@@ -6101,8 +6187,18 @@ def ai_command_stream():
                     organ_name = str(metric.get("organ_name") or "").strip()
                     if organ_name and organ_name not in available_organs:
                         available_organs.append(organ_name)
-                # Re-sanitize now that the organ catalog may have grown.
+                # RE-PARSE, not just re-sanitize. The first parse ran before the
+                # metrics existed, so with an empty organ catalog "what is the
+                # volume of the pancreas" matched no organ and produced no
+                # action at all — and re-sanitizing an empty list stays empty.
+                fallback = parse_intent(
+                    message=message or "Describe what is shown.",
+                    available_organs=available_organs,
+                    viewer_state=viewer_state,
+                    case_id=case_id or None,
+                )
                 fallback_actions = _ai_sanitize_actions(fallback.get("actions", []), available_organs)
+                question_mode = _ai_question_mode(message, fallback_actions)
             else:
                 metrics, metric_source = [], "skipped"
 
@@ -6126,11 +6222,25 @@ def ai_command_stream():
             # about them, and the negative ("no lesion is present") is the fact
             # that stops a model inventing one.
             lesion_ctx = _ai_lesion_context(case_id, message) if lesion_question else None
+            structure_facts = _ai_structure_facts(case_id, message) if structure_question else []
             if lesion_ctx:
                 yield sse({"type": "status", "text": "Checking the segmentation for lesions"})
 
             conversation_text = " ".join(turn["content"] for turn in conversation[-4:])
             candidate_facts = _ai_case_facts(message, metrics, metadata) if references_case else []
+            if lesion_ctx:
+                # Drop the generic "Pancreatic Lesion: volume X" line. The lesion
+                # path already states the same volume with the context that
+                # decides whether it is a discrete finding at all, and two
+                # competing sentences let the weaker one win.
+                _lesion_names = {
+                    _ai_norm(meta["display"])
+                    for meta in lesion_grounding.LESION_LABELS.values()
+                }
+                candidate_facts = [
+                    fact for fact in candidate_facts
+                    if not any(name in _ai_norm(fact) for name in _lesion_names)
+                ]
             forced_facts = (
                 required_facts
                 if (
@@ -6143,7 +6253,11 @@ def ai_command_stream():
                 candidate_facts + required_facts,
                 message,
                 conversation_text=conversation_text,
-                always_include=(lesion_ctx["facts"] if lesion_ctx else []) + forced_facts,
+                always_include=(
+                    (lesion_ctx["facts"] if lesion_ctx else [])
+                    + structure_facts
+                    + forced_facts
+                ),
             )
             required_facts = forced_facts
 
@@ -6172,6 +6286,7 @@ def ai_command_stream():
                 # Skipping the tool loop keeps all three models on the identical
                 # substance instead of each investigating its own way.
                 and not lesion_question
+                and not structure_question
                 and not conversational_reply
                 and not rule_already_answered
                 and (

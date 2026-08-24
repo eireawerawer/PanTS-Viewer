@@ -145,6 +145,27 @@ def _analyze(mask_path: str) -> dict[str, Any]:
             entry["max_diameter_mm"] = round(float(max(extent)), 1)
             entry["slice_range"] = [int(mins[axial]), int(maxs[axial])]
 
+            # A real lesion is a compact object. A "lesion" 25 cm across, or one
+            # spanning most of the scan, is scattered false-positive voxels from
+            # the segmentation model — reporting a centroid and a region for it
+            # states a precise location for something that has none. Flag it so
+            # the wording degrades to what can honestly be said.
+            field = [data.shape[a] * zooms[a] for a in range(3)]
+            fraction = max(
+                (extent[a] / field[a]) if field[a] else 0.0 for a in range(3)
+            )
+            # Two shapes of implausibility: one enormous blob, or a spray of
+            # tiny specks. The second is what a false-positive lesion class
+            # actually looks like — hundreds of foci, none of them a lesion —
+            # and measuring only the largest component would miss it entirely.
+            speckled = bool(
+                entry.get("foci", 1) > 20
+                and int(np.count_nonzero(focus)) < 0.5 * voxels
+            )
+            entry["diffuse"] = bool(
+                max(extent) > 150.0 or fraction > 0.6 or speckled
+            )
+
             centroid = ndimage.center_of_mass(focus)
             entry["axial_slice"] = int(round(centroid[axial]))
             world = nib.affines.apply_affine(affine, np.array(centroid))
@@ -244,6 +265,17 @@ def lesion_facts(analysis: dict[str, Any], focus_organs: list[str] | None = None
             )
             continue
 
+        if entry.get("diffuse"):
+            facts.append(
+                f"SEGMENTATION FACT: the {display} class in this case covers "
+                f"**{entry['volume_cm3']:.2f} cm³** but is scattered across a "
+                "large region of the scan rather than forming one discrete "
+                "lesion, which is the signature of false-positive voxels from "
+                "the segmentation model. There is no single lesion location to "
+                "report for it."
+            )
+            continue
+
         parts = [f"SEGMENTATION FACT: a {display} IS present in this case"]
 
         if entry.get("region"):
@@ -312,6 +344,17 @@ def lesion_summary(analysis: dict[str, Any], focus_organs: list[str] | None = No
     lines: list[str] = []
 
     for entry in present:
+        if entry.get("diffuse"):
+            lines.append(
+                f"The **{entry['display']}** class covers "
+                f"**{entry['volume_cm3']:.2f} cm³** in this case, but it is "
+                "scattered across a large region rather than forming one "
+                "discrete lesion — that pattern usually means false-positive "
+                "voxels from the segmentation model, so I can't give you a "
+                "single location for it."
+            )
+            continue
+
         bits = [f"This case contains a **{entry['display']}**"]
         if entry.get("region"):
             bits.append(f"in the pancreatic {entry['region']}")
@@ -338,3 +381,82 @@ def lesion_summary(analysis: dict[str, Any], focus_organs: list[str] | None = No
         )
 
     return " ".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Every segmented structure, not just lesions.
+#
+# Uploaded scans had no server-side metrics at all: calculate_session_metrics is
+# a stub that always reports "unavailable", and the labelmap fallback refused any
+# non-numeric id. So "what is the volume of the pancreas in this scan?" answered
+# "not available" for an upload, while lesion grounding read the same file fine.
+# One pass over the labelmap answers volume, structure count, and slice level.
+# ---------------------------------------------------------------------------
+
+_STRUCTURE_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def analyze_structures(mask_path: str | None, cache_key: str | None = None) -> dict[str, Any]:
+    """Per-label volume and slice extent for every structure in a labelmap.
+
+    Returns {"available": bool, "structures": {label_id: {...}}, "axial_axis": int}.
+    Label ids are the viewer scheme (liver 14, pancreas 17, ...), so callers can
+    map them with whatever name table they already use.
+    """
+    if not _DEPS_OK:
+        return {"available": False, "reason": "imaging libraries unavailable"}
+    if not mask_path or not os.path.exists(mask_path):
+        return {"available": False, "reason": "no segmentation available"}
+
+    try:
+        stamp = os.path.getmtime(mask_path)
+    except OSError:
+        stamp = 0.0
+    key = f"{cache_key or ''}|{mask_path}|{stamp}"
+
+    with _CACHE_LOCK:
+        cached = _STRUCTURE_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        image = nib.load(mask_path)
+        data = np.rint(np.asanyarray(image.dataobj)).astype(np.int16)
+    except Exception as error:
+        return {"available": False, "reason": f"labelmap could not be read: {error}"}
+
+    zooms = [abs(float(z)) for z in image.header.get_zooms()[:3]]
+    voxel_mm3 = float(np.prod(zooms)) if all(zooms) else 0.0
+    axial = _axial_axis(image.affine)
+
+    structures: dict[int, dict[str, Any]] = {}
+
+    # One bincount beats one pass per label on a full-resolution volume.
+    flat = data.reshape(-1)
+    counts = np.bincount(flat[flat > 0])
+
+    for label_id in np.nonzero(counts)[0]:
+        label_id = int(label_id)
+        voxels = int(counts[label_id])
+        if voxels < 10:
+            continue
+        entry: dict[str, Any] = {
+            "voxels": voxels,
+            "volume_cm3": round(voxels * voxel_mm3 / 1000.0, 2),
+        }
+        try:
+            positions = np.nonzero(np.any(data == label_id, axis=tuple(
+                a for a in range(3) if a != axial
+            )))[0]
+            if positions.size:
+                entry["slice_range"] = [int(positions.min()), int(positions.max())]
+                entry["centre_slice"] = int(round(float(positions.mean())))
+        except Exception:
+            pass
+        structures[label_id] = entry
+
+    result = {"available": True, "structures": structures, "axial_axis": axial}
+
+    with _CACHE_LOCK:
+        _STRUCTURE_CACHE[key] = result
+    return result

@@ -204,6 +204,10 @@ _BASE_PROMPT = (
     "possible lesion.\n"
     "- If a SEGMENTATION FACT says a lesion IS present, report its location, "
     "volume, and size exactly as given.\n"
+    "- If a SEGMENTATION FACT says a lesion class is scattered rather than "
+    "discrete, report the total volume, say the segmentation does not show a "
+    "single well-defined lesion, and give no slice number, region, or "
+    "diameter for it.\n"
     "- NEVER identify a lesion from a colour, a shape, or a mask outline. A "
     "colour in the legend names an organ, never a tumour.\n"
     "- If no SEGMENTATION FACT about lesions is present, say the "
@@ -646,3 +650,40 @@ def presentable_fact(fact: str) -> str:
     if any(marker in text.lower() for marker in _INSTRUCTION_MARKERS):
         return ""
     return text[0].upper() + text[1:]
+
+
+# ---------------------------------------------------------------------------
+# Inventory and slice-level questions
+#
+# "What are the segmentation values of this case and how many structures are
+# there?" and "What is the slice level of the pancreas head?" both have exact
+# answers in the labelmap, and both were answered with nothing.
+# ---------------------------------------------------------------------------
+
+_INVENTORY_WORDS = (
+    "how many structures", "how many organs", "how many segment",
+    "what structures", "which structures", "list the structures",
+    "list structures", "segmentation values", "segmentation value",
+    "what is segmented", "what's segmented", "all the structures",
+    "structure count", "every structure", "all organs", "what organs",
+)
+
+_SLICE_WORDS = (
+    "slice level", "slice number", "which slice", "what slice", "slice range",
+    "slice index", "axial level", "what level", "which level", "z level",
+)
+
+
+def asks_for_inventory(message: str) -> bool:
+    """Whether the question asks what the segmentation contains."""
+    norm = normalize(message)
+    return any(phrase in norm for phrase in _INVENTORY_WORDS)
+
+
+def asks_for_slice_level(message: str) -> bool:
+    """Whether the question asks where a structure sits along the scan."""
+    norm = normalize(message)
+    if any(phrase in norm for phrase in _SLICE_WORDS):
+        return True
+    # "where is the pancreas head" is a slice-level question in a CT viewer.
+    return bool(re.search(r"\bwhere\s+(?:is|are|does)\b", norm)) and bool(organs_mentioned(message))
