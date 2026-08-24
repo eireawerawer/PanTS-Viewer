@@ -11,6 +11,7 @@ import type { Color } from "@cornerstonejs/core/types";
 import { LiveSegmentMesh } from "./LiveSegmentMesh";
 import type { CheckBoxData } from "../../types";
 import { getEditedSegments, subscribeToSegmentationEdits } from "../../helpers/CornerstoneNifti2";
+import ErrorBoundary from "../ErrorBoundary";
 
 type SegmentationMeshViewerProps = {
   caseId: string;
@@ -97,6 +98,7 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
           canvas so the capture helper picks this one and never an unrelated
           canvas that happens to sit in the same pane.
         */}
+        <ErrorBoundary fallback={<div className="vp-3d-empty">3D segmentation unavailable.</div>}>
         <Canvas
           camera={{ position: [0, 250, 650], fov: 45, near: 0.1, far: 5000 }}
           gl={{ preserveDrawingBuffer: true, antialias: true }}
@@ -157,6 +159,7 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
           </Suspense>
           <OrbitControls makeDefault />
         </Canvas>
+        </ErrorBoundary>
       </main>
     </div>
   );

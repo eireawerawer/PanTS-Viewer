@@ -361,7 +361,10 @@ def bake_case_meshes(
                 "id": label_id,
                 "key": meta["key"],
                 "name": meta["name"],
-                "url": f"{os.getenv('API_ORIGIN', 'http://localhost:5001')}/api/{route_base}/{display_id}/render_only/{filename}",
+                # The browser resolves this against the public viewer origin.
+                # Avoid embedding the backend's internal HTTP origin, which a
+                # public HTTPS page correctly blocks as mixed content.
+                "url": f"/api/{route_base}/{display_id}/render_only/{filename}",
                 "vertices": int(len(mesh.vertices)),
                 "faces": int(len(mesh.faces)),
             }
@@ -404,7 +407,7 @@ def generate_mesh_manifest(
                 "id": key,
                 "key": meta["key"],
                 "name": meta["name"],
-                "url": f"{os.getenv('API_ORIGIN', 'http://localhost:5001')}/api/{route_base}/{case_id}/render_only/{filename}",
+                "url": f"/api/{route_base}/{case_id}/render_only/{filename}",
             }
         )
 

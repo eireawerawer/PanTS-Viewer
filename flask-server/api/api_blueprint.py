@@ -441,10 +441,14 @@ def _read_manifest_or_none(manifest_path):
 
 
 def _manifest_with_request_urls(manifest, pants_id):
-    """Return manifest with URLs rooted at current deployment and base path."""
+    """Return a manifest whose mesh URLs always use the current browser origin."""
     for organ in manifest.get("organs", []):
         filename = f"{safe_filename(str(organ.get('key', '')))}.glb"
-        organ["url"] = _absolute_api_url(f"/cases/{pants_id}/render_only/{filename}")
+        # Do not derive an absolute URL from Flask's request scheme. Behind a
+        # TLS-terminating proxy Flask sees HTTP, which would make browsers block
+        # these meshes as mixed content. A relative URL inherits the HTTPS origin
+        # of the viewer and also works for a deployment under a base path.
+        organ["url"] = f"{_api_prefix_path()}/cases/{pants_id}/render_only/{filename}"
     return manifest
 
 

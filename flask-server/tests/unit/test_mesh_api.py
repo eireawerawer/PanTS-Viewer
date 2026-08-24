@@ -42,7 +42,7 @@ def test_missing_mesh_cache_is_generated_once_and_served(tmp_path, monkeypatch):
     assert manifest["center"] == [3.0, 3.0, -3.0]
     assert manifest["bounds"]["min"] == [-3.5, -3.5, -3.5]
     assert manifest["bounds"]["max"] == [3.5, 3.5, 3.5]
-    assert all(organ["url"].startswith("http://localhost/api/cases/PanTS_00000035/") for organ in manifest["organs"])
+    assert all(organ["url"].startswith("/api/cases/PanTS_00000035/") for organ in manifest["organs"])
 
     manifest_path = mesh_path / "PanTS_00000035" / "manifest.json"
     first_mtime = manifest_path.stat().st_mtime_ns
@@ -50,8 +50,7 @@ def test_missing_mesh_cache_is_generated_once_and_served(tmp_path, monkeypatch):
     assert second.status_code == 200
     assert manifest_path.stat().st_mtime_ns == first_mtime
 
-    asset_path = manifest["organs"][0]["url"].removeprefix("http://localhost")
-    asset = client.get(asset_path)
+    asset = client.get(manifest["organs"][0]["url"])
     assert asset.status_code == 200
     assert asset.data[:4] == b"glTF"
 
