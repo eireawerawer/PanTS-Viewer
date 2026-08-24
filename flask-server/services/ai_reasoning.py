@@ -194,6 +194,19 @@ _BASE_PROMPT = (
     "patient demographics are off topic and must be left out.\n"
     "- If you genuinely cannot answer, say what is missing and ask for it. "
     "Never emit a bare list of numbers in place of an answer.\n\n"
+    "THE OPEN CASE\n"
+    "- When a CASE INVENTORY block is present it lists every structure measured "
+    "from THIS case, with its volume, slice extent, and attenuation. Answer any "
+    "question about the case from it — how many structures, which is largest, "
+    "where something sits, what a value is — and quote the numbers verbatim "
+    "with units.\n"
+    "- Every case is different. Never carry a value from an earlier case or "
+    "from general knowledge into this one.\n"
+    "- If the question asks about something the inventory does not list, say "
+    "that structure is not segmented in this case. That is a correct answer; "
+    "guessing is not.\n"
+    "- If no CASE INVENTORY is present, say the segmentation could not be read "
+    "for this case rather than answering from memory.\n\n"
     "LESIONS AND TUMOURS (absolute)\n"
     "- Whether a lesion, tumour, mass, or cancer exists in this case is "
     "decided ONLY by a line in the Facts beginning 'SEGMENTATION FACT'. "
@@ -243,6 +256,11 @@ _BASE_PROMPT = (
     "short, specific question asking for exactly that.\n"
     "- If the answer is complete, you may still end with one short question "
     "offering the natural next step.\n"
+    "- The closing question must FOLLOW FROM the answer you just gave. Never "
+    "ask about window presets, colours, or other display settings unless the "
+    "user raised them.\n"
+    "- Never reply with only a question. If you have nothing to answer with, "
+    "say what is missing first, then ask for it.\n"
     "- One question, never a list. A pure viewer command needs only a brief "
     "confirmation."
 )
@@ -687,3 +705,57 @@ def asks_for_slice_level(message: str) -> bool:
         return True
     # "where is the pancreas head" is a slice-level question in a CT viewer.
     return bool(re.search(r"\bwhere\s+(?:is|are|does)\b", norm)) and bool(organs_mentioned(message))
+
+
+# ---------------------------------------------------------------------------
+# Does this question concern the open case at all?
+#
+# Detecting individual question shapes (lesion / inventory / slice / volume) can
+# only ever answer the shapes someone thought to enumerate. Anything else fell
+# through to a model with no case data — which is where the blank and invented
+# answers came from. This test is deliberately broad: when in doubt, give the
+# model the case inventory and let it decide what is relevant.
+# ---------------------------------------------------------------------------
+
+_CASE_WORDS = (
+    "case", "scan", "ct", "segmentation", "segmented", "structure", "structures",
+    "organ", "organs", "volume", "slice", "level", "patient", "study", "image",
+    "images", "mask", "label", "value", "values", "measurement", "measurements",
+    "here", "shown", "this", "biggest", "largest", "smallest", "count",
+)
+
+
+def touches_case(message: str) -> bool:
+    """Whether the open case could plausibly be the subject of this question."""
+    norm = normalize(message)
+    if organs_mentioned(message):
+        return True
+    if asks_about_lesion(message) or asks_for_inventory(message):
+        return True
+    if asks_for_slice_level(message) or asks_for_measurement(message):
+        return True
+    return any(re.search(rf"\b{re.escape(word)}\b", norm) for word in _CASE_WORDS)
+
+
+def is_only_a_question(reply: str) -> bool:
+    """Whether the reply asks something without answering anything.
+
+    Small local models sometimes emit the closing question and nothing else —
+    "What is the window preset used to display the pancreatic lesion?" in place
+    of the volume that was asked for. The prompt tells them to end with a
+    question, and they occasionally deliver only the ending. A reply with no
+    declarative sentence has not answered, whatever else it did.
+    """
+    text = _strip_markdown(reply).strip()
+    if not text:
+        return False
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if not sentences:
+        return False
+    return all(sentence.endswith("?") for sentence in sentences)
+
+
+def answer_from_facts(facts: Sequence[str]) -> str:
+    """Build a plain answer out of measured facts, for when the model gives none."""
+    shown = [presentable_fact(fact) for fact in facts]
+    return " ".join(part for part in shown if part).strip()

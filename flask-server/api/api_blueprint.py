@@ -3865,6 +3865,147 @@ def _ai_mask_path_for(case_id):
         return None
 
 
+def _ai_component_facts(message, metrics, available_organs):
+    """Answer a parent-structure question from its segmented components.
+
+    Several structures exist only as parts: the pancreas as head/body/tail, the
+    kidneys as left/right. Asked for "the volume of the pancreas", the resolver
+    used to return whichever part came first in the catalog. This reports every
+    part and their total instead.
+    """
+    norm = _ai_norm(message)
+    lookup = _ai_metric_lookup(metrics, available_organs)
+
+    families = {
+        "pancreas": ("pancreas head", "pancreas body", "pancreas tail"),
+        "kidney": ("kidney left", "kidney right"),
+        "lung": ("lung left", "lung right"),
+        "adrenal gland": ("adrenal gland left", "adrenal gland right"),
+        "femur": ("femur left", "femur right"),
+    }
+
+    facts = []
+
+    for parent, parts in families.items():
+        if parent not in norm:
+            continue
+        if any(_ai_norm(part) in norm for part in parts):
+            continue  # asked about a specific part
+        whole = lookup.get(_ai_norm(parent))
+        if whole and _ai_metric_valid(whole.get("volume_cm3")):
+            continue  # segmented in its own right; nothing to add
+
+        present = []
+        for part in parts:
+            entry = lookup.get(_ai_norm(part))
+            if entry and _ai_metric_valid(entry.get("volume_cm3")):
+                present.append((_ai_display(part), float(entry["volume_cm3"])))
+        if not present:
+            continue
+
+        listing = ", ".join(f"{name} {volume:.2f} cm³" for name, volume in present)
+        total = sum(volume for _name, volume in present)
+        facts.append(
+            f"SEGMENTATION FACT: the {parent} is not segmented as one structure "
+            f"in this case; it is segmented in parts — {listing}. Their combined "
+            f"volume is **{total:.2f} cm³**."
+        )
+
+    return facts
+
+
+def _ai_case_inventory(case_id, metrics):
+    """Everything measured about this case, as one compact reference block.
+
+    This is the difference between an assistant that answers the questions
+    someone enumerated and one that answers questions about the case. Rather
+    than detecting "is this a volume question / a slice question / a count
+    question", the model is handed the full measured picture — every structure,
+    its volume, where it sits, its attenuation, and the state of every lesion
+    class — and answers from it.
+
+    Returns "" when nothing could be measured, which the caller must report
+    honestly rather than papering over.
+    """
+    mask_path = _ai_mask_path_for(case_id)
+    analysis = lesion_grounding.analyze_structures(mask_path, cache_key=str(case_id))
+
+    # Attenuation only exists in the computed metrics, so index them by name to
+    # merge onto the labelmap-derived geometry.
+    hu_by_key = {}
+    for entry in metrics or []:
+        organ = _ai_norm(entry.get("organ_name"))
+        value = entry.get("mean_hu")
+        if organ and (_ai_metric_valid(value) or value == 0):
+            hu_by_key[organ] = float(value)
+
+    lines = []
+
+    if analysis.get("available") and analysis.get("structures"):
+        structures = analysis["structures"]
+        lesion_ids = set(lesion_grounding.LESION_LABELS)
+        for label_id, entry in sorted(structures.items()):
+            meta = MESH_LABELS.get(label_id) if MESH_LABELS else None
+            if not meta or label_id in lesion_ids:
+                continue
+            bits = [f"{meta['name']}: {entry['volume_cm3']:.2f} cm³"]
+            rng = entry.get("slice_range")
+            if rng:
+                bits.append(f"axial slices {rng[0]}-{rng[1]}")
+            hu = hu_by_key.get(_ai_norm(meta["key"]))
+            if hu is not None:
+                bits.append(f"mean {hu:.1f} HU")
+            lines.append("- " + ", ".join(bits))
+    else:
+        # No readable labelmap — fall back to whatever metrics exist.
+        for entry in metrics or []:
+            name = entry.get("display_name") or _ai_display(entry.get("organ_name"))
+            volume = entry.get("volume_cm3")
+            if not _ai_metric_valid(volume):
+                continue
+            bits = [f"{name}: {float(volume):.2f} cm³"]
+            hu = entry.get("mean_hu")
+            if _ai_metric_valid(hu) or hu == 0:
+                bits.append(f"mean {float(hu):.1f} HU")
+            lines.append("- " + ", ".join(bits))
+
+    if not lines:
+        return ""
+
+    header = (
+        f"CASE INVENTORY — every structure measured from this case's own "
+        f"segmentation ({len(lines)} structures). These values are exact; quote "
+        "them verbatim and never recompute or estimate them."
+    )
+
+    block = [header] + lines
+
+    # Lesion classes are stated explicitly, present or absent, so "is there a
+    # tumour anywhere?" has an answer without a separate lookup.
+    lesion_analysis = lesion_grounding.analyze_lesions(mask_path, cache_key=str(case_id))
+    if lesion_analysis.get("available"):
+        states = []
+        for entry in lesion_analysis.get("lesions", []):
+            if not entry.get("present"):
+                states.append(f"{entry['display']}: none")
+            elif entry.get("diffuse"):
+                states.append(
+                    f"{entry['display']}: {entry['volume_cm3']:.2f} cm³ but "
+                    "scattered, not one discrete lesion"
+                )
+            else:
+                where = f" in the pancreatic {entry['region']}" if entry.get("region") else ""
+                states.append(
+                    f"{entry['display']}: present{where}, "
+                    f"{entry['volume_cm3']:.2f} cm³, centred on axial slice "
+                    f"{entry.get('axial_slice')}"
+                )
+        if states:
+            block.append("Lesion classes — " + "; ".join(states) + ".")
+
+    return "\n".join(block)
+
+
 def _ai_structure_facts(case_id, message):
     """Exact inventory and slice-level answers, straight from the labelmap.
 
@@ -4411,9 +4552,30 @@ def _ai_resolve_organ(value, available_organs):
     for organ, organ_norm in normalized_available:
         if norm == organ_norm:
             return organ
+    # Partial matches are RANKED, not first-come. Returning the first organ whose
+    # name merely contains the query answered "what is the volume of the
+    # pancreas?" with the pancreas TAIL, because the tail came first in the
+    # catalog — a real measurement of the wrong structure.
+    lesion_norms = {
+        _ai_norm(meta["key"]) for meta in lesion_grounding.LESION_LABELS.values()
+    }
+    query_words = set(norm.split())
+    ranked = []
     for organ, organ_norm in normalized_available:
-        if norm in organ_norm or organ_norm in norm:
-            return organ
+        if norm not in organ_norm and organ_norm not in norm:
+            continue
+        # A plain organ query must never land on a lesion class.
+        if organ_norm in lesion_norms:
+            continue
+        # Nor on a COMPONENT of itself: "pancreas" is not "pancreas body".
+        # _ai_component_facts answers those with every part plus a total.
+        if query_words < set(organ_norm.split()):
+            continue
+        ranked.append((organ, organ_norm))
+    if ranked:
+        # Shortest name = fewest added qualifiers = closest to what was asked.
+        ranked.sort(key=lambda item: (len(item[1]), item[1]))
+        return ranked[0][0]
 
     alias_groups = [
         {"left kidney", "kidney left", "left renal", "left renal kidney"},
@@ -6172,9 +6334,15 @@ def ai_command_stream():
             if structure_question:
                 references_case = True
 
+            # Broad on purpose: an unrecognised question about the case is
+            # exactly the failure mode being fixed, and a needless lookup is
+            # cheap next to a blank or invented answer.
+            case_question = bool(case_id) and ai_reasoning.touches_case(message)
+
             needs_metrics = bool(case_id) and (
                 lesion_question
                 or structure_question
+                or case_question
                 or references_case
                 or question_mode in {"case_measurement", "case_metadata", "case_health_context"}
                 or any(a.get("type") in _organ_action_types for a in fallback_actions)
@@ -6223,6 +6391,11 @@ def ai_command_stream():
             # that stops a model inventing one.
             lesion_ctx = _ai_lesion_context(case_id, message) if lesion_question else None
             structure_facts = _ai_structure_facts(case_id, message) if structure_question else []
+            case_inventory = _ai_case_inventory(case_id, metrics) if case_question else ""
+            component_facts = (
+                _ai_component_facts(message, metrics, available_organs)
+                if case_question else []
+            )
             if lesion_ctx:
                 yield sse({"type": "status", "text": "Checking the segmentation for lesions"})
 
@@ -6256,6 +6429,7 @@ def ai_command_stream():
                 always_include=(
                     (lesion_ctx["facts"] if lesion_ctx else [])
                     + structure_facts
+                    + component_facts
                     + forced_facts
                 ),
             )
@@ -6434,6 +6608,8 @@ def ai_command_stream():
                     "at them before answering.\n\n"
                     f"{user_prompt}"
                 )
+            if case_inventory:
+                user_prompt += "\n\n" + case_inventory
             if facts_lines:
                 user_prompt += "\n\nFacts:\n" + "\n".join(f"- {f}" for f in facts_lines)
 
@@ -6518,7 +6694,7 @@ def ai_command_stream():
                     history=history,
                     # Grounded questions get the tightest decoding, so a measured
                     # fact is reported the same way whichever model is selected.
-                    temperature=0.1 if facts_lines else 0.2,
+                    temperature=0.1 if (facts_lines or case_inventory) else 0.2,
                 ):
                     if not text:
                         continue
@@ -6576,6 +6752,18 @@ def ai_command_stream():
             # values and is instructed to end with a relevant follow-up
             # question, so keep that text (grounding would strip the follow-up).
             final_reply = streamed_reply
+
+            # The model sometimes returns ONLY its closing question — asking
+            # about a window preset instead of giving the volume that was
+            # requested. A reply with no declarative sentence has not answered,
+            # so the measured facts become the answer and the stray question is
+            # demoted to the follow-up. This must run BEFORE the safety net
+            # below, which would otherwise append the facts underneath the
+            # question and leave the answer reading back to front.
+            if ai_reasoning.is_only_a_question(final_reply) and exact_facts:
+                measured = ai_reasoning.answer_from_facts(exact_facts)
+                if measured:
+                    final_reply = f"{measured}\n\n{final_reply.strip()}"
 
             # Safety net: if the measured number was paraphrased away, append
             # the exact fact so the real value is always present.
