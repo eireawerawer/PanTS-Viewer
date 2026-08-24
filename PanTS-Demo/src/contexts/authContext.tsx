@@ -54,7 +54,7 @@ export type AuthUser = {
 	plan: PlanId;
 	/** Self-reported account type, from user_account.account_type. Gates nothing. */
 	profile: AccountProfile;
-	/** Roles held, from the user_role table ("admin", "annotator"). The server
+	/** Roles held, from the user_role table ("admin" is the only one). The server
 	 *  enforces them; these only decide what the UI offers to draw. */
 	roles: string[];
 };

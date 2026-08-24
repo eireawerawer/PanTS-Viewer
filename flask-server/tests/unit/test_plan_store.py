@@ -23,8 +23,11 @@ def plans(tmp_path, monkeypatch):
     import models.user  # noqa: F401
     import models.auth_session  # noqa: F401
     import models.usage_event  # noqa: F401
+    import models.user_role  # noqa: F401
     import services.auth_store as auth_store
     importlib.reload(auth_store)
+    import services.role_store as role_store
+    importlib.reload(role_store)
     import services.plan_store as plan_store
     importlib.reload(plan_store)
 
@@ -162,3 +165,34 @@ def test_usage_summary_reports_the_plan_limits(plans):
     assert summary["scans"] == {
         "used": 0, "limit": 3, "in_flight": 0, "resets_at": None
     }
+
+
+def test_an_admin_is_not_metered(plans):
+    """Admins run everything on whatever plan they're on — the site's operators
+    have to be able to exercise the parts they're gating everyone else out of."""
+    plan_store, user_id = plans
+    from services import role_store
+    role_store.grant(user_id, role_store.ROLE_ADMIN)
+
+    assert plan_store.check_inference(user_id, "ePAI") is None
+    assert plan_store.check_inference(user_id, "ShapeKit") is None
+    for i in range(60):
+        plan_store.record_inference(user_id, f"session-{i}", "ePAI")
+    assert plan_store.check_inference(user_id, "ePAI") is None
+
+    for _ in range(20):
+        plan_store.record_ai_message(user_id)
+    assert plan_store.check_ai_message(user_id) is None
+
+
+def test_an_admin_keeps_the_plan_their_account_is_on(plans):
+    """The bypass changes the limits, not the record: the settings page names
+    the stored plan, and Free is what this account is on."""
+    plan_store, user_id = plans
+    from services import role_store
+    role_store.grant(user_id, role_store.ROLE_ADMIN)
+
+    summary = plan_store.usage_summary(user_id)
+    assert summary["plan"] == "free"
+    assert summary["limits"]["daily_scans"] is None
+    assert summary["ai_messages"]["limit"] is None
