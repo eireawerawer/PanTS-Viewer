@@ -5828,7 +5828,7 @@ def _ai_command_vision_reply(*, message, images, body, case_id, selected_model):
             message,
             has_images=True,
             has_case=bool(case_id),
-            force=True,
+            force=False,
         ),
         "actions": [],
         "source": "ollama",
@@ -6802,7 +6802,10 @@ def ai_command_stream():
                 message,
                 has_images=bool(images),
                 has_case=bool(case_id),
-                force=bool(images),
+                # Never force a question onto a complete answer. ensure_followup
+                # still adds one when the reply admits something is missing —
+                # which is exactly when the user wants to be asked.
+                force=False,
             )
         else:
             # No model answer. Say so honestly.
