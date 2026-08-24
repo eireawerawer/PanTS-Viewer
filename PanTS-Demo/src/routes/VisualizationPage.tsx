@@ -2320,18 +2320,11 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		}
 	};
 
-	// Auto-start the full-res stream shortly after the fast low-res view is usable.
-	// Only when the local files exist (server disk — fast); the HuggingFace fallback
-	// is already full-res, and ?hd=1 loads full-res up front.
-	useEffect(() => {
-		if (isSoloChallenge || isQuizPractice || liveRoom?.metadata.mode === "quiz" || !viewerReady || !localAvailable || isHd || isLocal || !pantsCase) return;
-		if (enhanceStartedRef.current) return;
-		// Ref is flipped inside the timer (not here) so StrictMode's double-run —
-		// which clears the first timer — still ends up scheduling exactly one stream.
-		const timer = window.setTimeout(() => { void runEnhance(); }, 1500);
-		return () => window.clearTimeout(timer);
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [isQuizPractice, isSoloChallenge, liveRoom?.metadata.mode, viewerReady, localAvailable, isHd, isLocal, pantsCase]);
+	// Keep the initial low-resolution viewer stable. Automatically swapping in a
+	// full-resolution CT moments after the scan appears can blank the rendered
+	// panes on an interrupted large-file transfer. Readers can still explicitly
+	// request the full-resolution stream with the HD control once the first view
+	// is confirmed usable.
 
 	// ---- Shaded 3D volume rendering (Volume mode in the 3D pane) -------------------
 
