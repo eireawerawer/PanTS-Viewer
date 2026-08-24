@@ -1,7 +1,13 @@
 import { IconCheck } from "@tabler/icons-react";
 import React, { useState } from "react";
 import { useAuth } from "../../contexts/authContext";
-import { PLANS, planLabel, type PlanGroup, type PlanId } from "../../helpers/accountProfile";
+import {
+	canChangePlan,
+	PLANS,
+	planLabel,
+	type PlanGroup,
+	type PlanId,
+} from "../../helpers/accountProfile";
 import { track } from "../../helpers/analytics";
 import { useSettings } from "./context";
 
@@ -54,6 +60,10 @@ const UsageBar: React.FC<{
 // version's mistake: nobody compares four columns of paragraphs.
 //
 // No payment: /me/plan is a column write. The limits are real either way.
+//
+// The paid plans aren't open yet, so their cards are greyed and their buttons
+// say so. Admins are the exception at both ends: they can still move an account
+// between plans, and their own limits are lifted whichever plan they sit on.
 const PlanSettings: React.FC = () => {
 	const { user, usage, setPlan, refreshUsage } = useAuth();
 	const { busy, run, notify } = useSettings();
@@ -63,6 +73,7 @@ const PlanSettings: React.FC = () => {
 
 	const current = user.plan;
 	const currentPlan = PLANS.find((p) => p.id === current);
+	const canChange = canChangePlan(user);
 
 	const choose = (id: PlanId) =>
 		run(async () => {
@@ -78,7 +89,11 @@ const PlanSettings: React.FC = () => {
 				<div className="set-plan-hero">
 					<div>
 						<h2 className="set-plan-name">{planLabel(current)} plan</h2>
-						<p className="set-plan-blurb">{currentPlan?.blurb}</p>
+						<p className="set-plan-blurb">
+							{canChange
+								? "Admin access — no limits apply, whatever plan you're on."
+								: currentPlan?.blurb}
+						</p>
 					</div>
 					<button
 						type="button"
@@ -141,10 +156,15 @@ const PlanSettings: React.FC = () => {
 				<div className="set-plan-cards">
 					{PLANS.filter((p) => p.group === group).map((p) => {
 						const isCurrent = p.id === current;
+						// Free stays pickable for everyone — it's the one plan that is
+						// open, and nobody should be stranded above it.
+						const soon = !canChange && p.id !== "free";
 						return (
 							<div
 								key={p.id}
-								className={`set-plan-card${isCurrent ? " set-plan-card--current" : ""}`}
+								className={`set-plan-card${isCurrent ? " set-plan-card--current" : ""}${
+									soon ? " set-plan-card--soon" : ""
+								}`}
 							>
 								{p.badge && <span className="set-plan-badge">{p.badge}</span>}
 								<h3 className="set-plan-card-name">{p.label}</h3>
@@ -156,10 +176,10 @@ const PlanSettings: React.FC = () => {
 								<button
 									type="button"
 									className={`set-plan-cta${isCurrent ? " set-plan-cta--current" : ""}`}
-									disabled={isCurrent || busy}
+									disabled={isCurrent || soon || busy}
 									onClick={() => choose(p.id)}
 								>
-									{isCurrent ? "Current plan" : p.cta}
+									{isCurrent ? "Current plan" : soon ? "Coming soon" : p.cta}
 								</button>
 								<ul className="set-plan-points">
 									{/* Every card gets a lead line, including the one that

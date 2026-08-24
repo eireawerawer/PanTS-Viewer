@@ -2,8 +2,8 @@
 
 A row per (user, role) rather than a column per role on ``user_account``: the
 set of roles is expected to grow, and a table means adding one costs no
-migration. ``admin`` and ``annotator`` are the two that exist today — see
-``services.role_store.ROLES``, which is the list that is actually enforced.
+migration. ``admin`` is the only one today — see ``services.role_store.ROLES``,
+which is the list that is actually enforced.
 
 ``granted_by`` records which admin handed the role out. Roles are granted by
 other admins through the account UI, so "who gave this person access" is a

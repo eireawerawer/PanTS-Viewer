@@ -1,10 +1,8 @@
 """Roles: who holds them, who can hand them out, and the account list the admin
 UI searches.
 
-Two roles exist. ``admin`` gates the usage dashboard and this module's own
-grant/revoke endpoints. ``annotator`` is granted and displayed but **gates
-nothing yet** — it is here so the accounts allowed to edit segmentation masks can
-be picked out before the editing itself is built. Nothing in the server reads it.
+One role exists. ``admin`` gates the usage dashboard, this module's own
+grant/revoke endpoints, and — through ``plan_store`` — every plan limit.
 
 An unknown role name is refused rather than stored: the set of roles is a fixed
 vocabulary, and a typo'd "adminn" that stores cleanly is a grant that silently
@@ -28,9 +26,8 @@ from models.user import User
 from models.user_role import UserRole
 
 ROLE_ADMIN = "admin"
-ROLE_ANNOTATOR = "annotator"
 
-ROLES = frozenset({ROLE_ADMIN, ROLE_ANNOTATOR})
+ROLES = frozenset({ROLE_ADMIN})
 
 # Guardrails on revoke. Both exist to stop the system reaching a state with no
 # admin left, which nothing short of shell access can undo.

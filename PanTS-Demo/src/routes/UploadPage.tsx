@@ -87,6 +87,7 @@ import UpgradeDialog, { type UpgradeBlock } from "../components/UpgradeDialog";
 import { useAuth } from "../contexts/authContext";
 import {
   canPostprocess,
+  gatingPlan,
   isModelLocked,
   maxConcurrentScans,
   type PlanId,
@@ -159,7 +160,9 @@ const UploadPage: React.FC = () => {
   // Everything the plan won't allow routes through one dialog; this is what's
   // currently being explained (null = nothing blocked).
   const [upgradeBlock, setUpgradeBlock] = useState<UpgradeBlock | null>(null);
-  const plan = user?.plan ?? "free";
+  // Not always user.plan: an admin is gated as the unlimited tier whatever plan
+  // their account is on, matching plan_store.limits_for_user.
+  const plan = gatingPlan(user);
   // Cosmetic mirror of the server's rules — see helpers/accountProfile. The
   // server still gets the final say via a 402, which lands in the same dialog.
   const modelLocked = (id: string) => isAuthenticated && isModelLocked(plan, id);

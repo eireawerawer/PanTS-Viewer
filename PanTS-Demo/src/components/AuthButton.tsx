@@ -1,6 +1,7 @@
 // The account control shown in both nav bars (LandingPage's inline nav and the
 // shared Header). Signed out: a "Sign in" button that opens the auth popup.
-// Signed in: an account menu (email + dropdown: Account settings, Sign out).
+// Signed in: an account menu (the name they set, or their email until they set
+// one, + dropdown: Account settings, Sign out).
 // Reads authContext, so it flips everywhere at once.
 import { IconChevronDown, IconLogout, IconSettings } from "@tabler/icons-react";
 import { useEffect, useRef, useState } from "react";
@@ -49,7 +50,9 @@ export default function AuthButton() {
 				aria-expanded={menuOpen}
 			>
 				<span className={styles.avatar}>{initial}</span>
-				<span className={styles.accountEmail}>{user.email}</span>
+				<span className={styles.accountEmail}>
+					{user.hasCustomName ? user.name : user.email}
+				</span>
 				<IconChevronDown size={15} className={styles.chevron} />
 			</button>
 

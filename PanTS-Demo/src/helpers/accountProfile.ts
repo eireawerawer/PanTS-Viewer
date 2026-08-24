@@ -74,6 +74,27 @@ export const PLAN_LIMITS: Record<PlanId, PlanLimits> = {
 export const limitsFor = (plan: PlanId | undefined): PlanLimits =>
 	PLAN_LIMITS[plan ?? "free"] ?? PLAN_LIMITS.free;
 
+/**
+ * The plan whose limits a control should be greyed against — which is not
+ * always the plan the account is on. Admins bypass plan limits entirely
+ * (plan_store.limits_for_user does the same server-side), so they are gated as
+ * Enterprise, the tier with nothing switched off.
+ *
+ * For gating only, never for display: the plan an admin's account is *on* is
+ * still `user.plan`, and that's what the settings page names.
+ */
+export const gatingPlan = (
+	user: { plan: PlanId; roles: string[] } | null | undefined,
+): PlanId => {
+	if (!user) return "free";
+	return user.roles.includes("admin") ? "enterprise" : user.plan;
+};
+
+/** Whether the paid plans are pickable. They aren't open yet, so everyone but
+ *  an admin is held on Free — /me/plan refuses the rest with a 403. */
+export const canChangePlan = (user: { roles: string[] } | null | undefined): boolean =>
+	!!user?.roles.includes("admin");
+
 // Plan cards. Kept to a name, one line, a price, and a handful of short bullets
 // — the shape Claude and ChatGPT both use. Longer copy was the old version's
 // problem: four plans each explaining themselves in paragraphs is a wall, and
