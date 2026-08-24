@@ -484,6 +484,44 @@ const INCLUDE_3D_PANE_IN_SNAPSHOTS: boolean = false;
 // abandons the request.
 const VIEWER_LOAD_TIMEOUT_MS = 120_000;
 
+// Cornerstone's NIfTI loader starts a second, full-volume request after it has
+// read the header. That later request does not accept the viewer AbortSignal,
+// so aborting only the metadata promise still left the UI spinning when a
+// proxy/QUIC connection stalled mid-download. Race the complete viewer setup
+// with the signal so every stage has the same visible recovery path.
+function awaitViewerLoadOrAbort<T>(
+	promise: Promise<T>,
+	signal: AbortSignal,
+	disposeLateResult: (value: T) => void
+): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		let aborted = false;
+		const onAbort = () => {
+			if (aborted) return;
+			aborted = true;
+			reject(new DOMException("Viewer load was aborted", "AbortError"));
+		};
+
+		if (signal.aborted) onAbort();
+		else signal.addEventListener("abort", onAbort, { once: true });
+
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				if (aborted) {
+					disposeLateResult(value);
+					return;
+				}
+				resolve(value);
+			},
+			(error) => {
+				signal.removeEventListener("abort", onAbort);
+				if (!aborted) reject(error);
+			}
+		);
+	});
+}
+
 type VisualizationPageProps = {
 	liveRoom?: LiveRoomController;
 	soloChallenge?: SoloChallengeController;
@@ -2535,15 +2573,19 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 			try {
 				startLoadDeadline();
-				const result = await renderVisualization(
-					axial_ref.current,
-					sagittal_ref.current,
-					coronal_ref.current,
-					cmap,
-					ctUrl,
-					segUrl ?? undefined,
-					setLoading,
-					{ resourceKey: ctUrl, signal: controller.signal }
+				const result = await awaitViewerLoadOrAbort(
+					renderVisualization(
+						axial_ref.current,
+						sagittal_ref.current,
+						coronal_ref.current,
+						cmap,
+						ctUrl,
+						segUrl ?? undefined,
+						setLoading,
+						{ resourceKey: ctUrl, signal: controller.signal }
+					),
+					controller.signal,
+					(result) => result.dispose()
 				);
 
 				clearLoadDeadline();
