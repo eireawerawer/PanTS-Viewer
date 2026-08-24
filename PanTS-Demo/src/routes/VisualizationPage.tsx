@@ -47,7 +47,6 @@ import { track } from "../helpers/analytics";
 import { buildViewerActions } from "../components/AIAssistant/assistantActions";
 import MeasurementPanel from "../components/MeasurementPanel/MeasurementPanel";
 import { SegmentationMeshViewer } from "../components/viewer/MeshViewer";
-import { cache as reportDataCache } from '../components/ReportScreen/ReportScreen';
 import { captureMeshCanvas } from "../helpers/viewer/meshCapture";
 import OrganCheckbox from "../components/OrganCheckbox";
 import PercentileBar from "../components/PercentileBar";
@@ -479,6 +478,12 @@ function CloseLoopHint({ nearClose, anchor }: { nearClose: boolean; anchor: [num
 // 3D pane prevents black frames from being sent to the vision assistant.
 const INCLUDE_3D_PANE_IN_SNAPSHOTS: boolean = false;
 
+// A stalled volume request used to leave the full viewer on a black "Preparing
+// case" screen forever. Two minutes is long enough for a legitimate slow link,
+// while still giving the reader a clear recovery path when a proxy resets or
+// abandons the request.
+const VIEWER_LOAD_TIMEOUT_MS = 120_000;
+
 type VisualizationPageProps = {
 	liveRoom?: LiveRoomController;
 	soloChallenge?: SoloChallengeController;
@@ -524,21 +529,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		? liveRoom.metadata.resolution === "full"
 		: typeof window !== "undefined" && new URLSearchParams(window.location.search).get("hd") === "1";
 	
-	useEffect(() => {
-		if (isDicom || !caseId || reportDataCache[caseId]) return;
-		// Deferred ~2s so this doesn't compete with the CT/segmentation load for
-		// server CPU and disk I/O right when the viewer first opens — the scan
-		// is what the user needs immediately; the report data just needs to be
-		// warm in the cache well before anyone would actually click "Report."
-		const t = setTimeout(() => {
-			fetch(`${API_BASE}/api/get-report-data/${caseId}`)
-				.then(r => r.json())
-				.then(j => { if (!j.error) reportDataCache[caseId] = j; })
-				.catch(() => {});
-		}, 2000);
-		return () => clearTimeout(t);
-	}, [caseId, isDicom]);
-
 	const [showAnnotationToolbar, setShowAnnotationToolbar] = useState(false);
 	const [isEditRendering, setIsEditRendering] = useState(false);
 	// Mirrors SegmentsPopup's "something is currently being deleted" state up
@@ -2363,9 +2353,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		let cancelled = false;
 		const controller = new AbortController();
 		let disposeLoaded: (() => void) | undefined;
+		let loadTimedOut = false;
+		let loadDeadline: number | undefined;
 		viewerReadyRef.current = false;
 		setViewerReady(false);
 		setAcceptedViewerVolumeId(null);
+		setDicomError(null);
 		initialLiveMeasurementsAppliedRef.current = null;
 		initialChallengeMeasurementAppliedRef.current = null;
 		setLoading(true);
@@ -2388,6 +2381,31 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			setViewerReady(true);
 			setLoading(false);
 			return true;
+		};
+		const startLoadDeadline = () => {
+			loadDeadline = window.setTimeout(() => {
+				loadTimedOut = true;
+				controller.abort();
+			}, VIEWER_LOAD_TIMEOUT_MS);
+		};
+		const clearLoadDeadline = () => {
+			if (loadDeadline !== undefined) {
+				window.clearTimeout(loadDeadline);
+				loadDeadline = undefined;
+			}
+		};
+		const reportLoadError = (error: unknown, fallback: string) => {
+			if (cancelled) return;
+			if (error instanceof DOMException && error.name === "AbortError" && !loadTimedOut) return;
+			console.error(error);
+			setDicomError(
+				loadTimedOut
+					? "The scan connection took too long to start. Please retry this case."
+					: error instanceof Error && error.message
+						? error.message
+						: fallback
+			);
+			setLoading(false);
 		};
 		const setup = async () => {
 			// Local DICOM/NIfTI have no server-side segmentation — don't seed the static
@@ -2516,6 +2534,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			}
 
 			try {
+				startLoadDeadline();
 				const result = await renderVisualization(
 					axial_ref.current,
 					sagittal_ref.current,
@@ -2527,12 +2546,11 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					{ resourceKey: ctUrl, signal: controller.signal }
 				);
 
+				clearLoadDeadline();
 				acceptLoadedViewer(result);
 			} catch (e) {
-				if (cancelled || (e instanceof DOMException && e.name === "AbortError")) return;
-				console.error(e);
-				setDicomError(e instanceof Error ? e.message : "Failed to load the viewer.");
-				setLoading(false);
+				clearLoadDeadline();
+				reportLoadError(e, "Failed to load the viewer.");
 			}
 
 			// const { nv, cmapCopy } = await create3DVolume(
@@ -2554,6 +2572,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 		return () => {
 			cancelled = true;
+			clearLoadDeadline();
 			viewerReadyRef.current = false;
 			controller.abort();
 			disposeLoaded?.();
@@ -5030,14 +5049,25 @@ const aiAvailableOrgans = useMemo(() => {
 				dragHandleRef={annotationPopupDragRef}
 				minButtonRef={annotationPopupMinRef}
 			/>
-			{/* Local-DICOM load failure: explain and offer the way back. */}
+			{/* A failed or stalled volume must never leave a reader on a black screen. */}
 			{dicomError && (
 				<div className="vp-loading" role="alert">
 					<div className="flex flex-col items-center gap-4" style={{ maxWidth: 420, textAlign: "center" }}>
 						<div className="vp-loading__text">{dicomError}</div>
-						<button className="vp-btn" onClick={() => { window.location.href = "/upload"; }}>
-							Back to upload
-						</button>
+						{isLocal ? (
+							<button className="vp-btn" onClick={() => { window.location.href = "/upload"; }}>
+								Back to upload
+							</button>
+						) : (
+							<div className="flex gap-3">
+								<button className="vp-btn" onClick={() => { window.location.reload(); }}>
+									Retry case
+								</button>
+								<button className="vp-btn" onClick={() => { window.location.href = "/dashboard"; }}>
+									Back to dataset
+								</button>
+							</div>
+						)}
 					</div>
 				</div>
 			)}

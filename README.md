@@ -159,6 +159,27 @@ git pull
 ```
 If `git pull` (or the checkout) refuses because of "local changes would be overwritten," someone edited files directly on the server. Do **not** force past it. Run `git status` to see what changed, then discard each file with `git checkout -- <file>` (or ask the maintainer) before pulling again. The server should never carry local edits.
 
+### Volume-delivery configuration (administrator required)
+
+The viewer's large immutable CT and mask files must be streamed by nginx, not
+held open by Gunicorn. Once per server (or whenever the dataset paths change),
+an administrator should install the tracked nginx configuration, test it, and
+reload nginx:
+
+```
+sudo cp /home/visitor/PanTS-Viewer/flask-server/deploy/nginx-bodymaps.conf /etc/nginx/sites-available/bodymaps
+sudo ln -sfn /etc/nginx/sites-available/bodymaps /etc/nginx/sites-enabled/bodymaps
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Then add `BODYMAPS_ACCEL_REDIRECT_ENABLED=true` to
+`/home/visitor/PanTS-Viewer/flask-server/.env`. Do not enable that setting
+before `nginx -t` succeeds: the application intentionally falls back to normal
+Flask delivery until the private nginx locations exist. A CDN cache rule for
+`/api/get-main-nifti/*` and `/api/get-segmentations/*` should also respect the
+existing `Cache-Control: public, max-age=604800, immutable` response header;
+that is what makes this architecture scale beyond one origin server.
+
 #### 3. Rebuild the frontend and refresh backend dependencies
 ```
 cd /home/visitor/PanTS-Viewer/PanTS-Demo && npm ci && npm run build

@@ -1,7 +1,7 @@
-// Shared CT/segmentation source resolution + background prefetch for the comparison
-// viewer. The data /compare page warms these (viewer chunk + both cases' volumes) as soon
-// as it loads, so opening the live side-by-side viewer is fast. Uses the exact same
-// resolution the viewer uses, so the prefetched URLs match and hit the browser cache.
+// Shared CT/segmentation source resolution for the comparison viewer. The comparison
+// page may warm the small viewer JavaScript chunk, but it deliberately never downloads
+// CT data in the background: large speculative requests can delay the reader's chosen
+// case and overload a shared server.
 import { API_BASE } from "./constants";
 import { getPanTSId } from "./utils";
 
@@ -37,22 +37,4 @@ export function prefetchCompareViewerChunk(): void {
 	if (typeof process !== "undefined" && process.env?.VITEST) return;
 	if (!prefetchAllowed()) return;
 	import("../routes/CompareViewerPage").catch(() => {});
-}
-
-// Kick off background downloads of both cases' CT + segmentation volumes so the viewer's
-// loader hits a warm browser cache. Fire-and-forget, low priority, deduped per id.
-const warmed = new Set<string>();
-export function prefetchCompareVolumes(ids: string[]): void {
-	if (!prefetchAllowed()) return;
-	for (const id of ids) {
-		if (!id.trim() || warmed.has(id)) continue;
-		warmed.add(id);
-		resolveSources(id)
-			.then(({ ct, seg }) => {
-				const opts = { priority: "low" } as unknown as RequestInit;
-				fetch(ct, opts).catch(() => {});
-				fetch(seg, opts).catch(() => {});
-			})
-			.catch(() => {});
-	}
 }
