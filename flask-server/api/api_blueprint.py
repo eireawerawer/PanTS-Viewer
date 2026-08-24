@@ -74,6 +74,56 @@ last_session_check = datetime.now()
 # so this stays fully additive (no-op until the batch has run).
 LOWRES_ROOT = os.environ.get("PANTS_LOWRES_PATH", "/home/visitor/pants_lowres")
 
+
+def _x_accel_volume_uri(path):
+    """Map an approved dataset path to an nginx-only internal URI.
+
+    Flask still validates the requested case and resolves the exact file. When
+    enabled, nginx performs the large transfer with sendfile instead of keeping
+    a Gunicorn thread occupied for the lifetime of a CT download. The mapping
+    is deliberately an allowlist: an arbitrary filesystem path must never be
+    promoted into an X-Accel-Redirect header.
+    """
+    if os.environ.get("BODYMAPS_ACCEL_REDIRECT_ENABLED", "false").lower() not in {"1", "true", "yes"}:
+        return None
+
+    roots = (
+        (LOWRES_ROOT, "/_bodymaps_volume_lowres/"),
+        (Constants.CANCERVERSE_LOWRES_PATH, "/_bodymaps_volume_cancerverse_lowres/"),
+        (Constants.PANTS_PATH, "/_bodymaps_volume_pants/"),
+        (Constants.CANCERVERSE_PATH, "/_bodymaps_volume_cancerverse/"),
+    )
+    resolved_path = os.path.realpath(path)
+    for root, internal_prefix in roots:
+        if not root:
+            continue
+        resolved_root = os.path.realpath(root)
+        try:
+            if os.path.commonpath((resolved_path, resolved_root)) != resolved_root:
+                continue
+        except ValueError:
+            continue
+        relative_path = os.path.relpath(resolved_path, resolved_root).replace(os.sep, "/")
+        return internal_prefix + quote(relative_path, safe="/")
+    return None
+
+
+def _serve_dataset_volume(path):
+    """Serve a validated immutable NIfTI file, preferably through nginx."""
+    accel_uri = _x_accel_volume_uri(path)
+    if accel_uri:
+        response = Response(status=200, mimetype="application/gzip")
+        response.headers["X-Accel-Redirect"] = accel_uri
+        response.headers["Content-Disposition"] = f'inline; filename="{os.path.basename(path)}"'
+    else:
+        response = make_response(send_file(path, mimetype="application/gzip"))
+
+    response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
+    # Dataset volumes are content-addressed by case/version and never personalized.
+    # This enables browser and CDN reuse while preserving safe CORS behavior.
+    response.headers["Cache-Control"] = "public, max-age=604800, immutable"
+    return response
+
 import hmac
 from itsdangerous import URLSafeSerializer, BadSignature
 import threading
@@ -630,12 +680,7 @@ def get_main_nifti(clabel_id):
                 main_nifti_path = low_path
 
     if os.path.exists(main_nifti_path):
-        response = make_response(send_file(main_nifti_path, mimetype='application/gzip'))
-
-        response.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
-        # response.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
-        # Volumes are immutable per case — let the browser cache so revisits are instant.
-        response.headers['Cache-Control'] = 'public, max-age=604800, immutable'
+        response = _serve_dataset_volume(main_nifti_path)
 
     else:
         print(f"Could not find filepath: {main_nifti_path}. ")
@@ -2012,10 +2057,7 @@ async def get_segmentations(combined_labels_id):
         low_name = Constants.COMBINED_LABELS_NIFTI_FILENAME.replace('.nii.gz', '_lowres.nii.gz')
         low_path = f"{LOWRES_ROOT}/mask_only/{get_panTS_id(secure_filename(combined_labels_id))}/{low_name}"
         if os.path.exists(low_path):
-            response = make_response(send_file(low_path, mimetype='application/gzip'))
-            response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
-            response.headers['Cache-Control'] = 'public, max-age=604800, immutable'
-            return response
+            return _serve_dataset_volume(low_path)
 
     img = nib.load(nifti_path)
 
@@ -2043,13 +2085,7 @@ async def get_segmentations(combined_labels_id):
                 nib.save(new_img, converted_path)
             serve_path = converted_path
 
-        response = make_response(send_file(serve_path, mimetype='application/gzip'))
-        response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
-        response.headers['Cache-Control'] = 'public, max-age=604800, immutable'
-        # response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
-        # response.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
-
-        return response
+        return _serve_dataset_volume(serve_path)
 
     except Exception as e:
         print(f"❌ [get-segmentations ERROR] {e}")

@@ -2,7 +2,6 @@ import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { API_BASE } from "../helpers/constants";
 import { prefetchViewer } from "../helpers/prefetchViewer";
-import { prefetchVolume } from "../helpers/prefetchVolume";
 import type { CaseId } from "../helpers/search";
 import type { PreviewType } from "../types";
 
@@ -43,9 +42,6 @@ export default function Preview({
 			onSettled?.();
 		}
 	};
-	// Warm the low-res CT only after a short hover dwell, so skimming across the grid
-	// doesn't fire a fetch per card. Cleared on mouse-leave.
-	const prefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	// Prefer the lab's local data via the existing backend endpoint; fall back to
 	// the HuggingFace dataset if the local profile image isn't available on the
 	// server (so thumbnails never break regardless of deployment). Loaded natively
@@ -102,17 +98,13 @@ export default function Preview({
 			}
 			onMouseEnter={() => {
 				setHovered(true);
-				prefetchViewer(); // warm the viewer JS chunk so clicking feels instant
-				// warm the low-res CT too, after a brief dwell (see prefetchVolume)
-				if (prefetchTimer.current) clearTimeout(prefetchTimer.current);
-				prefetchTimer.current = setTimeout(() => prefetchVolume(id), 150);
+				// The viewer JavaScript is small enough to warm safely. Do not prefetch a
+				// CT here: scans are tens of MB, and background downloads can starve the
+				// case the reader actually clicks (or reset its connection).
+				prefetchViewer();
 			}}
 			onMouseLeave={() => {
 				setHovered(false);
-				if (prefetchTimer.current) {
-					clearTimeout(prefetchTimer.current);
-					prefetchTimer.current = null;
-				}
 			}}
 			onClick={() => navigate(`/case/${id}`)}
 		>

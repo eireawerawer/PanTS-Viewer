@@ -308,6 +308,31 @@ function _throwIfViewerLoadStale(context: ViewerResourceContext, signal?: AbortS
     throw new DOMException("Viewer load was replaced", "AbortError");
   }
 }
+
+// The NIfTI loader does not currently accept an AbortSignal for its metadata
+// fetch. Race its promise with the viewer's signal so a dropped connection can
+// never trap the page on "Preparing case" forever. The underlying fetch can
+// finish harmlessly in the background; the stale context is disposed and can
+// no longer render into the active viewer.
+function _awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new DOMException("Viewer load was aborted", "AbortError"));
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("Viewer load was aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
 // The CT volume currently on the MPR viewports (changes when the progressive
 // full-res upgrade swaps it) and the color LUT used for the labelmap, kept so
 // the segmentation representation can be rebuilt after a volume swap.
@@ -619,11 +644,14 @@ export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivEle
     imageLoader.registerImageLoader("nifti", cornerstoneNiftiImageLoader);
     // The CT stack either streams from a NIfTI URL (dataset cases / sessions) or is a
     // set of already-registered DICOM imageIds (local "open DICOM folder" flow).
-    const imageIds = opts?.ctImageIds ?? (await createNiftiImageIdsAndCacheMetadata({ url: mainNiftiURL }));
+    const imageIds = opts?.ctImageIds ?? (await _awaitWithAbort(
+        createNiftiImageIdsAndCacheMetadata({ url: mainNiftiURL }),
+        opts?.signal
+    ));
     _claimVolumeImages(context, ctVolumeId, imageIds);
     _throwIfViewerLoadStale(context, opts?.signal);
     const segmentationImageIds = segmentationURL
-    ? await createNiftiImageIdsAndCacheMetadata({ url: segmentationURL })
+    ? await _awaitWithAbort(createNiftiImageIdsAndCacheMetadata({ url: segmentationURL }), opts?.signal)
     : [];
     _claimVolumeImages(context, segmentationVolumeId, segmentationImageIds);
     _throwIfViewerLoadStale(context, opts?.signal);
