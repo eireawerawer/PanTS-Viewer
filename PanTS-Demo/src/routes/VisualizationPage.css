@@ -302,6 +302,17 @@
   border-color: #ffffff;
 }
 
+.vp-seg--pane-layout .vp-seg__btn {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  padding-inline: 6px;
+  line-height: 1.2;
+  text-align: center;
+  white-space: normal;
+}
+
 /* ---- Labels + numeric readouts inside panels ---- */
 .vp-row {
   display: flex;

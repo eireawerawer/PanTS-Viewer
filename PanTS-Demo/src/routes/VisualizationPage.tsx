@@ -3768,7 +3768,7 @@ const aiAvailableOrgans = useMemo(() => {
 									{viewMode === "mpr" && (
 										<>
 											<span className="vp-panel__title">Panes</span>
-											<div className="vp-seg" role="group" aria-label="Pane layout">
+											<div className="vp-seg vp-seg--pane-layout" role="group" aria-label="Pane layout">
 												{LAYOUT_PRESETS.map(({ id, label }) => (
 													<button
 														key={id}
