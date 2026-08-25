@@ -43,4 +43,14 @@ describe("brand identity", () => {
     expect(css).toContain("--vp-font: var(--font-sans)");
     expect(css).toContain("--vp-mono: var(--font-mono)");
   });
+
+  it("keeps Live Rooms and Solo Challenge on the blue feature palette", () => {
+    const liveRooms = read("src/liveRooms/liveRooms.css");
+    const soloChallenge = read("src/education/soloChallenge.css");
+
+    expect(liveRooms).toContain("--lr-primary: #6ea8fe");
+    expect(liveRooms).not.toMatch(/#72d8e5|#c7f36b|rgba\(199,\s*243,\s*107/);
+    expect(soloChallenge).toContain("--edu-primary: #6ea8fe");
+    expect(soloChallenge).not.toMatch(/rgba\(231,\s*111,\s*81/);
+  });
 });
