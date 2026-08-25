@@ -89,7 +89,7 @@ def get_case_nifti_paths(case_id):
         return {
             "dataset": dataset,
             "folder_id": folder,
-            "image": f"{Constants.CANCERVERSE_PATH}/{folder}/{Constants.MAIN_NIFTI_FILENAME}",
+            "image": f"{Constants.CANCERVERSE_PATH}/image_only/{folder}/{Constants.MAIN_NIFTI_FILENAME}",
             "lowres_image": f"{Constants.CANCERVERSE_LOWRES_PATH}/image_only/{folder}/ct_lowres.nii.gz",
             "mask": None,
             "masks_available": False,
@@ -1307,7 +1307,7 @@ except Exception as _norm_err:
 # so search/sort/row_to_item work unchanged. Optional: if the path/CSV is absent
 # (e.g. local dev) DF_CV stays None and CV search returns empty — never raises.
 # The CSV sits NEXT TO the CancerVerse image folder, not inside it:
-#   <parent>/CancerVerse_dataset_metadata.csv   +   <parent>/CancerVerse/CV_########/
+#   <parent>/CancerVerse_dataset_metadata.csv   +   <parent>/CancerVerse/image_only/CV_########/
 CANCERVERSE_META_FILE = (
     os.path.join(os.path.dirname(os.path.normpath(Constants.CANCERVERSE_PATH)),
                  "CancerVerse_dataset_metadata.csv")

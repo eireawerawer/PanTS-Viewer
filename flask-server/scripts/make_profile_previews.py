@@ -79,10 +79,10 @@ def main():
     if not args.out_root:
         sys.exit("--out-root not set and CANCERVERSE_PATH is empty")
 
-    # CT volumes live flat at <CANCERVERSE_PATH>/<case>/ct.nii.gz (no image_only/ split
-    # like PanTS — CancerVerse is CT-only, see constants.py).
+    # CT volumes live at <CANCERVERSE_PATH>/image_only/<case>/ct.nii.gz, mirroring the
+    # PanTS layout (see constants.py).
     root = Constants.CANCERVERSE_PATH
-    ct_paths = sorted(glob.glob(os.path.join(root, "*", CT_NAME)))
+    ct_paths = sorted(glob.glob(os.path.join(root, "image_only", "*", CT_NAME)))
     if args.limit:
         ct_paths = ct_paths[: args.limit]
 

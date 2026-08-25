@@ -666,7 +666,7 @@ def get_main_nifti(clabel_id):
     want_low = (request.args.get('res') or '').strip().lower() == 'low'
 
     if get_dataset_from_case_id(safe_id) == "CancerVerse":
-        # CancerVerse: CT-only, stored flat at CANCERVERSE_PATH/<CV id>/ct.nii.gz.
+        # CancerVerse: CT-only, stored at CANCERVERSE_PATH/image_only/<CV id>/ct.nii.gz.
         paths = get_case_nifti_paths(safe_id)
         main_nifti_path = paths["image"]
         if want_low and os.path.exists(paths["lowres_image"]):
