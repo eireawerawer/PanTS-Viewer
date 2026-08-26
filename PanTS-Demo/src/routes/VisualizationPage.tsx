@@ -594,12 +594,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		: typeof window !== "undefined" && new URLSearchParams(window.location.search).get("hd") === "1";
 	
 	const [showAnnotationToolbar, setShowAnnotationToolbar] = useState(false);
-	const [isEditRendering, setIsEditRendering] = useState(false);
-	// Mirrors SegmentsPopup's "something is currently being deleted" state up
-	// to AnnotationToolbar's ribbon, same as isEditRendering does for a
-	// paint/erase/scissors commit — drives the "Deleting…" indicator on the
-	// right side of the toolbar while a class delete is in flight.
-	const [isDeletingSegment, setIsDeletingSegment] = useState(false);
 	useEffect(() => {
 		if (!showAnnotationToolbar) setEditMode((m) => (m === "brush" || m === "eraser" || m === "lasso" ? null : m));
 	}, [showAnnotationToolbar]);
@@ -1086,7 +1080,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				actualMm={marginInfo?.mm ?? null}
 				actualVoxels={marginInfo?.voxels ?? null}
 				onApplied={onApplied}
-				onBusyChange={setIsEditRendering}
 			  />
 			);
 		  }
@@ -1143,7 +1136,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				pickedInvalid={islandPickInvalid}
 				targetKey={activeCatalogOrganId ?? activeSegment}
 				onApplied={onApplied}
-				onBusyChange={setIsEditRendering}
 			  />
 			);
 			case "logicalOperators":
@@ -1163,7 +1155,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					  if (r) sessionRef.current?.log("edit", `Logical op ${op} (${r.changedVoxels.toLocaleString()} vox)`, 2000);
 					}}
 					onApplied={onApplied}
-					onBusyChange={setIsEditRendering}
 				  />
 				);
 		case "growFromSeeds":
@@ -1180,7 +1171,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			onApplied={onApplied}
 			onCloseSettings={onCloseSettings}
 			onGuidedControlsChange={onGuidedControlsChange}
-			onBusyChange={setIsEditRendering}
 			/>
 		);
 		case "fillBetweenSlices":
@@ -1216,7 +1206,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			maskFilter={maskFilter}
 			onLog={(d) => sessionRef.current?.log("edit", d, 2000)}
 			onApplied={onApplied}
-			onBusyChange={setIsEditRendering}
 			/>
 		);
 		case "smoothing":
@@ -1228,7 +1217,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				if (r) sessionRef.current?.log("edit", `Smoothing ${method} (${r.changedVoxels.toLocaleString()} vox)`, 2000);
 			}}
 			onApplied={onApplied}
-			onBusyChange={setIsEditRendering}
 			/>
 		);
 		case "levelTracing":
@@ -1312,7 +1300,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 
 	// Applies live pointer-driven edits (brush/eraser/scissors/level tracing):
-	// shows the "applying" indicator and commits the brush's mask guard.
+	// commits the brush's mask guard.
 	useEffect(() => {
 		const isLiveCommitTool =
 			editMode === "brush" ||
@@ -1326,13 +1314,11 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		const onDown = (e: Event) => {
 			if (!isOnPane(e)) return;
 			if (editMode === "brush" || editMode === "eraser") beginBrushMaskGuard();
-			setIsEditRendering(true);
 		};
 		const onUp = () => {
 			if (editMode === "brush" || editMode === "eraser") {
 				endBrushMaskGuard(resolvedMasking.effectiveArea, resolvedMasking.ids);
 			}
-			requestAnimationFrame(() => requestAnimationFrame(() => setIsEditRendering(false)));
 		};
 	
 		window.addEventListener("pointerdown", onDown, true);
@@ -1436,6 +1422,16 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// Progressive resolution: after the fast low-res load, the full-res CT streams in
 	// the background and hot-swaps in place (no reload). idle → streaming → done/failed.
 	const [enhance, setEnhance] = useState<{ state: "idle" | "streaming" | "done" | "failed"; pct: number | null }>({ state: "idle", pct: null });
+
+	// True from the moment the Annotate button is clicked with HD not yet
+	// ready until the HD upgrade (runEnhance) resolves one way or the
+	// other. Drives the full-screen blurred loading overlay below AND
+	// gates auto-opening the annotation toolbar/SegmentsPopup once the
+	// upgrade finishes — see handleAnnotateClick. Kept separate from
+	// `enhance.state === "streaming"` because the HD button itself can
+	// also drive that state, and clicking HD manually should NOT pop the
+	// annotation toolbar open when it finishes.
+	const [annotateHdLoading, setAnnotateHdLoading] = useState(false);
 
 	// Click/box-to-segment (interactive prompt tools). `res` MUST match the
 	// grid the live segmentation volume is actually on right now — same
@@ -1626,35 +1622,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(editMode === "brush" ? EDIT_BRUSH : EDIT_ERASER);
 		} else if (editMode === "smartfill" || activeToolbarTool === "pointSegment" || activeToolbarTool === "boxSegment") {
-			// Smart fill (scribbling) and point/box segment (click / click-drag
-			// prompts) all own the mouse themselves — no Cornerstone tool
-			// needed. This must be a full releasePrimaryMouseTools(), not just
-			// crosshair-off: box-segment specifically is a mousedown→drag→
-			// mouseup gesture, and with the crosshair merely toggled off but
-			// no tool explicitly released, Cornerstone still had SOME tool
-			// bound to primary-button-drag (pan/window-level, whatever the
-			// viewport's underlying default is) — so dragging out a box
-			// simultaneously panned/adjusted the underlying CT view instead of
-			// just drawing the box overlay. Point segment is a plain click
-			// with no drag, so the same bug wasn't visible there, but it's
-			// released here too for consistency (and so a slight click-drift
-			// during the click can't be misread as a pan/W-L nudge either).
-			setActiveMeasurementTool(null);
-			setActiveMaskEditTool(null);
-			releasePrimaryMouseTools();
-		} else if (editMode === "lasso" || activeToolbarTool === "levelTracing") {
-			// Scissors/lasso (editMode "lasso") and level tracing place their
-			// points via plain clicks on the pane — so the crosshair tool
-			// needs to be OFF here too, not just left to whatever
-			// `crosshairToolActive` (the user's saved navigation preference)
-			// happens to be. Previously this fell through to the plain `else`
-			// below, which re-enabled Crosshairs whenever `crosshairToolActive`
-			// was true (the default) — so the crosshair stayed live and
-			// interactive underneath the polygon/trace clicks even though the
-			// toolbar's own crosshair button visually showed itself as
-			// deselected (its active-state check already excludes any
-			// editMode) — nothing in the UI hinted navigation was still armed
-			// underneath.
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(null);
 			toggleCrosshairTool(false);
@@ -3335,6 +3302,41 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		}
 	};
 
+	// Watches the HD upgrade kicked off by the Annotate button (see
+	// handleAnnotateClick below). Once it resolves, either open the
+	// annotation toolbar/SegmentsPopup (success — this is the moment the
+	// loading overlay disappears and both pop in together) or just clear
+	// the loading flag (failure — the button goes back to its normal
+	// resting state so the person can try again).
+	useEffect(() => {
+		if (!annotateHdLoading) return;
+		if (enhance.state === "done") {
+			setAnnotateHdLoading(false);
+			setShowAnnotationToolbar(true);
+		} else if (enhance.state === "failed") {
+			setAnnotateHdLoading(false);
+		}
+	}, [enhance.state, annotateHdLoading]);
+
+	// The Annotate button is never disabled for "HD not loaded yet" —
+	// clicking it always does something. If HD is already ready, it just
+	// toggles the ribbon like any other toolbar button. If not, it
+	// immediately kicks off the HD upgrade (reusing an in-flight one
+	// rather than starting a second) and shows the full-screen loading
+	// overlay; the toolbar/SegmentsPopup only appear once that finishes
+	// (see the effect above), since painting before the full-res
+	// segmentation volume exists would edit a mask on the wrong grid.
+	const handleAnnotateClick = () => {
+		if (collaborationDisabled) return;
+		const hdReadyNow = isHd || enhance.state === "done";
+		if (hdReadyNow) {
+			handleToggleAnnotationToolbar();
+			return;
+		}
+		setAnnotateHdLoading(true);
+		if (enhance.state === "idle") void runEnhance();
+	};
+
 	const handleToggleAnnotationToolbar = () => {
 		const opening = !showAnnotationToolbar;
 		setShowAnnotationToolbar(opening);
@@ -4165,19 +4167,19 @@ const aiAvailableOrgans = useMemo(() => {
 											
 											{!isLocal && !soloChallenge && liveRoom?.metadata.mode !== "quiz" && (() => {
 												// Annotating on the low-res stream would edit a mask that
-												// doesn't line up with the eventual full-res volume, so the
-												// button stays disabled until the HD upgrade has actually
-												// finished (native HD load, or the progressive stream done).
+												// doesn't line up with the eventual full-res volume — but
+												// the button itself is never disabled for that reason
+												// anymore. Instead, clicking it while HD isn't ready kicks
+												// off the HD upgrade immediately and shows a full-screen
+												// loading overlay; the toolbar only opens once that
+												// finishes (see handleAnnotateClick / annotateHdLoading).
 													const hdReady = isHd || enhance.state === "done";
-													const annotationDisabled = !hdReady || collaborationDisabled;
+													const annotationDisabled = collaborationDisabled;
 												return (
 													<button
 														ref={annotatePencilRef}
-														className={`vp-tool ${showAnnotationToolbar ? "vp-tool--active" : ""} ${annotationDisabled ? "vp-tool--disabled" : ""}`}
-														onClick={() => {
-															if (!hdReady) return;
-															handleToggleAnnotationToolbar();
-														}}
+														className={`vp-tool ${showAnnotationToolbar ? "vp-tool--active" : ""} ${annotationDisabled ? "vp-tool--disabled" : ""} ${annotateHdLoading ? "vp-tool--busy" : ""}`}
+														onClick={handleAnnotateClick}
 															disabled={annotationDisabled}
 															aria-disabled={annotationDisabled}
 														aria-label="Annotate"
@@ -4185,7 +4187,7 @@ const aiAvailableOrgans = useMemo(() => {
 													>
 														<IconPencil size={20} color={showAnnotationToolbar ? "#08090b" : "white"} />
 														<span className="vp-tool__tip">
-															{hdReady ? "Annotate" : "Annotate — waiting for HD resolution to finish loading"}
+															{hdReady ? "Annotate" : "Annotate — loads HD resolution first"}
 														</span>
 													</button>
 												);
@@ -5093,8 +5095,26 @@ const aiAvailableOrgans = useMemo(() => {
 				onResize={applyAiWidth}
 				onResizeEnd={commitAiWidth}
 				/>}
+			{/* Full-screen blurred loading overlay while the Annotate button's
+				forced HD upgrade is in flight (see handleAnnotateClick). The
+				annotation toolbar and SegmentsPopup stay closed (both gated
+				on showAnnotationToolbar) until this resolves, so there's
+				never a window where the ribbon is up but painting would hit
+				the still-low-res segmentation grid. */}
+			{annotateHdLoading && (
+				<div className="vp-annotate-hd-overlay" role="status" aria-live="polite">
+					<div className="vp-annotate-hd-overlay__spinner" aria-hidden="true" />
+					<div className="vp-annotate-hd-overlay__label">
+						Loading HD resolution{enhance.state === "streaming" && enhance.pct != null ? ` — ${enhance.pct}%` : "…"}
+					</div>
+				</div>
+			)}
 			<AnnotationToolbar
 				open={showAnnotationToolbar}
+				// So the ribbon can draw its little pointer arrow back up to
+				// the pencil button that opened it (see the pointer-tracking
+				// effect in AnnotationToolbar.tsx).
+				anchorRef={annotatePencilRef}
 				hasSegments={hasSegments}
 				hasActiveTarget={hasActiveTarget}
 				activeTool={activeToolbarTool}
@@ -5107,26 +5127,13 @@ const aiAvailableOrgans = useMemo(() => {
 				renderFlyout={renderAnnotationFlyout}
 				scissorsPointCount={scissors.anchorsCanvas.length}
 				onScissorsCancel={scissors.cancel}
-				maskingArea={maskingArea}
-				onMaskingAreaChange={setMaskingArea}
-				hasAnySegments={hasAnySegments}
-				scopeLocked={false}
-				isRendering={isEditRendering || promptToolBusy}
-				isDeletingSegment={isDeletingSegment}
 				targetKey={activeCatalogOrganId ?? activeSegment}
-				showOnlyTargetMask={showOnlyTargetMask}
-				onShowOnlyTargetMaskChange={setShowOnlyTargetMask}
 				popupRef={annotationPopupRef}
 				popupDragRef={annotationPopupDragRef}
 				popupMinRef={annotationPopupMinRef}
 				sliceJumpRef={sliceJumpWrapRef}
-				anchorRef={annotatePencilRef}
 			/>
-			{/* Point/box-segment SUCCESS/ERROR overlay only — the "applying"
-			    state is now shown via the toolbar's own pulsing dot (isRendering
-			    below), same spot as Copy-Across-Slices/Grow-From-Seeds/etc, so
-			    it doesn't need its own separate indicator here too. This one is
-			    just the result, and reuses the exact same centered
+			{/* Point/box-segment SUCCESS/ERROR overlay. Reuses the exact same centered
 			    GuidedStepModal (blurred backdrop + "Got it") that Copy across
 			    slices/Fill between slices use for their own success step,
 			    rather than a small bottom-of-screen pill — consistent with
@@ -5164,13 +5171,15 @@ const aiAvailableOrgans = useMemo(() => {
 				onToggleVisibility={handleToggleSegmentVisibility}
 				onDelete={handleDeleteSegment}
 				onCreate={handleCreateClass}
-				onDeletingChange={setIsDeletingSegment}
 				organCatalog={organCatalog}
 				activeCatalogOrganId={activeCatalogOrganId}
 				onSelectCatalogOrgan={handleSelectCatalogOrgan}
 				containerRef={annotationPopupRef}
 				dragHandleRef={annotationPopupDragRef}
 				minButtonRef={annotationPopupMinRef}
+				showOnlyTargetMask={showOnlyTargetMask}
+				onShowOnlyTargetMaskChange={setShowOnlyTargetMask}
+				hasActiveTarget={hasActiveTarget}
 			/>
 			{/* A failed or stalled volume must never leave a reader on a black screen. */}
 			{dicomError && (
