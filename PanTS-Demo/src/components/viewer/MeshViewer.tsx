@@ -10,7 +10,6 @@ import { SceneCrosshair3D } from "./SceneCrosshair3D";
 import type { Color } from "@cornerstonejs/core/types";
 import { LiveSegmentMesh } from "./LiveSegmentMesh";
 import type { CheckBoxData } from "../../types";
-import { getEditedSegments, subscribeToSegmentationEdits } from "../../helpers/CornerstoneNifti2";
 import ErrorBoundary from "../ErrorBoundary";
 
 type SegmentationMeshViewerProps = {
@@ -43,22 +42,10 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
   const [manifest, setManifest] = useState<MeshManifest | null>(null);
   const [manifestError, setManifestError] = useState(false);
   const [loaded, setLoaded] = useState<Record<number, boolean>>({});
-  // Bumped on every mask edit so editedSegments below is recomputed — the 3D pane
-  // needs to know the instant a static organ's mask changes, not just at mount.
-  const [editVersion, setEditVersion] = useState(0);
-
-  useEffect(() => {
-    const unsubscribe = subscribeToSegmentationEdits(() => setEditVersion((v) => v + 1));
-    return unsubscribe;
-  }, []);
 
   // Drop the renderer handle when this pane goes away, so a capture can never
   // reach into a disposed WebGL context.
   useEffect(() => () => registerMeshRoot(null), []);
-
-  // Segment indices touched since the case loaded — includes edits to the STATIC
-  // 32-organ catalog, not just brand-new custom classes.
-  const editedSegments = useMemo(() => getEditedSegments(), [editVersion]);
 
   const crosshairPosition = useMemo(() => {
     if (!manifest || !crosshairMm) return null;
@@ -116,21 +103,18 @@ export function SegmentationMeshViewer({ caseId, checkState, loading, opacity, c
               <group>
                 {organs.map((organ) => {
                   if (!loaded[organ.id]) return null;
-                  // Edited static organ: the server-baked GLB is stale — extract a
-                  // fresh live mesh from the in-memory labelmap instead, same path
-                  // custom classes already use.
-                  if (editedSegments.has(organ.id)) {
-                    return (
-                      <LiveSegmentMesh
-                        key={`live-${organ.id}`}
-                        segmentIndex={organ.id}
-                        color={labelColorMap[organ.id] ?? [255, 255, 255, 255]}
-                        visible={!!checkState[organ.id]}
-                        opacity={opacity / 100}
-                        manifestCenter={manifest.center as [number, number, number]}
-                      />
-                    );
-                  }
+                  // Always render the pre-baked GLB, even after this organ
+                  // has been edited. Switching to a live marching-cubes
+                  // mesh (LiveSegmentMesh) the instant an edit lands was
+                  // both expensive (isosurface extraction on the stroke
+                  // that triggers the switch — visible as a lag spike
+                  // right on the first brush stroke) and unnecessary: the
+                  // 3D pane is meant to show the original mesh, not a
+                  // live reconstruction of in-progress annotations, so
+                  // there's nothing gained by ever recomputing it here.
+                  // Custom classes (no baked GLB to fall back to) still go
+                  // through LiveSegmentMesh below, since that's the only
+                  // way they can be shown in 3D at all.
                   return (
                     <OrganMesh
                       key={organ.id}
