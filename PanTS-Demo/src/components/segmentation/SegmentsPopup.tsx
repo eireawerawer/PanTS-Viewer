@@ -4,6 +4,7 @@ import {
 	IconEye, IconEyeOff, IconTrash, IconPlus, IconStack2, IconSparkles,
 	IconPencil,
 	IconLoader2,
+	IconCheck,
 } from "@tabler/icons-react";
 import type { CheckBoxData } from "../../types";
 import "./SegmentsPopup.css";
@@ -47,6 +48,14 @@ interface SegmentsPopupProps {
 	 *  attaches a ref to it, but removing the prop would be a breaking
 	 *  change to every call site for no behavioral benefit. */
 	minButtonRef?: React.RefObject<HTMLButtonElement | null>;
+
+	/** "Show only target class" display preference — moved here (above the
+	 *  organ/class list) from AnnotationToolbar's ribbon. On by default:
+	 *  every class except whichever one is currently targeted is hidden
+	 *  from the CT viewer. */
+	showOnlyTargetMask: boolean;
+	onShowOnlyTargetMaskChange: (v: boolean) => void;
+	hasActiveTarget: boolean;
 }
 
 // Normalizes any organ label to Title Case ("Adrenal Gland Left") so the
@@ -68,7 +77,40 @@ const NEXT_COLOR_POOL = ["#0F172A", "#E76F51", "#2A344A", "#0F172A", "#E76F51", 
 // Applies to both the "add segment" and "rename" name fields.
 const MAX_SEGMENT_NAME_LENGTH = 40;
 
-// Kept in sync with the CSS transition durations in SegmentsPopup.css so
+interface ShowOnlyTargetToggleProps {
+	checked: boolean;
+	onChange: (v: boolean) => void;
+	disabled: boolean;
+}
+
+// Display preference shown above the class list, centered — replaces the
+// old per-tab hint text. Lives here (rather than in AnnotationToolbar)
+// since it's a property of the list itself, not of any editing tool.
+function ShowOnlyTargetToggle({ checked, onChange, disabled }: ShowOnlyTargetToggleProps) {
+	return (
+		<button
+			type="button"
+			className={`segpop__show-target ${disabled ? "is-disabled" : ""}`}
+			role="checkbox"
+			aria-checked={checked}
+			aria-disabled={disabled}
+			disabled={disabled}
+			onClick={() => onChange(!checked)}
+			title={
+				disabled
+					? "Pick or create a class first."
+					: checked
+						? "On — every class except whichever one is currently targeted is hidden. Click to show every class's mask."
+						: "Off — every class's mask is showing. Click to show only the targeted class's mask."
+			}
+		>
+			<span className="segpop__show-target-box">
+				<IconCheck aria-hidden="true" size={12} stroke={3} className="segpop__show-target-check" />
+			</span>
+			<span>Show only target class</span>
+		</button>
+	);
+}// Kept in sync with the CSS transition durations in SegmentsPopup.css so
 // JS timers gate the real state change at the right moment.
 const EXIT_ANIM_MS = 200;
 
@@ -340,26 +382,27 @@ function FormFlyout({ anchorEl, onClose, children }: FormFlyoutProps) {
 
 
 
-// Gap kept clear between the docked panel's top edge and the reserved
-// annotation area above it (topbar + ribbon + flyout strip — see
-// --vp-topbar-h / --atb-ribbon-h / --atb-panel-h in AnnotationToolbar.css).
-// --atb-panel-h is measured live off the flyout's content (see the
-// ResizeObserver in AnnotationToolbar.tsx) and is 0px when no tool is
-// selected, so the panel docks directly under the ribbon until a tool's
-// options row opens. The flat "+10px" is breathing room, kept in sync
-// with the matching margin-top on .vp-stage in VisualizationPage.css.
-const DOCK_CLEARANCE = "calc(var(--vp-topbar-h, 0px) + var(--atb-ribbon-h, 42px) + var(--atb-panel-h, 0px) + 15px)";
+// Gap kept clear between the docked panel's top edge and the main topbar
+// above it (--vp-topbar-h — see VisualizationPage.css). The annotation
+// ribbon used to be a full-width bar docked directly under the topbar, so
+// this used to also add --atb-ribbon-h/--atb-panel-h to clear it. It's now
+// a small centered floating popout (see .atb-shell in AnnotationToolbar.css)
+// that no longer occupies the top-right corner where this panel docks, so
+// there's nothing left to clear there — the panel can sit right under the
+// topbar instead of leaving room for a ribbon that isn't in its way anymore.
+const DOCK_CLEARANCE = "calc(var(--vp-topbar-h, 0px) + 15px)";
 const POPUP_WIDTH = 320;
 const POPUP_MIN_WIDTH = 240;
 const POPUP_MAX_WIDTH = 560;
 const RIGHT_MARGIN = 0; // flush to the viewport edge, same as AISidebar
 
 /**
- * Segments panel — docked to the top-right, directly beneath the ribbon +
- * flyout strip, like a permanent slide-in side panel (same pattern as the
- * AI sidebar) rather than a freely draggable window that can end up
- * sitting on top of the CT viewer, and sized to its content instead of
- * spanning the full viewport height. Only its width is still adjustable
+ * Segments panel — docked to the top-right, directly beneath the main
+ * topbar (the annotation ribbon floats separately as a small centered
+ * popout and no longer reserves space here), like a permanent slide-in
+ * side panel (same pattern as the AI sidebar) rather than a freely
+ * draggable window that can end up sitting on top of the CT viewer.
+ * Only its width is still adjustable
  * (drag the left edge) so it can be made more or less roomy for long
  * segment names; it never moves off its docked corner. Minimizable to a
  * small horizontal bar.
@@ -369,6 +412,7 @@ export default function SegmentsPopup({
 	onSelect, onRename, onColorChange, onToggleVisibility, onDelete, onCreate, onDeletingChange,
 	organCatalog, activeCatalogOrganId, onSelectCatalogOrgan,
 	containerRef, dragHandleRef,
+	showOnlyTargetMask, onShowOnlyTargetMaskChange, hasActiveTarget,
 }: SegmentsPopupProps) {
 	// Horizontal resize — drag the left edge to widen/narrow the docked
 	// panel. The handle sits on the LEFT edge (the popup is anchored to the
@@ -626,7 +670,11 @@ export default function SegmentsPopup({
 						<div key={tab} className="segpop__tab-content">
 						{tab === "existing" ? (
 							<>
-								<div className="segpop__hint">Pick an existing class in this scan to edit it directly.</div>
+								<ShowOnlyTargetToggle
+									checked={showOnlyTargetMask}
+									onChange={onShowOnlyTargetMaskChange}
+									disabled={!hasActiveTarget}
+								/>
 								{organCatalog.length === 0 ? (
 									<div className="segpop__empty">No classes detected in this case.</div>
 								) : (
@@ -646,10 +694,11 @@ export default function SegmentsPopup({
 							</>
 						) : (
 							<>
-								{segments.length === 0 && !adding && (
-									<div className="segpop__empty">No custom classes yet.</div>
-								)}
-
+								<ShowOnlyTargetToggle
+									checked={showOnlyTargetMask}
+									onChange={onShowOnlyTargetMaskChange}
+									disabled={!hasActiveTarget}
+								/>
 								{segments.map((s) => {
 									const active = isCustomActive(s.id);
 									const hex = colors[s.id] ?? "#ffffff";

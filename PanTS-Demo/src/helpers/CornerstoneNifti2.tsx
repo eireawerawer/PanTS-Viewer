@@ -1150,6 +1150,7 @@ export function markSegmentEdited(segmentIndex: number) {
 
 export function clearEditedSegments() {
   _editedSegmentIndices.clear();
+  _preEditMaskSnapshots.clear();
 }
 
 export type SegmentationEditDetail = {
@@ -2869,6 +2870,40 @@ function _buildBinaryMask(segmentIndex: number): { mask: Uint8Array; dims: [numb
   const mask = new Uint8Array(data.length);
   for (let i = 0; i < data.length; i++) mask[i] = data[i] === segmentIndex ? 1 : 0;
   return { mask, dims: vm.dimensions as [number, number, number] };
+}
+
+// ---------------------------------------------------------------------------
+// Pre-edit snapshots: a segment's labelmap state captured the moment it
+// becomes the active edit target, BEFORE any stroke has touched it. Without
+// this, the 3D pane's switch from the baked GLB to the live marching-cubes
+// mesh (which only happens once `markSegmentEdited` fires, i.e. AFTER the
+// first stroke has already mutated the in-memory labelmap — Cornerstone's
+// SEGMENTATION_DATA_MODIFIED event is post-mutation) would bake that first
+// stroke into the "original" mesh. Capturing here, at activation time
+// instead of at first-edit time, gives LiveSegmentMesh a true pre-annotation
+// baseline to build from.
+// ---------------------------------------------------------------------------
+const _preEditMaskSnapshots = new Map<number, { mask: Uint8Array; dims: [number, number, number] }>();
+
+/** Record a segment's current (unedited-so-far) mask, if it hasn't been recorded yet. */
+function _capturePreEditSnapshotIfAbsent(segmentIndex: number) {
+  if (_preEditMaskSnapshots.has(segmentIndex)) return;
+  if (_editedSegmentIndices.has(segmentIndex)) return; // already edited — too late for a "pre-edit" snapshot
+  const built = _buildBinaryMask(segmentIndex);
+  if (built) _preEditMaskSnapshots.set(segmentIndex, built);
+}
+
+/** One-shot read: returns and clears the pre-edit snapshot for a segment, if any. */
+export function consumePreEditSegmentSnapshot(
+  segmentIndex: number
+): { mask: Uint8Array; dims: [number, number, number] } | null {
+  const snapshot = _preEditMaskSnapshots.get(segmentIndex) ?? null;
+  _preEditMaskSnapshots.delete(segmentIndex);
+  return snapshot;
+}
+
+export function clearPreEditSegmentSnapshot(segmentIndex: number) {
+  _preEditMaskSnapshots.delete(segmentIndex);
 }
 
 function _padVolume(mask: Uint8Array, dims: [number, number, number]) {
@@ -5336,12 +5371,17 @@ export function releasePrimaryMouseTools() {
 
 export function extractSegmentSurface(
   segmentIndex: number,
-  manifestCenter: [number, number, number]
+  manifestCenter: [number, number, number],
+  // Pass a snapshot (e.g. from consumePreEditSegmentSnapshot) to build the
+  // surface from a frozen mask instead of the current live labelmap — used
+  // to exclude the very stroke that triggered the switch into live-mesh
+  // rendering in the first place.
+  precomputedMask?: { mask: Uint8Array; dims: [number, number, number] } | null
 ): LiveMeshResult | null {
   const volume = cache.getVolume(segmentationId);
   if (!volume) return null;
 
-  const built = _buildBinaryMask(segmentIndex);
+  const built = precomputedMask ?? _buildBinaryMask(segmentIndex);
   if (!built) return null;
   const { mask, dims } = built;
 
@@ -6065,6 +6105,10 @@ export function deleteSegmentEverywhere(segmentIndex: number): { changedVoxels: 
 
 export function setActiveEditSegment(segmentIndex: number) {
   _activeEditSegment = segmentIndex;
+  // Grab the "before any stroke" baseline now, while it's still true — see
+  // _capturePreEditSnapshotIfAbsent for why this can't wait until the first
+  // edit is reported.
+  _capturePreEditSnapshotIfAbsent(segmentIndex);
   try {
     segmentation.segmentIndex.setActiveSegmentIndex(segmentationId, segmentIndex);
     // Re-apply using whatever masking scope was last set, so switching the active
