@@ -14,11 +14,8 @@ import {
 	IconWaveSine,
 	IconCircleDashed,
 	IconCheck,
-	IconPointer,
-	IconFrame,
 } from "@tabler/icons-react";
 import "./AnnotationToolbar.css";
-import MaskingSelect, { type MaskingArea } from "../segmentation/MaskingSelect";
 import NumberSliderField from "../NumberSliderField";
 import { FlyoutArrow, FlyoutPanel, MenuColumn, MenuRow, MenuDivider, useFlyout } from "./FlyoutPrimitives";
 import type { GuidedFlowControls } from "../segmentation/SliceAnchorPickerUI";
@@ -98,29 +95,11 @@ interface AnnotationToolbarProps {
 	onScissorsOptionsChange: (opts: ScissorsOptions) => void;
 	scissorsPointCount: number;
 	onScissorsCancel: () => void;
-	maskingArea: MaskingArea;
-	onMaskingAreaChange: (v: MaskingArea) => void;
-	hasAnySegments: boolean;
-	scopeLocked?: boolean;
-	/** True while a paint/erase/scissors edit is being committed — drives the
-	 *  pulsing "applying" indicator in the panel header. */
-	isRendering?: boolean;
-	/** True while one or more segment classes are being deleted in
-	 *  SegmentsPopup (fade-out + backend delete in flight) — drives a second,
-	 *  independent "Deleting…" indicator in the panel header, same spot and
-	 *  style as the tool-applying dot. */
-	isDeletingSegment?: boolean;
 
 	/** Id of whatever class/organ is currently targeted. Not used for editing
 	 *  logic here — only watched so the ribbon can deselect the active tool
 	 *  when the target changes (see the reset effect below). */
 	targetKey: number | null;
-
-	/** When on (default), every class except the targeted one is hidden from
-	 *  the CT viewer. A ribbon-level display preference, not a per-tool
-	 *  setting. */
-	showOnlyTargetMask: boolean;
-	onShowOnlyTargetMaskChange: (v: boolean) => void;
 
 	// `onApplied`: one-shot tools (margin, smoothing, islands, logical
 	// operators, grow-from-seeds, hollow, ...) call this once their Apply
@@ -145,11 +124,11 @@ interface AnnotationToolbarProps {
 	popupMinRef?: React.RefObject<HTMLButtonElement | null>;
 	sliceJumpRef?: React.RefObject<HTMLDivElement | null>;
 
-	/** The main toolbar's own Annotate/pencil button — this ribbon measures
-	 *  its horizontal center and opens with a "branching off" reveal
-	 *  anchored there (see the clip-path reveal + pointer triangle in the
-	 *  render below), instead of just fading in as a flat full-width bar
-	 *  with no visual link back to the button that opened it. */
+	/** The pencil/Annotate button in the main toolbar (VisualizationPage)
+	 *  that opens this ribbon. The ribbon itself renders as a centered
+	 *  popout regardless of where that button sits, but this ref lets it
+	 *  draw a small pointer arrow back up to the button — see the
+	 *  pointer-tracking effect below and .atb--horizontal__pointer. */
 	anchorRef?: React.RefObject<HTMLElement | null>;
 
 }
@@ -167,8 +146,6 @@ const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon
 	{ id: "fillBetweenSlices", label: "Fill between slices", Icon: IconStack2, description: "Interpolate a class's shape between two annotated slices." },
 	{ id: "copyAcrossSlices", label: "Copy across slices", Icon: IconCopy, description: "Copy a class's shape from first to last slice." },
 	{ id: "hollow", label: "Hollow", Icon: IconCircleDashed, description: "Make the class hollow by replacing it with a uniform-thickness shell." },
-	{ id: "pointSegment", label: "Click to segment", Icon: IconPointer, description: "Click an object to fill its shape" },
-	{ id: "boxSegment", label: "Box to segment", Icon: IconFrame, description: "Draw a box to find a shape inside that area." },
 ];
 
 const SCISSORS_OPERATIONS: { value: ScissorsOperation; label: string }[] = [
@@ -366,57 +343,6 @@ function IconTooltip({
 	);
 }
 
-// Small pulsing-dot indicator for whatever tool currently has an edit in
-// progress. Lives at the far right of the horizontal ribbon (after the last
-// tool icon) rather than inside any one tool's own settings flyout, so it
-// stays visible — and in one consistent place — no matter which tool is
-// running or whether that tool's settings happen to be open right now.
-function RenderingIndicator({ label: _label, visible }: { label?: string; visible: boolean }) {
-	return (
-		<span
-			style={{
-				display: "inline-flex",
-				alignItems: "center",
-				gap: 6,
-				fontSize: 11,
-				fontWeight: 600,
-				color: "rgba(255,255,255,0.75)",
-				flexShrink: 0,
-				marginLeft: 14,
-				paddingLeft: 14,
-				borderLeft: "1px solid rgba(255, 255, 255, 0.09)",
-				whiteSpace: "nowrap",
-				// Fades in/out instead of popping in and out of existence —
-				// the caller keeps this mounted for a beat after `visible`
-				// goes false (see renderingDotMounted/renderingDotVisible in
-				// AnnotationToolbar) so this transition actually has time to
-				// play instead of being cut off by an instant unmount.
-				opacity: visible ? 1 : 0,
-				transform: visible ? "translateY(0)" : "translateY(-2px)",
-				transition: "opacity 0.4s ease, transform 0.4s ease",
-			}}
-		>
-			<span
-				aria-hidden="true"
-				style={{
-					width: 7,
-					height: 7,
-					borderRadius: "50%",
-					background: "var(--jhu-blue-accent, #68ACE5)",
-					animation: "seg-effect-render-pulse 0.9s ease-in-out infinite",
-				}}
-			/>
-			{/* Plain "Applying…" — no tool-name prefix (e.g. "Islands —
-			    applying…"), same reasoning as the guided-flow label being
-			    hidden once busy above: the dot itself already lives right
-			    next to whichever tool triggered it, so naming it again here
-			    was redundant. `label` is still accepted for callers that
-			    pass one, just no longer rendered. */}
-			Applying…
-		</span>
-	);
-}
-
 /** First-use popup listing the annotation keyboard shortcuts, portaled to
  *  <body> and centered over the whole viewer (not anchored to the ribbon —
  *  it's a one-time orientation card, not a per-tool flyout). Shown once
@@ -471,10 +397,9 @@ function ShortcutsIntroPopup({ onDismiss }: { onDismiss: () => void }) {
 export default function AnnotationToolbar({
 	open, hasSegments, hasActiveTarget, activeTool, onToolChange,
 	diameterMm, onDiameterChange, onDiameterPreviewChange, scissorsOptions, onScissorsOptionsChange,
-	renderFlyout, scissorsPointCount, onScissorsCancel, maskingArea,
-	onMaskingAreaChange, hasAnySegments, scopeLocked, isRendering, isDeletingSegment,
-	targetKey, showOnlyTargetMask, onShowOnlyTargetMaskChange,
-	popupRef, popupDragRef, popupMinRef, anchorRef, onGuidedPickingChange,
+	renderFlyout, scissorsPointCount, onScissorsCancel,
+	targetKey,
+	popupRef, popupDragRef, popupMinRef, onGuidedPickingChange, anchorRef,
 }: AnnotationToolbarProps) {
 	const [hoveredTool, setHoveredTool] = useState<string | null>(null);
 	const [hoveredRect, setHoveredRect] = useState<DOMRect | null>(null);
@@ -488,49 +413,6 @@ export default function AnnotationToolbar({
 	// it. Anchoring to the icon button alone keeps the pointer centered on
 	// the icon regardless of the arrow sitting beside it.
 	const btnRefs = useRef<Record<string, HTMLElement | null>>({});
-
-	// Measures the annotate/pencil button's horizontal center (in viewport
-	// px) so the ribbon can visually "branch off" from it — the clip-path
-	// reveal and the little pointer triangle below both key off this same
-	// number. A plain window "resize" listener isn't enough on its own:
-	// the topbar wraps to multiple rows on narrow screens (moving the
-	// button vertically too), and plenty of things can shift the button's
-	// x-position without ever firing a window resize event at all — the
-	// AI sidebar opening/closing, a webfont finishing load, other topbar
-	// icons changing count. A ResizeObserver on the button itself (and its
-	// offset parent, so a parent-driven reflow that leaves the button's
-	// own size unchanged still gets caught) covers those; the short
-	// interval is the same belt-and-suspenders fallback used above for
-	// the walkthrough spotlight and the pick-class hint, for the rare
-	// layout change neither observer sees. Kept running any time the
-	// ribbon is open OR closing, so the pointer never gets left stranded
-	// at a stale position from before a resize.
-	const [anchorX, setAnchorX] = useState<number | null>(null);
-	useLayoutEffect(() => {
-		const measure = () => {
-			const el = anchorRef?.current;
-			if (!el) { setAnchorX(null); return; }
-			const rect = el.getBoundingClientRect();
-			setAnchorX(rect.left + rect.width / 2);
-		};
-		measure();
-		window.addEventListener("resize", measure);
-		window.addEventListener("scroll", measure, true);
-		const el = anchorRef?.current;
-		const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
-		if (ro && el) {
-			ro.observe(el);
-			if (el.parentElement) ro.observe(el.parentElement);
-		}
-		const id = window.setInterval(measure, 250);
-		return () => {
-			window.removeEventListener("resize", measure);
-			window.removeEventListener("scroll", measure, true);
-			ro?.disconnect();
-			window.clearInterval(id);
-		};
-	}, [anchorRef, open]);
-
 
 	// --- Walkthrough ----------------------------------------------------------
 	// One overview tour that auto-opens on first visit (see effect below).
@@ -569,7 +451,6 @@ export default function AnnotationToolbar({
 	const [, setPopupMinRectMeasured] = useState<DOMRect | null>(null);
 
 	const fieldRef = useRef<HTMLDivElement>(null);
-	const maskingFieldRef = useRef<HTMLDivElement>(null);
 	const panelBodyRef = useRef<HTMLDivElement>(null);
 	// Unstyled inner wrapper measured for --atb-panel-h (see JSX usage below
 	// for why measuring the styled body directly caused runaway growth).
@@ -584,7 +465,7 @@ export default function AnnotationToolbar({
 
 	// Measures the ribbon's real height into --atb-ribbon-h (consumed by
 	// VisualizationPage.css to reserve space above the CT viewport), since a
-	// hardcoded value drifts as row contents like MaskingSelect change.
+	// hardcoded value drifts as row contents change.
 	// useLayoutEffect so it lands before paint, avoiding a one-frame flash of
 	// the CSS fallback height. Math.ceil + 1px pad absorbs sub-pixel rounding.
 	useLayoutEffect(() => {
@@ -601,6 +482,60 @@ export default function AnnotationToolbar({
 		// `open` is a dependency (not `[]`) so this re-runs and picks up the
 		// real element once the ribbon actually mounts.
 	}, [open]);
+
+	// Pointer-arrow tracking — keeps the little up-chevron
+	// (.atb--horizontal__pointer) aligned under the pencil button and just
+	// above the ribbon, regardless of where the screen-centered ribbon or
+	// the button end up (window resizes, sidebar open/close reflowing the
+	// main toolbar, etc). Stored as fixed viewport coordinates (not an
+	// offset within the ribbon) since the chevron is rendered as a sibling
+	// of the ribbon — see the render comment below for why. `null` hides
+	// the chevron entirely rather than falling back to a guessed position,
+	// since a wrong guess would point at nothing.
+	// Size of the little rotated-square notch below, so the position math
+	// and the CSS agree on how far it should straddle the ribbon's own
+	// top border (half on each side, same technique FlyoutPrimitives uses
+	// for `.atb-pop__pointer`).
+	const POINTER_NOTCH_SIZE = 13;
+	const [pointerPos, setPointerPos] = useState<{ left: number; top: number } | null>(null);
+	useLayoutEffect(() => {
+		if (!open) return;
+		const sync = () => {
+			const anchorEl = anchorRef?.current;
+			const ribbonEl = dockElRef.current;
+			if (!anchorEl || !ribbonEl) { setPointerPos(null); return; }
+			const anchorRect = anchorEl.getBoundingClientRect();
+			const ribbonRect = ribbonEl.getBoundingClientRect();
+			const anchorCenterX = anchorRect.left + anchorRect.width / 2;
+			// Clamped inside the ribbon's own horizontal bounds (with a
+			// little inset) so a pencil button sitting far to one side
+			// never pushes the notch off the ribbon's rounded corner.
+			const left = Math.min(
+				Math.max(anchorCenterX, ribbonRect.left + 14),
+				ribbonRect.right - 14,
+			);
+			// Sits ON the ribbon's own top border (straddling it, half
+			// above/half below) rather than floating free in the gap
+			// above the ribbon — this is what actually reads as "grown
+			// out of the ribbon" the way FlyoutPanel's own pointer grows
+			// out of a settings flyout, instead of a separate decoration
+			// hovering between the button and the ribbon with visible
+			// space on both sides.
+			setPointerPos({ left, top: ribbonRect.top - POINTER_NOTCH_SIZE / 2 });
+		};
+		sync();
+		window.addEventListener("resize", sync);
+		// Anchor and ribbon can both move without a window resize (e.g. the
+		// AI sidebar toggling shifts the main toolbar's layout), so re-check
+		// on any observed size change of either element too.
+		const ro = new ResizeObserver(sync);
+		if (anchorRef?.current) ro.observe(anchorRef.current);
+		if (dockElRef.current) ro.observe(dockElRef.current);
+		return () => {
+			window.removeEventListener("resize", sync);
+			ro.disconnect();
+		};
+	}, [open, anchorRef]);
 
 	// The per-tool settings panel floats over the viewer (anchored under
 	// whichever icon opened it — see `toolFlyout` below), so it never needs
@@ -934,43 +869,6 @@ export default function AnnotationToolbar({
 
 	const dismissGuidedHint = useCallback(() => setGuidedHintOpen(false), []);
 
-	// Keeps the "Applying…" dot mounted for a beat after `isRendering` goes
-	// false so it can fade out via CSS instead of vanishing mid-pulse.
-	const [renderingDotMounted, setRenderingDotMounted] = useState(false);
-	const [renderingDotVisible, setRenderingDotVisible] = useState(false);
-	const [renderingDotLabel, setRenderingDotLabel] = useState<string | undefined>(undefined);
-	useEffect(() => {
-		if (isRendering) {
-			setRenderingDotLabel(TOOL_DEFS.find((t) => t.id === activeTool)?.label);
-			setRenderingDotMounted(true);
-			// Next tick, so mount (opacity 0) and fade-in (opacity 1) are
-			// separate paints rather than jumping straight to fully visible.
-			const id = window.setTimeout(() => setRenderingDotVisible(true), 10);
-			return () => window.clearTimeout(id);
-		}
-		setRenderingDotVisible(false);
-		const id = window.setTimeout(() => setRenderingDotMounted(false), 460);
-		return () => window.clearTimeout(id);
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [isRendering]);
-
-	// Same keep-mounted-for-a-beat treatment as the "Applying…" dot above,
-	// but driven by SegmentsPopup's in-flight deletes instead of a canvas
-	// edit. Stays visible until every deleting class has actually been
-	// removed (deletingIds empties out on the popup side).
-	const [deletingDotMounted, setDeletingDotMounted] = useState(false);
-	const [deletingDotVisible, setDeletingDotVisible] = useState(false);
-	useEffect(() => {
-		if (isDeletingSegment) {
-			setDeletingDotMounted(true);
-			const id = window.setTimeout(() => setDeletingDotVisible(true), 10);
-			return () => window.clearTimeout(id);
-		}
-		setDeletingDotVisible(false);
-		const id = window.setTimeout(() => setDeletingDotMounted(false), 460);
-		return () => window.clearTimeout(id);
-	}, [isDeletingSegment]);
-
 	// Signals "applied" from one-shot tool flyouts — closes settings and
 	// clears the tool's active highlight, same as clicking the icon again.
 	const handleToolApplied = useCallback(() => {
@@ -987,52 +885,45 @@ export default function AnnotationToolbar({
 	// instead of `open` gating a hard unmount that couldn't animate out.
 	return createPortal(
 		<>
-		{/* Little pointer connecting the ribbon visually back to the
-		    Annotate button it branched off of — kept OUTSIDE .atb-shell
-		    (rather than as its first child, which is where this used to
-		    live) and given its own z-index above .vp-topbar's 55. Being
-		    stacked inside .atb-shell capped the whole pointer at the
-		    shell's own z-index (50), so the topbar — deliberately raised
-		    above the shell so ITS tooltips render over the open ribbon —
-		    was painting over the pointer's tip and swallowing it right as
-		    it reached up toward the Annotate button. Only meaningful once
-		    we actually know where that button is. */}
-		{anchorX != null && (
-			<div className={`atb-shell__connector ${open ? "is-open" : "is-closed"}`} aria-hidden="true">
-				<span className="atb-shell__pointer" style={{ left: anchorX }} />
-			</div>
+		{/* Connects the ribbon back to the pencil button that opened it —
+			now built the exact same way FlyoutPanel connects its own
+			settings panels to the icon/row that spawned them (see
+			`.atb-pop__pointer` in FlyoutPrimitives.css): a small square,
+			rotated 45°, colored and bordered to match the ribbon itself,
+			straddling the ribbon's own top edge so it visibly grows out
+			of the ribbon's shape instead of floating as a separate glyph
+			in the gap above it (which is what the plain IconChevronUp
+			here used to do, and why it never read as "connected").
+
+			Rendered as a SIBLING of `.atb-shell` (not a descendant of it)
+			for the same reason as before: `.atb-shell` carries a CSS
+			`transform` for its open/close slide + centering, and per spec
+			any transformed ancestor becomes the containing block for its
+			`position: fixed` descendants — a notch nested inside it would
+			have its "fixed" left/top resolved against the shell's own
+			box, not the viewport, even though pointerPos below is real
+			viewport coordinates from getBoundingClientRect(). Only
+			rendered once we have a real measured position, so it never
+			flashes at a wrong default location. */}
+		{pointerPos !== null && (
+			<div
+				className="atb--horizontal__pointer"
+				style={{ left: pointerPos.left, top: pointerPos.top }}
+				aria-hidden="true"
+			/>
 		)}
-		<div
-			className={`atb-shell ${open ? "is-open" : "is-closed"}`}
-			style={anchorX != null ? {
-				// Grows outward from the annotate button's own x-position
-				// instead of just fading in flat — a genuine "branching off
-				// the button" reveal. clip-path circle() with matching
-				// function/param shape on both ends is what lets the browser
-				// actually animate between them (see .atb-shell.is-open /
-				// .is-closed in AnnotationToolbar.css for the transition).
-				clipPath: open
-					? `circle(150% at ${anchorX}px 0%)`
-					: `circle(0% at ${anchorX}px 0%)`,
-				["--atb-anchor-x" as string]: `${anchorX}px`,
-			} : undefined}
-		>
+		<div className={`atb-shell ${open ? "is-open" : "is-closed"}`}>
 		<div
 			ref={dockElRef}
 			className={`atb atb--horizontal ${!enabled ? "atb--disabled" : ""}`}
 			role="toolbar"
 			aria-orientation="horizontal"
 		>
-			<div ref={dockContentRef} style={{ display: "flex", alignItems: "center", width: "100%" }}>
-			<div style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0, gap: 13}}>
+			<div ref={dockContentRef} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>
+			<div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 13}}>
 				{TOOL_DEFS.map(({ id, label, Icon, description }) => {
 					// Only equip-and-use tools (paint/erase/scissors/level tracing)
 					// get a settings arrow; other tools open settings on icon click.
-					// pointSegment/boxSegment are equip-and-use too (no separate
-					// settings step needed to click/drag) but have no configurable
-					// settings at all, so they're excluded from the arrow itself even
-					// though they stay in LIVE_COMMIT_TOOLS for the rest of its
-					// behavior (outside-click keeps them armed, etc).
 					const hasSettingsArrow =
 						LIVE_COMMIT_TOOLS.includes(id) && id !== "pointSegment" && id !== "boxSegment";
 					const settingsOpenHere = toolFlyout.open && activeTool === id;
@@ -1088,13 +979,6 @@ export default function AnnotationToolbar({
 					);
 				})}
 			</div>
-
-			{/* "Applying…" indicator, always in this spot at the end of the icon row. */}
-			{renderingDotMounted && <RenderingIndicator label={renderingDotLabel} visible={renderingDotVisible} />}
-			{/* "Deleting…" indicator — independent of the one above, so both can
-			    show at once (e.g. a paint edit committing while a class delete
-			    is still in flight). */}
-			{deletingDotMounted && <RenderingIndicator label="Deleting" visible={deletingDotVisible} />}
 
 			{/* Exit / Start over / Continue for the running guided flow
 			    (Grow-from-seeds, Copy/Fill-across-slices, Islands) — fixed in
@@ -1208,96 +1092,6 @@ export default function AnnotationToolbar({
 				</div>
 			)}
 
-			{/* Ribbon-level display preference (on by default), not a per-tool setting. */}
-			<label
-				title={
-					!hasActiveTarget
-						? "Pick or create a class first."
-						: showOnlyTargetMask
-							? "On — every class except whichever one is currently targeted is hidden. Click to show every class's mask."
-							: "Off — every class's mask is showing. Click to show only the targeted class's mask."
-				}
-				style={{
-					flexShrink: 0,
-					display: "flex",
-					alignItems: "center",
-					gap: 9,
-					marginLeft: 14,
-					paddingLeft: 14,
-					borderLeft: "1px solid rgba(255, 255, 255, 0.09)",
-					cursor: hasActiveTarget ? "pointer" : "default",
-					userSelect: "none",
-					whiteSpace: "nowrap",
-					// Reads as inert (not clickable-but-broken) until a class is targeted.
-					opacity: hasActiveTarget ? 1 : 0.4,
-				}}
-			>
-				<span
-					style={{
-						fontFamily: "\"JetBrains Mono\", ui-monospace, monospace",
-						fontSize: 10,
-						letterSpacing: "0.06em",
-						textTransform: "uppercase",
-						color: "rgba(255,255,255,0.5)",
-					}}
-				>
-					Show only target class
-				</span>
-				<span
-					role="checkbox"
-					aria-checked={showOnlyTargetMask}
-					aria-disabled={!hasActiveTarget}
-					onClick={() => { if (hasActiveTarget) onShowOnlyTargetMaskChange(!showOnlyTargetMask); }}
-					style={{
-						position: "relative",
-						flexShrink: 0,
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "center",
-						width: 16,
-						height: 16,
-						borderRadius: 4,
-						background: showOnlyTargetMask ? "#002d72" : "rgba(255,255,255,0.06)",
-						border: `1px solid ${showOnlyTargetMask ? "#002d72" : "rgba(255,255,255,0.28)"}`,
-						transition: "background 0.16s ease, border-color 0.16s ease",
-						cursor: hasActiveTarget ? "pointer" : "default",
-						pointerEvents: hasActiveTarget ? "auto" : "none",
-					}}
-				>
-					<IconCheck
-						aria-hidden="true"
-						size={12}
-						stroke={3}
-						style={{
-							color: "#ffffff",
-							opacity: showOnlyTargetMask ? 1 : 0,
-							transform: showOnlyTargetMask ? "scale(1)" : "scale(0.5)",
-							// Matches the pop-in feel of the flyouts' own success checkmark.
-							transition: "opacity 0.14s ease, transform 0.14s cubic-bezier(0.34, 1.56, 0.64, 1)",
-						}}
-					/>
-				</span>
-			</label>
-
-			{/* Global "applies to" scope control; its dropdown anchors from its
-			    right edge (see MaskingSelect) so it's never clipped off-screen. */}
-			<div
-				ref={maskingFieldRef}
-				style={{
-					flexShrink: 0,
-					marginLeft: 14,
-					paddingLeft: 14,
-					borderLeft: "1px solid rgba(255, 255, 255, 0.09)",
-				}}
-			>
-				<MaskingSelect
-					value={maskingArea}
-					onChange={onMaskingAreaChange}
-					hasActiveSegment={hasActiveTarget}
-					hasAnySegments={hasAnySegments}
-					locked={!!scopeLocked}
-				/>
-			</div>
 			</div>{/* /dockContentRef */}
 		</div>
 
