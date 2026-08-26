@@ -1486,8 +1486,7 @@
 }
 
 .vp-stats__summary strong {
-  color: #465bfc
-;
+  color: #465bfc;
 }
 
 .vp-stats__msg {
@@ -1554,8 +1553,7 @@
 
 /* Muted by default, highlighted when in the extreme tails (<p5 / >p95). */
 .vp-stats__pct--flag {
-  color: #465bfc
- !important;
+  color: #465bfc !important;
   font-weight: 600;
 }
 
@@ -1641,8 +1639,7 @@
 .vp-stats__truncated-flag {
   margin-left: 5px;
   font-size: 10px;
-  color: #465bfc
-;
+  color: #465bfc;
   cursor: help;
 }
 
@@ -1848,3 +1845,45 @@
 /* Point/box-segment SUCCESS/ERROR now reuses the shared GuidedStepModal
    (SliceAnchorPickerUI.tsx) instead of its own bottom pill — no CSS of
    its own needed here anymore. */
+
+/* Full-screen loading overlay shown while the Annotate button's forced HD
+   upgrade is in flight (see annotateHdLoading in VisualizationPage.tsx).
+   Sits above everything, including the AI sidebar and main toolbar, since
+   HD must finish before ANY annotation UI is usable. */
+.vp-annotate-hd-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: rgba(8, 9, 11, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  pointer-events: all;
+}
+
+.vp-annotate-hd-overlay__spinner {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.18);
+  border-top-color: var(--jhu-blue-accent, #68ACE5);
+  animation: vp-annotate-hd-spin 0.85s linear infinite;
+}
+
+.vp-annotate-hd-overlay__label {
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 0.01em;
+}
+
+@keyframes vp-annotate-hd-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
