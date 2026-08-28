@@ -139,26 +139,45 @@ const formatEta = (seconds: number): string => {
   return `~${Math.round(seconds / 360) / 10} h`;
 };
 
-// Typical wall-clock time for one scan to finish inference, by model - the
-// GPU has no mid-run progress signal (nnU-Net doesn't report percent-complete),
-// so this is the only thing an ETA can be built from: how long a normal run
-// of this model usually takes, minus how long this run has been going.
-// ePAI's figure is measured (post CUDA-cache-fix, large-scan end-to-end);
-// the rest don't have a measured baseline yet, so they share one deliberately
-// wide estimate rather than a fabricated precise one.
-const TYPICAL_INFERENCE_SECONDS: Record<string, number> = {
-  ePAI: 8 * 60,
-  LesionSegmenter: 3 * 60,
+// Best-effort ETA model: floor + a per-model rate applied to the file size.
+// There's no real per-size history yet (see /api/inference-duration-estimate,
+// which this page prefers once it has enough samples) - this is a stand-in
+// built from the one real measurement on hand (a ~700MB whole-body ePAI scan
+// end-to-end in ~8 min post CUDA-cache-fix) plus the pipeline's own profiled
+// fixed cost (read+preprocess ~ tens of seconds independent of size). A
+// straight line through one real point is still a guess for every other
+// point on it - it's meant to beat "same number for every file" until real
+// history replaces it, not to be precise.
+type EtaProfile = { floorSeconds: number; secondsPerMb: number };
+const ETA_PROFILES: Record<string, EtaProfile> = {
+  // Anchor: ~700MB -> ~480s end-to-end, minus ~60s fixed cost -> ~0.6s/MB.
+  ePAI: { floorSeconds: 60, secondsPerMb: 0.6 },
+  // No measured anchor for these yet - same shape (fixed cost + linear-ish
+  // scaling), scaled down from ePAI's rate as a placeholder, not a measurement.
+  LesionSegmenter: { floorSeconds: 45, secondsPerMb: 0.35 },
 };
-const DEFAULT_TYPICAL_INFERENCE_SECONDS = 6 * 60;
+const DEFAULT_ETA_PROFILE: EtaProfile = { floorSeconds: 60, secondsPerMb: 0.45 };
 
-// "About 3 min left" from how long the run has been going vs. how long this
-// model's runs usually take. Once elapsed passes the typical time, there's
-// nothing honest left to say about a remaining duration - "Finishing up…"
-// admits the estimate ran out instead of showing a fake countdown stuck at
-// "<1 min" or, worse, going negative.
-const estimateRemaining = (model: string, startedAt: number): string => {
-  const typical = TYPICAL_INFERENCE_SECONDS[model] ?? DEFAULT_TYPICAL_INFERENCE_SECONDS;
+const estimateTypicalSeconds = (model: string, fileSizeBytes?: number): number => {
+  const profile = ETA_PROFILES[model] ?? DEFAULT_ETA_PROFILE;
+  const mb = (fileSizeBytes ?? 0) / (1024 * 1024);
+  return profile.floorSeconds + profile.secondsPerMb * mb;
+};
+
+// "About 3 min left" from how long the run has been going vs. how long a run
+// like this one usually takes. `typicalSecondsOverride` lets the caller swap
+// in a real server-measured median (see fetchDurationEstimate) once one is
+// available, instead of the size-formula fallback above. Once elapsed passes
+// the estimate, there's nothing honest left to say about a remaining
+// duration - "Finishing up…" admits the estimate ran out instead of showing
+// a fake countdown stuck at "<1 min" or, worse, going negative.
+const estimateRemaining = (
+  model: string,
+  startedAt: number,
+  fileSizeBytes?: number,
+  typicalSecondsOverride?: number,
+): string => {
+  const typical = typicalSecondsOverride ?? estimateTypicalSeconds(model, fileSizeBytes);
   const elapsed = (Date.now() - startedAt) / 1000;
   const remaining = typical - elapsed;
   if (remaining < 30) return "Finishing up…";
@@ -229,6 +248,23 @@ const UploadPage: React.FC = () => {
   >(new Map());
 
   const [selectedItems, setSelectedItems] = useState<SelectedItem[]>([]);
+  // Per-item background-upload progress while a file still sits in the
+  // dropzone (pre-Run) - drives the file chip's own uploading/done/failed
+  // styling instead of the page-wide "Uploading…" status line, which used to
+  // show for every background pre-upload even though nothing else on the
+  // page needed to react to it.
+  const [itemUploadStatus, setItemUploadStatus] = useState<
+    Record<string, "uploading" | "done" | "failed">
+  >({});
+  // Server-measured median duration for a session's (model, file size), once
+  // fetched - see fetchDurationEstimate. Keyed by session id so each in-flight
+  // run's card can prefer a real number over the size-formula guess as soon
+  // as one's available; absent (not just undefined) means "haven't checked
+  // yet or the server had too little history", both of which fall back to
+  // estimateTypicalSeconds silently.
+  const [durationEstimates, setDurationEstimates] = useState<
+    Record<string, number>
+  >({});
   // Which selected item's inline preview is open (null = none). One at a time.
   const [previewItemId, setPreviewItemId] = useState<string | null>(null);
   const [message, setMessage] = useState<string>("");
@@ -295,6 +331,11 @@ const UploadPage: React.FC = () => {
   // state: it's read once a second by the ticking clock below rather than
   // needing its own re-render.
   const runningStartedAtRef = useRef<Map<string, number>>(new Map());
+  // File size per in-flight session, for the ETA formula's size scaling and
+  // for asking the server for a real historical estimate (see
+  // fetchDurationEstimate) - a plain ref since it's write-once at run start
+  // and only ever read by the ETA display, no re-render needed on its own.
+  const sessionFileSizeRef = useRef<Map<string, number>>(new Map());
   // Re-renders ProcessingCard once a second while anything is running, purely
   // so the "About N min left" text advances - nothing else here depends on it.
   const [, setEtaTick] = useState(0);
@@ -403,6 +444,11 @@ const UploadPage: React.FC = () => {
     }
     setSelectedItems((prev) => prev.filter((item) => item.id !== id));
     setPreviewItemId((prev) => (prev === id ? null : prev));
+    setItemUploadStatus((prev) => {
+      if (!(id in prev)) return prev;
+      const { [id]: _dropped, ...rest } = prev;
+      return rest;
+    });
   };
 
   // Pick a DICOM folder to RUN INFERENCE on (distinct from the view-only opener):
@@ -448,6 +494,39 @@ const UploadPage: React.FC = () => {
     pollTimersRef.current.clear();
   };
 
+  // Ask the server for a real median duration for this model/file-size, once
+  // a run starts - see /api/inference-duration-estimate. Best-effort: on any
+  // failure (network, server has no history yet) durationEstimates simply
+  // stays without this sid, and estimateRemaining falls back to the
+  // size-formula guess silently. Fire-and-forget by design - this is a nice-
+  // to-have upgrade to the ETA display, not something a run should ever wait
+  // on or fail over.
+  const fetchDurationEstimate = (sid: string, model: string, fileSizeBytes?: number) => {
+    const params = new URLSearchParams({ model });
+    if (fileSizeBytes) params.set("size_bytes", String(fileSizeBytes));
+    fetch(`${API_BASE}/api/inference-duration-estimate?${params}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.available && typeof data.median_seconds === "number") {
+          setDurationEstimates((prev) => ({ ...prev, [sid]: data.median_seconds }));
+        }
+      })
+      .catch(() => {}); // silent - the formula fallback covers this
+  };
+
+  // A run has left the "running" state for good (finished, failed, or
+  // cancelled) - drop everything the ETA display was tracking for it, so a
+  // future session id can't inherit stale timing/size/estimate data.
+  const clearEtaTracking = (sid: string) => {
+    runningStartedAtRef.current.delete(sid);
+    sessionFileSizeRef.current.delete(sid);
+    setDurationEstimates((prev) => {
+      if (!(sid in prev)) return prev;
+      const { [sid]: _dropped, ...rest } = prev;
+      return rest;
+    });
+  };
+
   const finishSession = (sid: string, model: string) => {
     stopPolling(sid);
     setPhase(sid);
@@ -483,7 +562,7 @@ const UploadPage: React.FC = () => {
             stopPolling(sid);
             setPhase(sid);
             setQueuePosition(sid);
-            runningStartedAtRef.current.delete(sid);
+            clearEtaTracking(sid);
             setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
             setMessage(
               "Session no longer exists on the server - marked as Failed.",
@@ -498,13 +577,13 @@ const UploadPage: React.FC = () => {
 
         if (status === "completed") {
           setQueuePosition(sid);
-          runningStartedAtRef.current.delete(sid);
+          clearEtaTracking(sid);
           finishSession(sid, model);
         } else if (status === "failed") {
           stopPolling(sid);
           setPhase(sid);
           setQueuePosition(sid);
-          runningStartedAtRef.current.delete(sid);
+          clearEtaTracking(sid);
           setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
           setMessage(`Inference failed${data.error ? `: ${data.error}` : ""}`);
         } else if (status === "cancelled") {
@@ -512,11 +591,12 @@ const UploadPage: React.FC = () => {
           stopPolling(sid);
           setPhase(sid);
           setQueuePosition(sid);
-          runningStartedAtRef.current.delete(sid);
+          clearEtaTracking(sid);
           setRecentUploads(updateRecentUploadStatus(sid, "Cancelled"));
         } else if (status === "queued" || status === "running") {
           if (status === "running" && !runningStartedAtRef.current.has(sid)) {
             runningStartedAtRef.current.set(sid, Date.now());
+            fetchDurationEstimate(sid, model, sessionFileSizeRef.current.get(sid));
           }
           setPhase(sid, status);
           setQueuePosition(
@@ -543,7 +623,7 @@ const UploadPage: React.FC = () => {
     stopPolling(sid);
     setPhase(sid);
     setQueuePosition(sid);
-    runningStartedAtRef.current.delete(sid);
+    clearEtaTracking(sid);
 
     const controller = uploadAbortRef.current.get(sid);
     if (controller) controller.abort();
@@ -801,7 +881,6 @@ const UploadPage: React.FC = () => {
     uploadResumableRef.current = false;
     foregroundUploadSidRef.current = sid;
     setIsUploading(true);
-    setMessage(`Uploading ${file.name}...`);
     try {
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
       const CONCURRENCY = 6;
@@ -863,7 +942,6 @@ const UploadPage: React.FC = () => {
       if (foregroundUploadSidRef.current === sid) {
         foregroundUploadSidRef.current = null;
         setIsUploading(false);
-        setMessage("");
       }
       uploadRemainingRef.current.delete(sid);
       if (uploadAbortRef.current.get(sid) === controller) {
@@ -884,9 +962,15 @@ const UploadPage: React.FC = () => {
       resolveDone = res;
     });
     itemUploadRef.current.set(item.id, { sid, uploadDone });
+    setItemUploadStatus((prev) => ({ ...prev, [item.id]: "uploading" }));
     const file = item.file;
     enqueueUpload(async () => {
-      resolveDone(await preUploadOnly(sid, file));
+      const uploadedName = await preUploadOnly(sid, file);
+      setItemUploadStatus((prev) => ({
+        ...prev,
+        [item.id]: uploadedName ? "done" : "failed",
+      }));
+      resolveDone(uploadedName);
     });
   };
 
@@ -953,7 +1037,6 @@ const UploadPage: React.FC = () => {
       if (foreground) {
         foregroundUploadSidRef.current = sid;
         setIsUploading(true);
-        setMessage(`Uploading ${filename}...`);
       }
 
       // Chunks upload with CONCURRENCY in flight at once instead of one at a time --
@@ -1138,7 +1221,6 @@ const UploadPage: React.FC = () => {
     setPhase(sid, "uploading");
     try {
       setIsUploading(true);
-      setMessage(`Uploading DICOM series (${files.length} slices)...`);
 
       for (let i = 0; i < files.length; i++) {
         const formData = new FormData();
@@ -1219,6 +1301,11 @@ const UploadPage: React.FC = () => {
     // default (model + date); the user can rename it later.
     const sourceName = (item.kind === "dicom" ? item.label : item.file.name) || undefined;
     const label = friendlyScanName(model, ts);
+    const fileSizeBytes =
+      item.kind === "dicom"
+        ? item.files.reduce((sum, f) => sum + f.size, 0)
+        : item.file.size;
+    sessionFileSizeRef.current.set(sid, fileSizeBytes);
 
     track("upload_start_inference");
     setRecentUploads(
@@ -1237,6 +1324,11 @@ const UploadPage: React.FC = () => {
 
     if (pre) {
       itemUploadRef.current.delete(item.id);
+      setItemUploadStatus((prevStatus) => {
+        if (!(item.id in prevStatus)) return prevStatus;
+        const { [item.id]: _dropped, ...rest } = prevStatus;
+        return rest;
+      });
       setPhase(sid, "uploading"); // harmless if the background upload already finished
       (async () => {
         const uploadedName = await pre.uploadDone;
@@ -1443,6 +1535,14 @@ const UploadPage: React.FC = () => {
 
   /* ── Render ── */
   const previewItem = selectedItems.find((i) => i.id === previewItemId) ?? null;
+  // Whole-box "done" state: every selected NIfTI has finished uploading, and
+  // there's at least one NIfTI item (a DICOM-only or empty selection has
+  // nothing to have finished, so it stays neutral rather than reading as a
+  // false "done").
+  const niftiItems = selectedItems.filter((i) => i.kind === "nifti");
+  const allUploadsDone =
+    niftiItems.length > 0 &&
+    niftiItems.every((i) => itemUploadStatus[i.id] === "done");
 
   return (
     <div className="upload-page-wrapper">
@@ -1458,7 +1558,7 @@ const UploadPage: React.FC = () => {
         <div className="upload-card">
           {/* ── Drop zone ── */}
           <div
-            className={`dropzone${isDragOver ? " drag-over" : ""}`}
+            className={`dropzone${isDragOver ? " drag-over" : ""}${allUploadsDone ? " dropzone--all-done" : ""}`}
             onClick={() => {
               if (ensureAccount()) fileInputRef.current?.click();
             }}
@@ -1516,7 +1616,9 @@ const UploadPage: React.FC = () => {
               // ── Selected items: NIfTI files + DICOM series, each individually
               // previewable ── lives inside the dropzone itself now, so the file's
               // name/type/size sit in the same box as the picker instead of as a
-              // separate row underneath it.
+              // separate row underneath it. Each chip reflects its own background
+              // upload status: DICOM never pre-uploads (it starts on Run), so it
+              // has no "uploading" state of its own here.
               <div
                 className="file-chips"
                 onClick={(e) => e.stopPropagation()}
@@ -1529,20 +1631,35 @@ const UploadPage: React.FC = () => {
                       ? `DICOM series · ${item.files.length} slice${item.files.length === 1 ? "" : "s"}`
                       : `NIfTI · ${formatBytes(item.file.size)}`;
                   const isOpen = previewItemId === item.id;
+                  const uploadStatus =
+                    item.kind === "nifti" ? itemUploadStatus[item.id] : undefined;
                   return (
                     <div
                       key={item.id}
-                      className={`file-chip${isOpen ? " file-chip--active" : ""}`}
+                      className={`file-chip${isOpen ? " file-chip--active" : ""}${uploadStatus ? ` file-chip--${uploadStatus}` : ""}`}
                     >
                       <span className="file-chip-icon" aria-hidden="true">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                          <polyline points="14 2 14 8 20 8" />
-                        </svg>
+                        {uploadStatus === "uploading" ? (
+                          <span className="file-chip-spinner" />
+                        ) : uploadStatus === "done" ? (
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M20 6L9 17l-5-5" />
+                          </svg>
+                        ) : (
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                            <polyline points="14 2 14 8 20 8" />
+                          </svg>
+                        )}
                       </span>
                       <span className="file-chip-text">
                         <span className="file-chip-name">{name}</span>
-                        <span className="file-chip-sub">{subtext}</span>
+                        <span className="file-chip-sub">
+                          {subtext}
+                          {uploadStatus === "uploading" && " · uploading…"}
+                          {uploadStatus === "done" && " · ready"}
+                          {uploadStatus === "failed" && " · upload failed"}
+                        </span>
                       </span>
                       <button
                         className="file-chip-preview"
@@ -2200,6 +2317,8 @@ const UploadPage: React.FC = () => {
                     {estimateRemaining(
                       u.model || "",
                       runningStartedAtRef.current.get(u.sessionId) ?? Date.now(),
+                      sessionFileSizeRef.current.get(u.sessionId),
+                      durationEstimates[u.sessionId],
                     )}
                   </div>
                 )}
