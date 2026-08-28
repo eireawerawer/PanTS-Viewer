@@ -3629,7 +3629,7 @@ const aiAvailableOrgans = useMemo(() => {
 	return (
 		<div
 			ref={vpRootRef}
-			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${showAnnotationToolbar ? " annotation-open" : ""}${liveRoom ? " is-live-room" : ""}${soloChallenge ? " is-solo-challenge" : ""}${quizPractice ? " is-quiz-practice" : ""}`}
+			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${showAnnotationToolbar ? " annotation-open" : ""}${liveRoom ? " is-live-room" : ""}${soloChallenge ? " is-solo-challenge" : ""}${quizPractice ? " is-quiz-practice" : ""}${!showToolbar ? " toolbar-hidden" : ""}`}
 			onPointerDownCapture={(event) => {
 				if (!liveRoom?.followingId) return;
 				const target = event.target as HTMLElement;
@@ -3719,17 +3719,6 @@ const aiAvailableOrgans = useMemo(() => {
 							</span>
 						)}
 					</div>
-					{!liveRoom && params.caseId && (
-						<button
-							className="vp-tb-mini vp-live-room-button"
-							onClick={() => setShowLiveRoomCreate(true)}
-							aria-label="Start Live Room"
-						>
-							<IconUsersGroup size={17} />
-							<span>Live Room</span>
-						</button>
-					)}
-
 					<span className="vp-tb-divider" />
 
 					{/* Layout ▾ — view mode (MPR/Axial/Sag/Cor/3D) and, while in MPR, the
@@ -4441,23 +4430,30 @@ const aiAvailableOrgans = useMemo(() => {
 													</span>
 												</button>
 											)}
+											{!liveRoom && params.caseId && (
+												<button
+													type="button"
+													className="vp-tool"
+													onClick={() => setShowLiveRoomCreate(true)}
+													aria-label="Start Live Room"
+												>
+													<IconUsersGroup size={17} />
+													<span className="vp-tool__tip">Live Room</span>
+												</button>
+											)}
 										</div>
 				</div>
 			)}
 
-			{/* When the toolbar is hidden, a labeled pill reveals it - a bare icon
-			    with no text floating alone in a corner reads as an unexplained
-			    mystery button, so this pairs the gear with its own label instead
-			    of relying on the tooltip alone. */}
+			{/* When the toolbar is hidden, a single floating gear reveals it. */}
 			{!showToolbar && (
 				<button
-					className="vp-floating-gear"
+					className="vp-floating-gear vp-iconbtn"
 					title="Show toolbar"
-					aria-label="Show toolbar"
+					aria-label="Toggle toolbar"
 					onClick={() => setShowToolbar(true)}
 				>
-					<IconSettings size={16} color="white" />
-					<span>Show toolbar</span>
+					<IconSettings size={20} color="white" />
 				</button>
 			)}
 
