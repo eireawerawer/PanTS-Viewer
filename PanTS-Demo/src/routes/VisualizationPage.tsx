@@ -812,9 +812,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const [dlDone, setDlDone] = useState(false);
 	const dlTotalsRef = useRef<Record<string, number>>({});
 	// The tools live in a top toolbar (PYCAD-style) that sits above the viewports in
-	// normal flow; the gear button shows/hides it. Hidden by default — a single
-	// floating gear reveals it — so the viewer opens clean/full-bleed.
-	const [showToolbar, setShowToolbar] = useState(false);
+	// normal flow; the gear button shows/hides it. Shown by default so the controls
+	// are visible on first load; the gear hides it for a clean/full-bleed view.
+	const [showToolbar, setShowToolbar] = useState(true);
 	const topbarRef = useRef<HTMLDivElement>(null);
 	// Keep --vp-topbar-h in sync with the real toolbar height (it wraps to
 	// multiple rows on narrow screens) so anything docked below it — the
