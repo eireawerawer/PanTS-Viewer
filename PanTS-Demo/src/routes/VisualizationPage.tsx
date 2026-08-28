@@ -4445,15 +4445,19 @@ const aiAvailableOrgans = useMemo(() => {
 				</div>
 			)}
 
-			{/* When the toolbar is hidden, a single floating gear reveals it. */}
+			{/* When the toolbar is hidden, a labeled pill reveals it - a bare icon
+			    with no text floating alone in a corner reads as an unexplained
+			    mystery button, so this pairs the gear with its own label instead
+			    of relying on the tooltip alone. */}
 			{!showToolbar && (
 				<button
-					className="vp-floating-gear vp-iconbtn"
+					className="vp-floating-gear"
 					title="Show toolbar"
-					aria-label="Toggle toolbar"
+					aria-label="Show toolbar"
 					onClick={() => setShowToolbar(true)}
 				>
-					<IconSettings size={20} color="white" />
+					<IconSettings size={16} color="white" />
+					<span>Show toolbar</span>
 				</button>
 			)}
 
