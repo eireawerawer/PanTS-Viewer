@@ -475,18 +475,6 @@
   opacity: 0.5;
 }
 
-/* Floating gear shown only when the toolbar is hidden, back in its original
-   top-left spot. Previously it overlapped the axial pane's own "AXIAL" label
-   (both wanted the same top-left corner) - instead of moving the gear, the
-   axial label is pushed down clear of it (see .vp-pane--axial::after below),
-   so the gear can stay exactly where it always was. */
-.vp-floating-gear {
-  position: fixed;
-  top: 12px;
-  left: 14px;
-  z-index: 55;
-}
-
 /* Shaded volume-rendering target: Cornerstone owns the canvas inside. */
 .vp-vol3d {
   width: 100%;
@@ -1035,21 +1023,6 @@
 
 .vp-pane--axial {
   --pane-accent: #f43f5e;
-}
-
-/* The axial pane is always the top-left quadrant, the same corner the
-   floating gear (.vp-floating-gear) occupies while the toolbar is hidden -
-   rather than move the gear off its long-standing spot, push this one pane's
-   label + accent tick down below it instead, but only while the gear is
-   actually there (.toolbar-hidden on the root); with the toolbar visible
-   (the default) the axial label sits in its normal spot like every other
-   pane's. 58px clears the gear's 38px button (starting at top:12px) plus a
-   small gap. */
-.toolbar-hidden .vp-pane--axial::after {
-  top: 58px;
-}
-.toolbar-hidden .vp-pane--axial::before {
-  top: 61px;
 }
 
 .vp-pane--sagittal {
