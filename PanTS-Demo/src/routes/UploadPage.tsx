@@ -20,6 +20,10 @@ const LESION_OPTIONS: {
   { id: "colon", label: "Colon lesion", experimental: true },
 ];
 
+// SuPreM, MedFormer, and R-Super are deliberately not offered here - the
+// models themselves are untouched (backend dispatch, existing runs of them
+// in Completed Uploads, etc. all still work), this just hides them from the
+// picker.
 const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "None",
@@ -30,21 +34,6 @@ const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
     id: "ePAI",
     label: "ePAI",
     desc: "Full abdominal organ segmentation, with detailed pancreas and tumor analysis",
-  },
-  {
-    id: "SuPreM",
-    label: "SuPreM",
-    desc: "For whole-body scans from lungs to legs",
-  },
-  {
-    id: "MedFormer",
-    label: "MedFormer",
-    desc: "For reliable abdominal segmentation",
-  },
-  {
-    id: "R-Super",
-    label: "R-Super",
-    desc: "For the highest tumor detection accuracy",
   },
   {
     id: "Atlas-Net",
