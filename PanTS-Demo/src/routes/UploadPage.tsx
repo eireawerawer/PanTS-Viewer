@@ -271,6 +271,9 @@ const UploadPage: React.FC = () => {
   const [sessionId, setSessionId] = useState<string>("");
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [inferenceCompleted, setInferenceCompleted] = useState<boolean>(false);
+  // Starts "None" until the account's plan is known (auth resolves async, so
+  // there's nothing to gate against yet) - see the effect below that picks
+  // the real default once it is known.
   const [selectedModel, setSelectedModel] = useState<
     | "None"
     | "ePAI"
@@ -282,6 +285,11 @@ const UploadPage: React.FC = () => {
     | "LesionSegmenter"
     | ""
   >("None");
+  // Whether the model picker still holds its untouched starting value - once
+  // the user opens the dropdown and picks anything (including re-picking the
+  // same default), this goes false and the plan-aware default effect below
+  // stops touching selectedModel, so it can never clobber a real choice.
+  const modelTouchedRef = useRef(false);
   const [modelDropOpen, setModelDropOpen] = useState(false);
   // LesionSegmenter computes liver/pancreatic/kidney/colon lesions in one pass;
   // this selects which lesion to feature. Only pancreatic is GT-validated; the
@@ -343,6 +351,22 @@ const UploadPage: React.FC = () => {
     const timer = setInterval(() => setEtaTick((t) => t + 1), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // Picks the model picker's real default once the account's plan is known:
+  // ePAI for a plan that actually includes it, LesionSegmenter (the one real
+  // model every signed-in account has, including Free) otherwise. Runs once
+  // auth settles and never again after - modelTouchedRef guards against ever
+  // overwriting a choice the user already made, and plan/isAuthenticated
+  // settling a second time (e.g. a slow /me response revising itself) must
+  // not silently swap the model out from under a user who's already looking
+  // at the page. Signed-out visitors are left on "None": defaulting them
+  // into a model would just immediately bounce them into the sign-in prompt.
+  useEffect(() => {
+    if (modelTouchedRef.current || !isAuthenticated) return;
+    modelTouchedRef.current = true;
+    setSelectedModel(isModelLocked(plan, "ePAI") ? "LesionSegmenter" : "ePAI");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated, plan]);
   // Drives the "safe to close this tab" line. `active` = bytes still going up
   // (the tab is needed); `eta` = seconds until that stops, or null while
   // throughput is still being measured.
@@ -388,6 +412,12 @@ const UploadPage: React.FC = () => {
     const filteredFiles = Array.from(e.target.files).filter((file) =>
       allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
     );
+    // Reset so picking the SAME file again later still fires a change event.
+    // The native <input> tracks its value by path, not by content - without
+    // this, re-selecting a file you already ran once (e.g. after Run clears
+    // selectedItems back to empty) is a silent no-op: no change event fires,
+    // so nothing here even runs and the picker just quietly does nothing.
+    e.target.value = "";
     if (filteredFiles.length === 0) {
       alert("Please select .nii or .nii.gz files only");
       return;
@@ -1882,6 +1912,7 @@ const UploadPage: React.FC = () => {
                             return;
                           }
                           track("upload_select_model");
+                          modelTouchedRef.current = true;
                           setSelectedModel(m.id as typeof selectedModel);
                           setModelDropOpen(false);
                         }}
@@ -1942,6 +1973,7 @@ const UploadPage: React.FC = () => {
                                 className={`model-submenu-item${lesionTarget === l.id ? " selected" : ""}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
+                                  modelTouchedRef.current = true;
                                   setSelectedModel("LesionSegmenter");
                                   setLesionTarget(l.id);
                                   setModelDropOpen(false);
@@ -2346,16 +2378,19 @@ const UploadPage: React.FC = () => {
                       style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", border: "1px solid rgba(0, 45, 114, 0.3)", borderRadius: "6px", padding: "2px 6px", width: "100%", maxWidth: "260px" }}
                     />
                   ) : (
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0 }}>
-                      <span title={u.sourceName || undefined} style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.label}</span>
-                      <button
-                        title="Rename scan"
-                        onClick={(e) => { e.stopPropagation(); startRename(u); }}
-                        style={{ background: "none", border: "none", cursor: "pointer", padding: "2px", color: "#6a6a6a", flexShrink: 0, lineHeight: 0 }}
-                      >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
-                      </button>
-                    </div>
+                    // Click the name itself to rename it - no separate pencil
+                    // icon needed (matches how Claude's own chat titles work).
+                    // Underline-on-hover is the only affordance that this text
+                    // is interactive; the tooltip keeps surfacing the original
+                    // filename once it's been renamed away from it.
+                    <span
+                      title={u.sourceName || "Click to rename"}
+                      onClick={(e) => { e.stopPropagation(); startRename(u); }}
+                      className="upload-rename-trigger"
+                      style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block", cursor: "text", maxWidth: "260px" }}
+                    >
+                      {u.label}
+                    </span>
                   )}
                   <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
                     {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}

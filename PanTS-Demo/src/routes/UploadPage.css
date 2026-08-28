@@ -929,6 +929,18 @@
   background: rgba(0, 45, 114, .06);
 }
 
+/* Click-to-rename scan name (Completed Uploads) - underline on hover is the
+   only affordance that the text itself is clickable, no separate pencil icon. */
+.upload-rename-trigger {
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.15s;
+}
+.upload-rename-trigger:hover {
+  text-decoration-color: rgba(0, 0, 0, 0.3);
+}
+
 /* ── Pending CT preview panel ── */
 .pending-preview-panel {
   margin-bottom: 20px;

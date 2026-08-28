@@ -120,9 +120,10 @@ const runTwoFiles = async () => {
   // clicked below - the scenario the second test needs.
   await waitFor(() => expect(log.some((e) => e.kind === "finalize")).toBe(true));
 
-  // Default model is "None" (view only, nothing uploads) - pick a real one.
-  await user.click(screen.getByRole("button", { name: /None \(view scan\)/ }));
-  await user.click(screen.getByText("ePAI"));
+  // Default model becomes "ePAI" once the account's plan is known to allow
+  // it (this test's USER is "pro") - by now auth has long since settled and
+  // an upload round-trip has happened, so no dropdown click is needed before
+  // Run.
   await user.click(screen.getByRole("button", { name: "Run" }));
 
   // Only now let scan B's upload proceed - mirrors it still being on the wire

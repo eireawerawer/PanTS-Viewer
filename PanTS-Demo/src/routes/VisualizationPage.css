@@ -475,16 +475,38 @@
   opacity: 0.5;
 }
 
-/* Floating gear shown only when the toolbar is hidden. A fixed left-offset
-   here previously landed the gear in the middle of the axial pane's own CT
-   image (110px from the viewport's left edge is well inside that pane's
-   content, not past it) - anchored to the top-RIGHT corner of the screen
-   instead, clear of every pane's content and every pane's top-left label. */
+/* Floating "Show toolbar" pill, shown only when the toolbar is hidden.
+   Labeled, not a bare icon square - an unlabeled gear floating alone in a
+   corner reads as an unexplained mystery button with only a tooltip to go
+   on. Anchored to the top-RIGHT corner of the screen, clear of every pane's
+   content and every pane's own top-left label (a fixed left-offset used to
+   land it in the middle of the axial pane's own CT image instead). */
 .vp-floating-gear {
   position: fixed;
   top: 10px;
   right: 14px;
   z-index: 55;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 14px 0 12px;
+  border-radius: 17px;
+  background: rgba(14, 15, 18, 0.82);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--vp-border);
+  color: var(--vp-text);
+  font-family: var(--vp-font);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.vp-floating-gear:hover {
+  background: var(--vp-panel-strong);
+  border-color: var(--vp-border-strong);
 }
 
 /* Shaded volume-rendering target: Cornerstone owns the canvas inside. */
