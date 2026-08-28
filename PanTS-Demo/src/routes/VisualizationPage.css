@@ -475,11 +475,16 @@
   opacity: 0.5;
 }
 
-/* Floating gear shown only when the toolbar is hidden. */
+/* Floating gear shown only when the toolbar is hidden. Offset well clear of
+   the axial pane's top-left corner (top:10px/left:12px) where its "AXIAL"
+   ::after label renders — the gear used to sit at top:12/left:14, almost
+   exactly on top of it, and its opaque background + higher z-index hid the
+   label completely. Pushed right past where the longest label ("SAGITTAL")
+   plus its accent tick can extend. */
 .vp-floating-gear {
   position: fixed;
-  top: 12px;
-  left: 14px;
+  top: 10px;
+  left: 110px;
   z-index: 55;
 }
 
