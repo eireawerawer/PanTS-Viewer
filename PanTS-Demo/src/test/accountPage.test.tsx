@@ -257,19 +257,21 @@ describe("plan", () => {
 		const user = userEvent.setup();
 		renderAt("/account/plan");
 
-		await user.click(await screen.findByRole("button", { name: "Donate for Pro" }));
+		await user.click(await screen.findByRole("button", { name: "Choose Pro" }));
 
 		await waitFor(() => expect(lastCall("POST", "/api/me/plan")?.body).toEqual({ plan: "pro" }));
 		expect(await screen.findByText("You're on Pro.")).toBeInTheDocument();
 	});
 
-	it("shows each plan's price with the period it covers", async () => {
+	it("shows Free as free and the future tiers without a price", async () => {
 		renderAt("/account/plan");
 		await screen.findByRole("heading", { name: "Change plan" });
 		expect(screen.getByText("$0")).toBeInTheDocument();
-		expect(screen.getByText("$1.99")).toBeInTheDocument();
-		expect(screen.getByText("no donation needed")).toBeInTheDocument();
-		expect(screen.getByText("monthly donation")).toBeInTheDocument();
+		expect(screen.getByText("always free")).toBeInTheDocument();
+		// The picker shows one group at a time; "individual" = Free + Pro.
+		expect(screen.getByText("pricing not yet set")).toBeInTheDocument();
+		// "$0" is real; no invented $x.xx prices anywhere.
+		expect(screen.queryByText(/\$\d+\.\d{2}/)).toBeNull();
 	});
 });
 

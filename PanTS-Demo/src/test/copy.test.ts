@@ -38,6 +38,12 @@ const RETIRED_PHRASES = [
   "not yet in force",
   "never used to identify you personally",
   "deleted automatically after the retention period",
+  "Signed BAA and DPA",
+  "PACS integration",
+  "Donate for Pro",
+  "monthly donation",
+  "For everyday clinical",
+  "See donation options",
 ];
 
 describe("site copy guard", () => {

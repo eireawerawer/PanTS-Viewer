@@ -60,7 +60,7 @@ const headline = (b: UpgradeBlock): string => {
 		case "postprocessing":
 			return `${b.feature ?? "Postprocessing"} needs Pro`;
 		case "create_reports":
-			return "Creating reports needs Pro";
+			return "Research summaries need Pro";
 	}
 };
 
@@ -76,13 +76,13 @@ const detail = (b: UpgradeBlock): string => {
 				? `The ${planLabel(b.plan)} plan includes ${b.limit} messages a day. More ${reset}.`
 				: `The ${planLabel(b.plan)} plan includes ${b.limit} messages a day.`;
 		case "concurrent_scans":
-			return "Wait for the current scan to finish, or donate to run several at once.";
+			return "Wait for the current scan to finish, or upgrade to run several at once.";
 		case "model_locked":
 			return `${planLabel(b.plan)} includes LesionSegmenter. Every other model is on Pro.`;
 		case "postprocessing":
 			return "Postprocessing cleans up and smooths organ outlines after a run.";
 		case "create_reports":
-			return `${planLabel(b.plan)} can read reports and annotations shared with you, but not create them.`;
+			return `${planLabel(b.plan)} can read research summaries and annotations shared with you, but not create them.`;
 	}
 };
 
@@ -141,7 +141,7 @@ const UpgradeDialog: React.FC<{ block: UpgradeBlock | null; onClose: () => void 
 								navigate("/account/plan");
 							}}
 						>
-							See donation options
+							See plan options
 						</button>
 					)}
 					<button type="button" className="upg-secondary" onClick={onClose}>
