@@ -29,6 +29,7 @@ const sourceFiles = (): string[] => {
 const RETIRED_PHRASES = [
   "A CT Segmentation Platform",
   "For commercial use, please visit",
+  "By continuing you agree to our",
 ];
 
 describe("site copy guard", () => {

@@ -118,7 +118,7 @@ describe("signup popup", () => {
 		renderPopup();
 		await user.click(await screen.findByRole("button", { name: "open signup" }));
 
-		expect(screen.getByText(/By continuing you agree to our/i)).toBeInTheDocument();
+		expect(screen.getByText(/By continuing, you agree to the/i)).toBeInTheDocument();
 		expect(screen.getByRole("link", { name: "Terms of Service" })).toHaveAttribute("href", "/terms");
 		expect(screen.getByRole("link", { name: "Privacy Policy" })).toHaveAttribute("href", "/privacy");
 	});
@@ -189,8 +189,9 @@ describe("switching between the two modes", () => {
 
 		await user.click(screen.getByRole("button", { name: "Sign in" }));
 		expect(await screen.findByRole("dialog", { name: "Sign in" })).toBeInTheDocument();
-		// Terms are a signup-side thing.
-		expect(screen.queryByText(/By continuing you agree/i)).not.toBeInTheDocument();
+		// The same fine print is shown on sign-in: Terms accepted, Privacy acknowledged.
+		expect(screen.getByText(/By continuing, you agree to the/i)).toBeInTheDocument();
+		expect(screen.getByText(/and acknowledge the/i)).toBeInTheDocument();
 
 		await user.click(screen.getByRole("button", { name: "Sign up" }));
 		expect(await screen.findByRole("dialog", { name: "Create your account" })).toBeInTheDocument();

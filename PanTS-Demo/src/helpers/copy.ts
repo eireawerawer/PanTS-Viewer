@@ -30,3 +30,10 @@ export const FOOTER_INQUIRY_LEAD =
 /** The one external contact route (a separate BodyMaps, Inc. site). */
 export const CONTACT_URL = "https://thebodymaps.com/contact/";
 export const CONTACT_LINK_TEXT = "thebodymaps.com/contact";
+
+/** Auth modal fine print, shown on sign-in and sign-up (links follow). */
+export const AUTH_FINEPRINT_LEAD = "By continuing, you agree to the";
+export const AUTH_FINEPRINT_MID = "and acknowledge the";
+
+/** Header nav entry that opens the contact route in a new tab. */
+export const NAV_CONTACT_LABEL = "CONTACT";
