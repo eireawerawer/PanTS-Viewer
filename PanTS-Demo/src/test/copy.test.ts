@@ -5,11 +5,31 @@
  * quietly reverting the text.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { SITE_DESCRIPTION, SITE_TITLE } from "../helpers/copy";
 
 const read = (rel: string) => readFileSync(resolve(process.cwd(), rel), "utf8");
+
+/** Every shipped source file under src/ (this guard file excluded). */
+const sourceFiles = (): string[] => {
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) walk(full);
+      else if (/\.(tsx?|css|html)$/.test(name) && !full.endsWith("copy.test.ts")) out.push(full);
+    }
+  };
+  walk(resolve(process.cwd(), "src"));
+  return out;
+};
+
+/** Wording that was deliberately replaced; a hit means a merge brought it back. */
+const RETIRED_PHRASES = [
+  "A CT Segmentation Platform",
+  "For commercial use, please visit",
+];
 
 describe("site copy guard", () => {
   it("index.html title and descriptions match the canonical copy", () => {
@@ -26,8 +46,13 @@ describe("site copy guard", () => {
     }
   });
 
-  it("retired wording does not come back", () => {
-    const html = read("index.html");
-    expect(html).not.toContain("A CT Segmentation Platform");
+  it("retired wording does not come back anywhere in src/ or index.html", () => {
+    const files = [...sourceFiles(), resolve(process.cwd(), "index.html")];
+    for (const file of files) {
+      const text = readFileSync(file, "utf8");
+      for (const phrase of RETIRED_PHRASES) {
+        expect(text, `${file} contains retired phrase "${phrase}"`).not.toContain(phrase);
+      }
+    }
   });
 });

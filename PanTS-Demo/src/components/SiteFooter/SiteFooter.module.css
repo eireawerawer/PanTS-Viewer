@@ -18,7 +18,21 @@
   z-index: 1;
 }
 
+.left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .tagline {
+  letter-spacing: 0.01em;
+}
+
+/* Nonclinical notice: same muted ink as the tagline, slightly smaller so the
+   tagline stays the lead line. */
+.notice {
+  font-size: 11px;
   letter-spacing: 0.01em;
 }
 
@@ -43,5 +57,8 @@
     justify-content: center;
     text-align: center;
     padding: 8px 20px;
+  }
+  .left {
+    align-items: center;
   }
 }
