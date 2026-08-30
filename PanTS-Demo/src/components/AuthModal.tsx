@@ -1,6 +1,7 @@
 import { IconBrandGithub, IconBrandGoogle } from "@tabler/icons-react";
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { AUTH_FINEPRINT_LEAD, AUTH_FINEPRINT_MID } from "../helpers/copy";
 import { useAuth } from "../contexts/authContext";
 import { track } from "../helpers/analytics";
 import "./AuthModal.css";
@@ -234,12 +235,14 @@ const AuthModal: React.FC = () => {
 					</form>
 				)}
 
-				{/* Consent by continuing rather than a checkbox, on the signup side
-				    only — that's the moment the account is created. */}
-				{isSignup && (
+				{/* Consent by continuing rather than a checkbox, on both sign-up and
+				    sign-in — Terms are accepted, the Privacy Policy is acknowledged.
+				    The reset-password view is not an entry into the service. */}
+				{!isForgot && (
 					<p className="authm-fineprint">
-						By continuing you agree to our{" "}
-						<Link to="/terms" target="_blank">Terms of Service</Link> and{" "}
+						{AUTH_FINEPRINT_LEAD}{" "}
+						<Link to="/terms" target="_blank">Terms of Service</Link>{" "}
+						{AUTH_FINEPRINT_MID}{" "}
 						<Link to="/privacy" target="_blank">Privacy Policy</Link>.
 					</p>
 				)}

@@ -3,7 +3,13 @@ import Header from "../../components/Header";
 import SiteFooter from "../../components/SiteFooter";
 import styles from "./TeamPage.module.css";
 
-type Member = { name: string; role: string; photo?: string };
+type Member = {
+  name: string;
+  role: string;
+  photo?: string;
+  /** Verified public profiles only; a card with none stays unlinked. */
+  links?: { linkedin?: string };
+};
 
 // preload only the first member's photo to ensure it loads quickly, improving performance.
 const ZHOU_PHOTO = "/headshots/zongwei-zhou.webp";
@@ -15,6 +21,7 @@ const MEMBERS: Member[] = [
     name: "Zongwei Zhou, PhD",
     role: "Principal Investigator",
     photo: ZHOU_PHOTO,
+    links: { linkedin: "https://www.linkedin.com/in/zongwei-zhou" },
   },
   {
     name: "Alan L. Yuille, PhD",
@@ -25,6 +32,7 @@ const MEMBERS: Member[] = [
     name: "Wenxuan Li",
     role: "PhD Student",
     photo: "/headshots/wenxuan-li.webp",
+    links: { linkedin: "https://www.linkedin.com/in/wenxuan-li-chelsea" },
   },
   {
     name: "Pedro RAS Bassi",
@@ -96,6 +104,17 @@ function MemberCard({
       <div>
         <div className={styles.memberName}>{member.name}</div>
         <div className={styles.memberRole}>{member.role}</div>
+        {member.links?.linkedin && (
+          <a
+            className={styles.memberLink}
+            href={member.links.linkedin}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={`${member.name} on LinkedIn`}
+          >
+            LinkedIn
+          </a>
+        )}
       </div>
     </div>
   );

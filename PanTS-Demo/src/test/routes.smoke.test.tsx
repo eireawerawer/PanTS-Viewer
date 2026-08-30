@@ -41,7 +41,7 @@ describe("route smoke tests", () => {
   it("LandingPage (Overview) renders", () => {
     renderRoute(<LandingPage />);
     expect(
-      screen.getByText("The open library of labeled body CT scans"),
+      screen.getByText("The intelligence layer for medical imaging AI"),
     ).toBeInTheDocument();
   });
 

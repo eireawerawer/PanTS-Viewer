@@ -126,7 +126,7 @@ describe("model access", () => {
     await settled();
     await openModelMenu(user);
     await user.click(screen.getByText("ePAI"));
-    await user.click(await screen.findByRole("button", { name: "See donation options" }));
+    await user.click(await screen.findByRole("button", { name: "See plan options" }));
 
     expect(await screen.findByText("Plan settings")).toBeInTheDocument();
   });

@@ -1,4 +1,4 @@
-/* Terms / Privacy placeholder pages. Matches the sign-up page's vocabulary. */
+/* Terms / Privacy Notice pages. Matches the sign-up page's vocabulary. */
 
 
 .legal-wrapper {
@@ -38,18 +38,22 @@
 	margin: 0 0 20px;
 }
 
-.legal-banner {
-	border: 1px solid rgba(217, 119, 6, 0.35);
-	background: rgba(217, 119, 6, 0.07);
-	border-radius: 12px;
-	padding: 16px 18px;
-	font-size: 13.5px;
+/* Status line under the title: quiet, not a warning box. */
+.legal-status {
+	font-size: 13px;
 	line-height: 1.6;
-	color: #4a4a4a;
-	margin-bottom: 32px;
+	color: #6a6a6a;
+	margin: 0 0 18px;
 }
-.legal-banner strong {
-	color: #9a5b04;
+.legal-updated {
+	color: #8f8f8f;
+}
+
+.legal-intro {
+	font-size: 14.5px;
+	line-height: 1.65;
+	color: #4a4a4a;
+	margin: 0 0 30px;
 }
 
 .legal-section {

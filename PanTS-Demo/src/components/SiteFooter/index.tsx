@@ -1,22 +1,34 @@
+import {
+  CONTACT_LINK_TEXT,
+  CONTACT_URL,
+  FOOTER_INQUIRY_LEAD,
+  FOOTER_TAGLINE,
+  NONCLINICAL_WARNING,
+} from "../../helpers/copy";
 import styles from "./SiteFooter.module.css";
 
-/** Slim site-wide footer: company line + commercial-partnership pointer to the main site. */
+/**
+ * Slim site-wide footer: tagline + the nonclinical notice on the left, the
+ * inquiry route on the right. Strings live in helpers/copy.ts.
+ */
 function SiteFooter() {
   return (
     <footer className={styles.footer}>
-      <span className={styles.tagline}>
-        BodyMaps — the intelligence layer for medical imaging AI.
-      </span>
+      <div className={styles.left}>
+        <span className={styles.tagline}>{FOOTER_TAGLINE}</span>
+        <span className={styles.notice}>{NONCLINICAL_WARNING}</span>
+      </div>
       <span className={styles.partner}>
-        For commercial use, please visit{" "}
+        {FOOTER_INQUIRY_LEAD}{" "}
         <a
           className={styles.link}
-          href="https://thebodymaps.com/contact/"
+          href={CONTACT_URL}
           target="_blank"
           rel="noopener noreferrer"
         >
-          thebodymaps.com
+          {CONTACT_LINK_TEXT}
         </a>
+        .
       </span>
     </footer>
   );

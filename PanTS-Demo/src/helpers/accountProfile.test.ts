@@ -72,11 +72,11 @@ describe("plan cards", () => {
 		}
 	});
 
-	it("prices the individual plans and leaves Enterprise open", () => {
+	it("shows Free as free, the future tiers as coming soon, and leaves Enterprise open", () => {
 		const byId = Object.fromEntries(PLANS.map((p) => [p.id, p]));
 		expect(byId.free.price).toBe("$0");
-		expect(byId.pro.price).toBe("$1.99");
-		expect(byId.team.price).toBe("$4.99");
+		expect(byId.pro.price).toBe("Coming soon");
+		expect(byId.team.price).toBe("Coming soon");
 		expect(byId.enterprise.price).toBe("Custom");
 		// A bare figure means nothing without a period attached to it.
 		for (const plan of PLANS) expect(plan.priceNote).toBeTruthy();

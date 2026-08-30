@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { IconX } from "@tabler/icons-react";
 import { Link, NavLink } from "react-router-dom";
 import AuthButton from "../AuthButton";
+import { CONTACT_URL, NAV_CONTACT_LABEL } from "../../helpers/copy";
 import styles from "./Header.module.css";
 
 const TABS = [
@@ -77,6 +78,15 @@ export default function Header() {
               {tab.label}
             </NavLink>
           ))}
+          <a
+            href={CONTACT_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={styles.tabPill}
+            aria-label={`${NAV_CONTACT_LABEL} (opens thebodymaps.com in a new tab)`}
+          >
+            {NAV_CONTACT_LABEL}
+          </a>
         </div>
 
         <div className={styles.navActions}>
@@ -147,6 +157,16 @@ export default function Header() {
                   {tab.label}
                 </NavLink>
               ))}
+              <a
+                href={CONTACT_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={styles.mobileTab}
+                aria-label={`${NAV_CONTACT_LABEL} (opens thebodymaps.com in a new tab)`}
+                onClick={closeMenu}
+              >
+                {NAV_CONTACT_LABEL}
+              </a>
             </nav>
 
             <div className={styles.drawerFooter}>

@@ -1,78 +1,95 @@
 import React from "react";
 import { Link } from "react-router-dom";
+import { CONTACT_URL } from "../helpers/copy";
 import "./LegalPage.css";
 
-// Terms of Service and Privacy Policy.
+// Terms of Service and Privacy Notice.
 //
-// PLACEHOLDER — this is not legal copy and must be replaced before launch.
-// BodyMaps accepts uploaded medical imaging, which means the real versions have
-// to be written or reviewed by a lawyer: PHI handling, HIPAA/BAA obligations
-// when a clinician uploads a patient's scan, research-use limitations, and
-// data-retention commitments are all jurisdiction-specific and none of them can
-// be guessed at. The headings below are the sections that will need real text.
+// Provisional text: written in plain English to describe what the service
+// actually does today, pending institutional review. When the wording changes
+// materially, bump the date shown under the title. Do not describe behaviour
+// (scheduled deletion, export, verification) that is not running in production.
 
 type Section = { heading: string; body: string };
 
+const TERMS_INTRO =
+	'These Terms of Service ("Terms") are an agreement between you and the BodyMaps program that operates this site ("BodyMaps", "we", "us"). "BodyMaps" names this site and service. BodyMaps, Inc. is a separate company that contributed to the website and receives and routes inquiries for us; it does not operate this site and cannot make commitments on our behalf. By creating an account, uploading, or otherwise using BodyMaps, you agree to these Terms and acknowledge the Privacy Notice. If you do not agree, do not use the service.';
+
 const TERMS: Section[] = [
 	{
-		heading: "Research use only",
-		body: "BodyMaps is research software. Segmentations, measurements, and reports it produces are not a diagnosis and are not a substitute for the judgment of a qualified clinician. It has not been cleared or approved by any medical device regulator.",
+		heading: "Nonclinical use only",
+		body: "BodyMaps may be used for commercial or noncommercial research, education, software and dataset development, evaluation, and other nonclinical purposes. It is not medical advice and must not be used to diagnose, screen for, detect, stage, treat, prevent, or monitor disease; to give patient-specific guidance; to prepare a clinical report; or to make any decision about patient care. Segmentations, measurements, labels, summaries, and assistant responses are experimental model outputs: they may be wrong or incomplete, have not been reviewed by a radiologist, and have not been cleared or approved by any medical device regulator. Do not rely on BodyMaps in an emergency.",
 	},
 	{
 		heading: "Accounts",
-		body: "What you are responsible for as an account holder, what we may do with an account that is misused, and how an account can be closed by either side.",
+		body: "You must be at least 18 years old to create, own, or use an account. A person aged 13 to 17 may use BodyMaps only through an adult's account, under that adult's direct supervision and with a guardian's permission; do not share credentials with a minor. Keep your account information accurate and your credentials secure. You are responsible for activity under your account and must tell us promptly about suspected unauthorized access. Do not share, sell, or automate access, evade quotas, or impersonate anyone. We may limit, suspend, or close an account that breaks these Terms or creates security or legal risk. If you delete your account, it is deactivated and can be restored by signing in within 30 days.",
 	},
 	{
 		heading: "What you upload",
-		body: "Who may upload imaging, what rights and permissions you are confirming you have when you upload it, and what we are permitted to do with it in order to run the service.",
+		body: "Files opened in View only mode stay in your browser. If you run a model or other server-side processing, your scan and its results are transferred to and stored on our servers, where authorized staff can access them when reasonably necessary to operate, secure, support, or debug the service or to enforce these Terms. Do not upload protected health information or identifiable patient data: remove identifiers from headers, filenames, and image pixels before uploading, and upload only scans you have the right and authority to submit. We do not offer a Business Associate Agreement. A share link is not access control; anyone with the link can open it. Keep your own copies. We do not guarantee that uploads or outputs are preserved.",
+	},
+	{
+		heading: "Rights in uploads and annotations",
+		body: "You keep your rights in the scans you upload. As a condition of free server-side processing, you grant BodyMaps a nonexclusive, perpetual, irrevocable, worldwide, royalty-free, transferable, and sublicensable license to use a qualifying scan contribution, meaning an upload that has been de-identified and separated from your account and source files, for research, model training, evaluation, publication, redistribution, commercialization, and other lawful purposes. A prohibited or identifiable upload is not a qualifying contribution and may be quarantined or deleted. Annotations and masks you create are yours to use, including commercially; we receive only the rights needed to process, store, and deliver them to you. If you do not accept this license, do not use server-side processing; you may ask about alternative terms through the contact form.",
 	},
 	{
 		heading: "Plans and donations",
-		body: "How plans, quotas, and any future donations work. Nothing is charged today and no donation amounts have been set.",
+		body: 'Access is subject to the plan quotas and feature limits shown in your account. We do not collect payments today. Tiers marked "Coming soon" are informational descriptions of possible future offerings, not current offers or promises of access, and they may change or never launch. We may grant, change, or withdraw plan access and revise limits or features. A donation, if we ever accept one, does not buy ownership of or rights to any dataset, model, software, or output.',
 	},
 	{
 		heading: "Acceptable use",
-		body: "What the service may not be used for, including any use as the basis of a clinical decision.",
+		body: "Use BodyMaps only for lawful nonclinical purposes and in line with the licenses that apply to the datasets, models, software, and outputs you use. You must not use the service or its outputs for patient care or clinical decisions; upload material without the rights or consent you need; upload protected health information or identifiable patient data; attempt to identify or re-identify any person; infringe privacy or intellectual-property rights; probe or bypass security or access controls; introduce malicious code; scrape in bulk outside an authorized feature; evade limits; or resell access. We may investigate suspected misuse and restrict access to protect users, systems, or legal rights. To the fullest extent permitted by law, you will defend, indemnify, and hold harmless BodyMaps, its staff and contributors, and BodyMaps, Inc. from third-party claims arising from your uploads, prohibited data, missing rights or consent, attempted re-identification, prohibited use, or breach of these Terms.",
 	},
 	{
 		heading: "Availability and liability",
-		body: "What we do and do not commit to regarding uptime, data durability, and the limits of our liability.",
+		body: 'BodyMaps is provided "as is" and "as available", without any promise that it will be accurate, secure, uninterrupted, or error-free, or that uploads or outputs will be preserved. We may change or discontinue features, models, datasets, and limits without notice. To the fullest extent permitted by law, BodyMaps, its staff and contributors, and BodyMaps, Inc. disclaim all warranties and are not liable for indirect, incidental, special, consequential, exemplary, or punitive damages, including lost data, research, revenue, or goodwill, or for harm from reliance on an output or from unauthorized access. Where liability cannot be excluded, our total liability is capped at the greater of USD 100 or the amount you paid us in the preceding 12 months. Nothing in these Terms limits rights or obligations that cannot lawfully be limited.',
+	},
+	{
+		heading: "Where the service is operated",
+		body: "BodyMaps is operated from the United States and primarily serves the U.S. research community, but permitted users elsewhere may use it. If you use BodyMaps from outside the United States, you do so on your own initiative and are responsible for making sure that your access, uploads, and use comply with the laws that apply to you and your data. We do not represent that BodyMaps is appropriate or lawful in every jurisdiction and may restrict access where necessary. Personal and technical data are handled as described in the Privacy Notice.",
+	},
+	{
+		heading: "Changes to these Terms",
+		body: "We may update these Terms as the service changes; the revised version will show a new date at the top of this page. Changes apply from that date, and continued use after it means you accept them to the extent permitted by law. If you do not accept a change, stop using the service. If any provision is unenforceable, the rest remains in effect. These Terms are governed by the laws of the State of Maryland, USA, without regard to its conflict-of-law rules.",
 	},
 ];
+
+const PRIVACY_INTRO =
+	'This notice explains what BodyMaps collects when you use this site, how it is used, and the choices you have. "We" means the BodyMaps program that operates the site. BodyMaps, Inc. is a separate company that contributed to the website and receives and routes inquiries for us; it does not operate the site.';
 
 const PRIVACY: Section[] = [
 	{
 		heading: "What we collect",
-		body: "Account details, uploaded imaging and the results derived from it, and the technical logs needed to operate and debug the service.",
+		body: "Account information: your email address, the name you choose, an optional self-reported role, your plan, whether your email is verified, and account and session identifiers. For email-and-password accounts we store a password hash, not the password. If you sign in with Google or GitHub, we receive your email address, the provider's name and account identifier, and its verification status. Uploads and outputs: CT scans you send for server-side processing and the masks, measurements, and summaries derived from them; files opened in View only mode stay in your browser. Signed-in sessions use one HTTP-only cookie (bm_session). Site analytics are described below.",
 	},
 	{
 		heading: "Protected health information",
-		body: "How imaging that may constitute PHI is handled, who can access it, and the circumstances under which a Business Associate Agreement is required. This section in particular needs legal review.",
+		body: "BodyMaps is not designed to receive protected health information or identifiable patient data, and we do not offer a Business Associate Agreement. Do not upload identifiable scans. Before uploading, remove identifiers from image headers, filenames, and burned-in pixels, and make sure you have permission to use and upload the scan. The service does not de-identify files for you and does not check them for identifiers. An identifiable upload may be quarantined or deleted and is not eligible for reuse under the scan-contribution license in the Terms.",
 	},
 	{
 		heading: "How we use it",
-		body: "Running inference you request, operating and improving the service, and whether data is ever used for model training — and how you would opt out if so.",
+		body: "We use account and session data to sign you in, apply plan limits, secure accounts, and operate the service. We use uploads and outputs to display images and perform the processing, annotation, and summaries you request. Authorized staff may access uploads and account data on a need-to-know basis to operate, secure, support, or debug the service or to enforce the Terms. Uploads that qualify as de-identified scan contributions may be used, after they are separated from your account, under the license in the Terms for research, model training, evaluation, publication, redistribution, and commercialization. We use technical logs and analytics to run, diagnose, and understand use of the service.",
 	},
 	{
-		// Unlike its neighbours this one is not a placeholder: it describes what
-		// the site actually does today. Recording visitors' IP addresses without
-		// saying so anywhere is worse than a heading awaiting real legal copy.
 		heading: "Site analytics, IP addresses and location",
-		body: "We record which features are used and which pages are visited, along with the IP address each request came from, the approximate country and city that address resolves to, and whether the device is a desktop, tablet or phone. Location is worked out on our own servers from a local database — your IP address is not sent to any third party for this. These records are visible only to site administrators, are never used to identify you personally, and are deleted automatically after the retention period. No third-party analytics or advertising scripts run on this site.",
+		body: "We record pages visited, named feature actions, time on page, plan and optional account type, the IP address of each request, the approximate country, region, and city derived from it, and device type. Location is computed on our own server from a local database; your IP address is not sent to a third party for this. When you are signed in these records are linked to your account; otherwise they are linked to a persistent browser identifier and a session identifier, so they are not anonymous. We will not use IP addresses, analytics events, browser identifiers, or derived location to discover, verify, or re-identify anyone's real-world identity. Only site administrators can view these records. They are not yet deleted on a fixed schedule; we are implementing one (IP-bearing security logs kept up to 30 days; account- or browser-linked events up to 90 days, then de-identified aggregates only) and will update this notice when it is running. No third-party analytics or advertising scripts run on this site.",
 	},
 	{
 		heading: "Retention and deletion",
-		body: "How long scans and results are kept, what deleting your history removes, and what happens to your data when you delete your account.",
+		body: "Uploads and outputs are currently kept without a fixed retention period. Clearing your scan history removes the jobs shown to you and the working files and masks we can associate with them; it does not remove a qualifying de-identified scan contribution, and copies may persist for a time in backups or logs. Deleting your account signs you out, deactivates it, and schedules the account and its data for removal after a 30-day grace period during which signing in restores everything; we do not guarantee removal on a specific day. Live Room files are designed to expire after 24 hours. We do not currently promise automated deletion on any schedule and will update this notice when scheduled deletion is running.",
 	},
 	{
 		heading: "Sharing",
-		body: "Third parties involved in operating the service, and the commitment that data is not sold.",
+		body: "We do not sell account data, uploads, or outputs. Anyone who has a share link or Live Room link can open its content. When you create a share card, the share link, including its token, is sent to api.qrserver.com to generate the QR code. Google Fonts may load on some pages, and some viewer paths fetch public dataset assets from Hugging Face. Google or GitHub processes your sign-in when you choose them. Password-reset email is sent through an email provider. BodyMaps, Inc. receives and routes inquiries and requests sent through its contact form. No third-party analytics or advertising trackers run on this site.",
 	},
 	{
 		heading: "Your rights",
-		body: "How to export your data, correct it, or have it deleted, and how to contact us to do so.",
+		body: "In Settings you can download a copy of your account details, change your display name and optional role, and use the scan-history and account-deletion controls described above. To request access to, correction of, or deletion of your personal data, to withdraw consent where it applies, to request a portable copy, or to appeal a decision, use the contact form at thebodymaps.com; do not include protected health information or scans. We will verify you by sending a link or code to the email registered to your account and will respond within 45 days, with one extension where the law allows and with notice to you. BodyMaps, Inc. receives and routes these requests; BodyMaps decides and responds.",
 	},
 ];
+
+/** Shown under the title until the reviewed version is published. */
+const LAST_UPDATED = "Last updated 2026-08-29";
 
 const LegalPage: React.FC<{ kind: "terms" | "privacy" }> = ({ kind }) => {
 	const isTerms = kind === "terms";
@@ -88,15 +105,14 @@ const LegalPage: React.FC<{ kind: "terms" | "privacy" }> = ({ kind }) => {
 			</header>
 
 			<main className="legal-main">
-				<h1 className="legal-title">{isTerms ? "Terms of Service" : "Privacy Policy"}</h1>
+				<h1 className="legal-title">{isTerms ? "Terms of Service" : "Privacy Notice"}</h1>
 
-				<div className="legal-banner" role="note">
-					<strong>Draft placeholder — not yet in force.</strong> This page outlines the
-					sections the final {isTerms ? "terms" : "policy"} will cover. It has not been
-					written or reviewed by a lawyer and creates no agreement between you and
-					BodyMaps. Because the service handles medical imaging, the real text needs
-					proper legal review before launch.
-				</div>
+				<p className="legal-status" role="note">
+					{isTerms ? "Provisional terms, under review." : "Provisional privacy notice, under review."}{" "}
+					<span className="legal-updated">{LAST_UPDATED}</span>
+				</p>
+
+				<p className="legal-intro">{isTerms ? TERMS_INTRO : PRIVACY_INTRO}</p>
 
 				{sections.map((s) => (
 					<section key={s.heading} className="legal-section">
@@ -106,8 +122,11 @@ const LegalPage: React.FC<{ kind: "terms" | "privacy" }> = ({ kind }) => {
 				))}
 
 				<p className="legal-footer">
-					Questions in the meantime? Get in touch through the{" "}
-					<Link to="/team">team page</Link>.
+					Questions or feedback? Use the contact form at{" "}
+					<a href={CONTACT_URL} target="_blank" rel="noopener noreferrer">
+						thebodymaps.com
+					</a>
+					, a separate BodyMaps, Inc. site. Do not include protected health information.
 				</p>
 			</main>
 		</div>
