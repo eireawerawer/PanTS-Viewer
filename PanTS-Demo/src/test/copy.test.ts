@@ -11,14 +11,18 @@ import { SITE_DESCRIPTION, SITE_TITLE } from "../helpers/copy";
 
 const read = (rel: string) => readFileSync(resolve(process.cwd(), rel), "utf8");
 
-/** Every shipped source file under src/ (this guard file excluded). */
+/** Every shipped source file under src/ — tests excluded, they quote retired
+ *  phrases in negative assertions. */
 const sourceFiles = (): string[] => {
   const out: string[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
       const full = join(dir, name);
-      if (statSync(full).isDirectory()) walk(full);
-      else if (/\.(tsx?|css|html)$/.test(name) && !full.endsWith("copy.test.ts")) out.push(full);
+      if (statSync(full).isDirectory()) {
+        if (name !== "test") walk(full);
+      } else if (/\.(tsx?|css|html)$/.test(name) && !/\.test\.tsx?$/.test(name)) {
+        out.push(full);
+      }
     }
   };
   walk(resolve(process.cwd(), "src"));
@@ -30,6 +34,10 @@ const RETIRED_PHRASES = [
   "A CT Segmentation Platform",
   "For commercial use, please visit",
   "By continuing you agree to our",
+  "Draft placeholder",
+  "not yet in force",
+  "never used to identify you personally",
+  "deleted automatically after the retention period",
 ];
 
 describe("site copy guard", () => {
