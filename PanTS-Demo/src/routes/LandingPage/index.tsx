@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { segmentation_categories, API_BASE } from "../../helpers/constants";
 import Header from "../../components/Header";
 import SiteFooter from "../../components/SiteFooter";
+import { LANDING_OVERVIEW, NONCLINICAL_WARNING } from "../../helpers/copy";
 import styles from "./LandingPage.module.css";
 
 const TARGETS = {
@@ -113,6 +114,9 @@ export default function LandingPage() {
         </h1>
         <p className={styles.heroSubtitle}>
           The open library of labeled body CT scans
+        </p>
+        <p className={styles.heroOverview}>
+          {LANDING_OVERVIEW} {NONCLINICAL_WARNING}
         </p>
         <div className={styles.heroStats}>
           {stats.map((stat, index) => (
