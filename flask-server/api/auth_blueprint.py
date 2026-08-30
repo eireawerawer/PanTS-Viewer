@@ -278,26 +278,31 @@ def my_jobs():
     return jsonify({"jobs": jobs}), 200
 
 
+# The account fields a signed-in user can already see in Settings. Nothing
+# internal: no ids, no session or role rows, no job records (real runs never
+# write the job table, and its rows carry server paths).
+EXPORT_ACCOUNT_FIELDS = ("email", "name", "account_type", "plan", "created_at")
+
+
 @auth_blueprint.route("/me/export", methods=["GET"])
 @require_auth
 def export_me():
-    """Everything we hold for this account, as a downloadable JSON file.
+    """A copy of your account details, as a downloadable JSON file.
 
-    Deliberately its own endpoint rather than a step inside deletion — wanting a
-    copy of your data is not the same as wanting to leave.
+    Deliberately narrow (see EXPORT_ACCOUNT_FIELDS) and deliberately its own
+    endpoint rather than a step inside deletion — wanting a copy of your data
+    is not the same as wanting to leave.
     """
     user = current_user()
+    account = auth_store.get_user(user["id"]) or {}
     payload = {
         "exported_at": job_store.utcnow().isoformat(),
-        "account": auth_store.get_user(user["id"]),
-        "jobs": job_store.list_jobs_for_user(user["id"]),
+        "account": {field: account.get(field) for field in EXPORT_ACCOUNT_FIELDS},
     }
     # send as a file rather than a JSON body so the browser saves it directly
     resp = make_response(json.dumps(payload, indent=2, default=str), 200)
     resp.headers["Content-Type"] = "application/json"
-    resp.headers["Content-Disposition"] = (
-        f'attachment; filename="bodymaps-export-{user["id"]}.json"'
-    )
+    resp.headers["Content-Disposition"] = 'attachment; filename="bodymaps-account.json"'
     return resp
 
 

@@ -84,7 +84,7 @@ const PRIVACY: Section[] = [
 	},
 	{
 		heading: "Your rights",
-		body: "You can change your display name and optional role in Settings, and use the scan-history and account-deletion controls described above. To request access to, correction of, or deletion of your personal data, to withdraw consent where it applies, to request a portable copy, or to appeal a decision, use the contact form at thebodymaps.com; do not include protected health information or scans. We will verify you by sending a link or code to the email registered to your account and will respond within 45 days, with one extension where the law allows and with notice to you. BodyMaps, Inc. receives and routes these requests; BodyMaps decides and responds.",
+		body: "In Settings you can download a copy of your account details, change your display name and optional role, and use the scan-history and account-deletion controls described above. To request access to, correction of, or deletion of your personal data, to withdraw consent where it applies, to request a portable copy, or to appeal a decision, use the contact form at thebodymaps.com; do not include protected health information or scans. We will verify you by sending a link or code to the email registered to your account and will respond within 45 days, with one extension where the law allows and with notice to you. BodyMaps, Inc. receives and routes these requests; BodyMaps decides and responds.",
 	},
 ];
 

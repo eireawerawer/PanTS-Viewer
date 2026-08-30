@@ -44,6 +44,8 @@ const RETIRED_PHRASES = [
   "monthly donation",
   "For everyday clinical",
   "See donation options",
+  "permanently deletes every scan",
+  "30 days to change your mind",
 ];
 
 describe("site copy guard", () => {

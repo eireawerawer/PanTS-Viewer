@@ -9,6 +9,10 @@ import { useSettings } from "./context";
 // in a plain row like any other and saves the weight for the confirmation —
 // which is the right split: a warning you scroll past every visit stops
 // registering, and the moment that actually matters is the click.
+//
+// Export is deliberately narrow: the account fields you can see on this
+// page, nothing internal (no ids, no job rows with server paths). Scans and
+// results are not part of it.
 const PrivacySettings: React.FC = () => {
 	const navigate = useNavigate();
 	const { exportData, deleteScanHistory, deleteAccount } = useAuth();
@@ -33,7 +37,7 @@ const PrivacySettings: React.FC = () => {
 				notify(
 					count === 0
 						? "You had no scans to delete."
-						: `Deleted ${count} scan${count === 1 ? "" : "s"} and their results.`
+						: `Removed ${count} scan${count === 1 ? "" : "s"} and their results.`
 				);
 				return;
 			}
@@ -47,11 +51,11 @@ const PrivacySettings: React.FC = () => {
 				<h2 className="set-heading">Your data</h2>
 
 				<div className="set-row">
-					<span className="set-row-label">Export data</span>
+					<span className="set-row-label">Export account details</span>
 					<button type="button" className="set-btn" disabled={busy} onClick={() =>
 						run(async () => {
 							await exportData();
-							notify("Your data has been downloaded.");
+							notify("Your account details have been downloaded.");
 						})
 					}>
 						Export
@@ -77,14 +81,18 @@ const PrivacySettings: React.FC = () => {
 						<div className="set-confirm-text">
 							{confirming === "history" ? (
 								<>
-									This permanently deletes every scan you've uploaded and every
-									segmentation produced from them. Your account stays. It can't be undone.
+									This removes the scans and results shown in your history, along with
+									the working files and masks we can associate with them. It doesn't
+									remove a de-identified contribution already separated from your
+									account, and copies may persist for a time in backups. Your account
+									stays. It can't be undone.
 								</>
 							) : (
 								<>
-									This signs you out everywhere and schedules your account and all your
-									scans for deletion. You have 30 days to change your mind — sign back in
-									and everything is restored.
+									This signs you out everywhere and schedules your account and its data
+									for removal after 30 days. Sign back in before then and everything is
+									restored. Removal isn't guaranteed on a specific day, and de-identified
+									contributions already separated from your account may remain.
 								</>
 							)}
 							<br />

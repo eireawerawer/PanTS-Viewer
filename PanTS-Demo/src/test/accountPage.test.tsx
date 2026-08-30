@@ -72,7 +72,12 @@ beforeEach(() => {
 			return json({ user: { ...USER } });
 		}
 		if (u.includes("/api/me/usage")) return json({ ...USAGE, plan: USER.plan });
-		if (u.includes("/api/me/export")) return json({ account: USER, jobs: [] });
+		if (u.includes("/api/me/export")) {
+			return json({
+				exported_at: "2026-08-29T00:00:00",
+				account: { email: USER.email, name: USER.name, account_type: USER.account_type, plan: USER.plan, created_at: "2026-08-01T00:00:00" },
+			});
+		}
 		if (u.includes("/api/me/jobs") && method === "DELETE") {
 			return json({ deleted: { jobs: 3, files: 5 } });
 		}
@@ -303,7 +308,7 @@ describe("history", () => {
 });
 
 describe("export", () => {
-	it("downloads from the server rather than rebuilding from local state", async () => {
+	it("downloads the account details from the server rather than rebuilding them locally", async () => {
 		const user = userEvent.setup();
 		renderAt("/account/privacy");
 
@@ -311,7 +316,7 @@ describe("export", () => {
 
 		await waitFor(() => expect(lastCall("GET", "/api/me/export")).toBeTruthy());
 		expect(URL.createObjectURL).toHaveBeenCalled();
-		expect(await screen.findByText(/Your data has been downloaded/i)).toBeInTheDocument();
+		expect(await screen.findByText(/Your account details have been downloaded/i)).toBeInTheDocument();
 	});
 });
 
@@ -331,7 +336,7 @@ describe("delete scan history", () => {
 		await user.click(confirm);
 
 		await waitFor(() => expect(lastCall("DELETE", "/api/me/jobs")).toBeTruthy());
-		expect(await screen.findByText(/Deleted 3 scans and their results/i)).toBeInTheDocument();
+		expect(await screen.findByText(/Removed 3 scans and their results/i)).toBeInTheDocument();
 	});
 
 	it("keeps you signed in", async () => {
@@ -354,10 +359,10 @@ describe("delete account", () => {
 		const user = userEvent.setup();
 		renderAt("/account/privacy");
 		await screen.findByRole("heading", { name: "Your data" });
-		expect(screen.queryByText(/30 days to change your mind/i)).not.toBeInTheDocument();
+		expect(screen.queryByText(/Sign back in before then/i)).not.toBeInTheDocument();
 
 		await user.click(screen.getAllByRole("button", { name: "Delete" })[1]);
-		expect(await screen.findByText(/30 days to change your mind/i)).toBeInTheDocument();
+		expect(await screen.findByText(/Sign back in before then/i)).toBeInTheDocument();
 
 		await user.type(screen.getByLabelText(/Type DELETE to confirm/i), "CLEAR");
 		expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
@@ -390,17 +395,25 @@ describe("delete account", () => {
 });
 
 describe("success notices", () => {
+	// Clearing scan history is the fixture: the one Privacy action that ends in
+	// a success notice without signing you out.
+	const clearHistory = async (user: ReturnType<typeof userEvent.setup>) => {
+		await user.click((await screen.findAllByRole("button", { name: "Delete" }))[0]);
+		await user.type(screen.getByLabelText(/Type CLEAR to confirm/i), "CLEAR");
+		await user.click(screen.getByRole("button", { name: "Confirm" }));
+	};
+
 	it("clear themselves instead of staying pinned to the page", async () => {
 		vi.useFakeTimers({ shouldAdvanceTime: true });
 		const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
 		renderAt("/account/privacy");
 
-		await user.click(await screen.findByRole("button", { name: "Export" }));
-		expect(await screen.findByText(/Your data has been downloaded/i)).toBeInTheDocument();
+		await clearHistory(user);
+		expect(await screen.findByText(/Removed 3 scans and their results/i)).toBeInTheDocument();
 
 		await vi.advanceTimersByTimeAsync(6500);
 		await waitFor(() =>
-			expect(screen.queryByText(/Your data has been downloaded/i)).not.toBeInTheDocument()
+			expect(screen.queryByText(/Removed 3 scans and their results/i)).not.toBeInTheDocument()
 		);
 		vi.useRealTimers();
 	});
@@ -408,19 +421,21 @@ describe("success notices", () => {
 	it("leaves errors up, since those still need acting on", async () => {
 		vi.useFakeTimers({ shouldAdvanceTime: true });
 		const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
-		global.fetch = vi.fn(async (url: RequestInfo | URL) => {
+		global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
 			const u = String(url);
-			if (u.includes("/api/me/export")) return json({ error: "Storage is offline" }, false, 503);
+			if (u.includes("/api/me/jobs") && (init?.method ?? "GET") === "DELETE") {
+				return json({ error: "Storage is offline" }, false, 503);
+			}
 			if (u.includes("/api/auth/me")) return json({ user: { ...USER } });
 			return json({});
 		}) as unknown as typeof fetch;
 
 		renderAt("/account/privacy");
-		await user.click(await screen.findByRole("button", { name: "Export" }));
-		expect(await screen.findByText(/Couldn't prepare your data/i)).toBeInTheDocument();
+		await clearHistory(user);
+		expect(await screen.findByText(/Storage is offline/i)).toBeInTheDocument();
 
 		await vi.advanceTimersByTimeAsync(10000);
-		expect(screen.getByText(/Couldn't prepare your data/i)).toBeInTheDocument();
+		expect(screen.getByText(/Storage is offline/i)).toBeInTheDocument();
 		vi.useRealTimers();
 	});
 });

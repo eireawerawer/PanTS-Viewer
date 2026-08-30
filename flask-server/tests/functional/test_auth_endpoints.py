@@ -124,7 +124,7 @@ def test_account_endpoints_require_auth(client):
 
 # ---- export ---------------------------------------------------------------
 
-def test_export_returns_a_downloadable_file_with_account_and_jobs(client):
+def test_export_returns_only_the_account_basics(client):
     client.post("/api/auth/register",
                 json={"email": "t@u.com", "password": "password1", "name": "Ada"})
     r = client.get("/api/me/export")
@@ -132,10 +132,14 @@ def test_export_returns_a_downloadable_file_with_account_and_jobs(client):
     assert "attachment" in r.headers["Content-Disposition"]
 
     body = r.get_json()
+    assert set(body) == {"exported_at", "account"}
+    assert set(body["account"]) == {"email", "name", "account_type", "plan", "created_at"}
     assert body["account"]["email"] == "t@u.com"
     assert body["account"]["name"] == "Ada"
-    assert body["jobs"] == []
-    assert "password_hash" not in str(body)  # never leak the hash
+    assert body["account"]["plan"] == "free"
+    assert "id" not in body["account"]        # nothing internal
+    assert "jobs" not in body                 # no server paths
+    assert "password_hash" not in str(body)   # never leak the hash
 
 
 # ---- deletion -------------------------------------------------------------
