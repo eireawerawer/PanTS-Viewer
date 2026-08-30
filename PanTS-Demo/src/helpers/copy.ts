@@ -8,7 +8,10 @@
 export const NONCLINICAL_WARNING =
   "For nonclinical use only. Not medical advice or for patient care.";
 
-/** One-paragraph orientation for a first-time visitor on the landing page. */
+/** Landing hero subtitle, directly under the wordmark. */
+export const LANDING_SUBTITLE = "The intelligence layer for medical imaging AI";
+
+/** One-paragraph orientation for a first-time visitor, under the stats row. */
 export const LANDING_OVERVIEW =
   "Browse the library in 2D and 3D, upload your own CT for AI segmentation, and annotate or refine the results.";
 

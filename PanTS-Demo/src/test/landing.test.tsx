@@ -3,7 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../contexts/authContext";
 import LandingPage from "../routes/LandingPage";
-import { LANDING_OVERVIEW, NONCLINICAL_WARNING } from "../helpers/copy";
+import { LANDING_OVERVIEW, LANDING_SUBTITLE, NONCLINICAL_WARNING } from "../helpers/copy";
 
 // The landing page fetches the live CT count; stub it so the test never
 // touches a backend (same shape as routes.smoke.test.tsx).
@@ -21,8 +21,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("landing overview paragraph", () => {
-  it("sits directly under the subtitle and carries the nonclinical warning", () => {
+describe("landing hero copy", () => {
+  it("shows the subtitle under the wordmark and the overview under the stats row", () => {
     render(
       <AuthProvider>
         <MemoryRouter>
@@ -30,17 +30,18 @@ describe("landing overview paragraph", () => {
         </MemoryRouter>
       </AuthProvider>,
     );
-    const subtitle = screen.getByText("The open library of labeled body CT scans");
+    const subtitle = screen.getByText(LANDING_SUBTITLE);
+    expect(subtitle.previousElementSibling?.tagName).toBe("H1");
     const overview = screen.getByText(
       (_, el) =>
         el?.tagName === "P" &&
         (el.textContent ?? "").includes(LANDING_OVERVIEW) &&
         (el.textContent ?? "").includes(NONCLINICAL_WARNING),
     );
-    expect(subtitle.nextElementSibling).toBe(overview);
+    // Directly after the stats row, not between subtitle and stats.
+    expect(overview.previousElementSibling?.textContent).toContain("CT Volumes");
+    expect(overview.nextElementSibling).toBeNull();
     // Wording rule: nonclinical, not "research only" (users may use masks commercially).
     expect(overview.textContent).not.toMatch(/research use only/i);
-    // The stats row still follows.
-    expect(screen.getByText("CT Volumes")).toBeInTheDocument();
   });
 });

@@ -46,6 +46,7 @@ const RETIRED_PHRASES = [
   "See donation options",
   "permanently deletes every scan",
   "30 days to change your mind",
+  "open library of labeled body CT scans",
 ];
 
 describe("site copy guard", () => {
