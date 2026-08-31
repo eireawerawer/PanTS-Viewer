@@ -22,9 +22,6 @@ export const SITE_TITLE = "BodyMaps: CT Library, Segmentation, and Annotation";
 export const SITE_DESCRIPTION =
   "Browse body CT scans in 2D and 3D, upload CT for AI segmentation, and annotate results. For nonclinical use only.";
 
-/** Footer, left column. Kept from the previous footer (the PI liked it). */
-export const FOOTER_TAGLINE =
-  "BodyMaps — the intelligence layer for medical imaging AI.";
 
 /** Footer, right column: inquiry routing. The link text follows this lead. */
 export const FOOTER_INQUIRY_LEAD =

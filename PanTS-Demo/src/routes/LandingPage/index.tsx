@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { segmentation_categories, API_BASE } from "../../helpers/constants";
 import Header from "../../components/Header";
 import SiteFooter from "../../components/SiteFooter";
-import { LANDING_OVERVIEW, LANDING_SUBTITLE, NONCLINICAL_WARNING } from "../../helpers/copy";
+import { LANDING_OVERVIEW, LANDING_SUBTITLE } from "../../helpers/copy";
 import styles from "./LandingPage.module.css";
 
 const TARGETS = {
@@ -127,9 +127,7 @@ export default function LandingPage() {
             </div>
           ))}
         </div>
-        <p className={styles.heroOverview}>
-          {LANDING_OVERVIEW} {NONCLINICAL_WARNING}
-        </p>
+        <p className={styles.heroOverview}>{LANDING_OVERVIEW}</p>
       </main>
       <SiteFooter />
     </div>

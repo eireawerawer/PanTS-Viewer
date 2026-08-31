@@ -3,7 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../contexts/authContext";
 import LandingPage from "../routes/LandingPage";
-import { LANDING_OVERVIEW, LANDING_SUBTITLE, NONCLINICAL_WARNING } from "../helpers/copy";
+import { LANDING_OVERVIEW, LANDING_SUBTITLE } from "../helpers/copy";
 
 // The landing page fetches the live CT count; stub it so the test never
 // touches a backend (same shape as routes.smoke.test.tsx).
@@ -32,16 +32,11 @@ describe("landing hero copy", () => {
     );
     const subtitle = screen.getByText(LANDING_SUBTITLE);
     expect(subtitle.previousElementSibling?.tagName).toBe("H1");
-    const overview = screen.getByText(
-      (_, el) =>
-        el?.tagName === "P" &&
-        (el.textContent ?? "").includes(LANDING_OVERVIEW) &&
-        (el.textContent ?? "").includes(NONCLINICAL_WARNING),
-    );
+    const overview = screen.getByText(LANDING_OVERVIEW);
     // Directly after the stats row, not between subtitle and stats.
     expect(overview.previousElementSibling?.textContent).toContain("CT Volumes");
     expect(overview.nextElementSibling).toBeNull();
-    // Wording rule: nonclinical, not "research only" (users may use masks commercially).
-    expect(overview.textContent).not.toMatch(/research use only/i);
+    // The nonclinical sentence lives in the footer, not in the paragraph.
+    expect(overview.textContent).not.toMatch(/nonclinical|research use only/i);
   });
 });
