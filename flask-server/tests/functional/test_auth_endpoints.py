@@ -109,10 +109,73 @@ def test_patch_me_updates_the_name(client):
     assert client.get("/api/auth/me").get_json()["user"]["name"] == "Grace Hopper"
 
 
+def test_patch_me_updates_the_profile_fields(client):
+    client.post("/api/auth/register", json={"email": "p2@q.com", "password": "password1"})
+    r = client.patch("/api/auth/me", json={
+        "organization": "  Example University  ",
+        "occupation": "Radiology resident",
+        "role_description": "Annotating pancreas CTs for a research project",
+    })
+    assert r.status_code == 200
+    u = r.get_json()["user"]
+    assert u["organization"] == "Example University"     # trimmed
+    assert u["occupation"] == "Radiology resident"
+    assert u["role_description"].startswith("Annotating")
+
+    # Blank clears back to "not provided"; other fields are untouched.
+    r = client.patch("/api/auth/me", json={"organization": ""})
+    assert r.get_json()["user"]["organization"] is None
+    assert r.get_json()["user"]["occupation"] == "Radiology resident"
+
+    # Wrong type is refused.
+    assert client.patch("/api/auth/me", json={"occupation": 7}).status_code == 400
+
+
 def test_patch_me_rejects_an_empty_body_and_a_non_string(client):
     client.post("/api/auth/register", json={"email": "r@s.com", "password": "password1"})
     assert client.patch("/api/auth/me", json={}).status_code == 400
     assert client.patch("/api/auth/me", json={"name": 42}).status_code == 400
+
+
+def test_the_verified_researcher_journey_promotes_to_pro(client):
+    from services import auth_store
+
+    client.post("/api/auth/register", json={"email": "vr@x.com", "password": "password1"})
+    body = client.get("/api/me/usage").get_json()
+    assert body["plan"] == "free" and body["limits"]["daily_scans"] == 1
+
+    client.patch("/api/auth/me", json={
+        "organization": "Example University",
+        "occupation": "Radiologist",
+        "role_description": "Annotating CTs for a research project",
+    })
+    # A complete profile alone is not enough.
+    assert client.get("/api/me/usage").get_json()["plan"] == "free"
+
+    user_id = client.get("/api/auth/me").get_json()["user"]["id"]
+    _, raw = auth_store.create_email_verification(user_id)
+    assert client.post("/api/auth/verify-email", json={"token": raw}).status_code == 200
+
+    body = client.get("/api/me/usage").get_json()
+    assert body["plan"] == "pro"
+    assert body["limits"]["daily_scans"] == 10
+    # The stored column is untouched, and self-service plan writes stay closed.
+    assert client.get("/api/auth/me").get_json()["user"]["plan"] == "free"
+    assert client.post("/api/me/plan", json={"plan": "team"}).status_code == 403
+
+
+def test_send_verification_requires_auth_and_verify_rejects_garbage(client):
+    assert client.post("/api/auth/send-verification").status_code == 401
+    r = client.post("/api/auth/verify-email", json={"token": "nope"})
+    assert r.status_code == 400
+
+    # Signed in and unverified: the endpoint reports honestly whether mail
+    # left the building (unconfigured SMTP logs the link and says sent=False).
+    client.post("/api/auth/register", json={"email": "v@w.com", "password": "password1"})
+    r = client.post("/api/auth/send-verification")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True and body["already_verified"] is False
 
 
 def test_account_endpoints_require_auth(client):
@@ -133,7 +196,10 @@ def test_export_returns_only_the_account_basics(client):
 
     body = r.get_json()
     assert set(body) == {"exported_at", "account"}
-    assert set(body["account"]) == {"email", "name", "account_type", "plan", "created_at"}
+    assert set(body["account"]) == {
+        "email", "name", "account_type", "plan", "created_at",
+        "organization", "occupation", "role_description",
+    }
     assert body["account"]["email"] == "t@u.com"
     assert body["account"]["name"] == "Ada"
     assert body["account"]["plan"] == "free"
@@ -210,7 +276,7 @@ def test_an_ordinary_account_is_held_on_free(client):
 
     before = client.get("/api/me/usage").get_json()
     assert before["plan"] == "free"
-    assert before["limits"]["daily_scans"] == 3
+    assert before["limits"]["daily_scans"] == 1
     assert before["limits"]["models"] == ["LesionSegmenter"]
 
     for plan in ("pro", "team", "enterprise"):

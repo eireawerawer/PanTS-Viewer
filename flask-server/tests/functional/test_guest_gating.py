@@ -1,0 +1,120 @@
+"""Guest gating: the data plane refuses anonymous callers.
+
+The upload endpoints and the AI assistant were open to unauthenticated
+requests; the only real gate was /run-inference. These tests pin the new
+boundary: guests browse, accounts upload and chat.
+
+api.api_blueprint has import-time side effects (it creates directories from
+env-configured paths), so the fixture points every path at a temp dir before
+the import. The module is imported once per pytest process — run this file as
+its own step, as ci.yml does.
+"""
+
+import importlib
+import io
+import os
+
+import pytest
+
+
+@pytest.fixture(scope="module")
+def app(tmp_path_factory):
+    base = tmp_path_factory.mktemp("guest_gating")
+    for var, sub in [
+        ("DATABASE_URL", None),
+        ("PANTS_PATH", "data"),
+        ("PANTS_LOWRES_PATH", "lowres"),
+        ("PERMISSIONS_DIR", "perm"),
+    ]:
+        value = f"sqlite:///{base / 'gg.db'}" if sub is None else str(base / sub)
+        os.environ[var] = value
+
+    import constants
+    importlib.reload(constants)
+    import models.engine as engine
+    importlib.reload(engine)
+    import models.user  # noqa: F401
+    import models.auth_session  # noqa: F401
+    import models.usage_event  # noqa: F401
+    import services.auth_store as auth_store
+    importlib.reload(auth_store)
+    import services.plan_store as plan_store
+    importlib.reload(plan_store)
+    import api.auth as auth_mod
+    importlib.reload(auth_mod)
+    import api.auth_blueprint as auth_bp
+    importlib.reload(auth_bp)
+    # Heavy module, imported once (no reload): binds the auth/plan modules above.
+    import api.api_blueprint as api_bp
+
+    engine.reset_engine_for_tests()
+    engine.create_all()
+    auth_store.ensure_system_user()
+
+    from flask import Flask
+
+    flask_app = Flask(__name__)
+    flask_app.register_blueprint(auth_bp.auth_blueprint, url_prefix="/api")
+    flask_app.register_blueprint(api_bp.api_blueprint, url_prefix="/api")
+    yield flask_app
+    engine.reset_engine_for_tests()
+
+
+@pytest.fixture()
+def client(app):
+    with app.test_client() as c:
+        yield c
+
+
+def _register(client, email="g@h.com"):
+    r = client.post("/api/auth/register",
+                    json={"email": email, "password": "password1"})
+    assert r.status_code == 201
+    return r.get_json()["user"]["id"]
+
+
+UPLOAD_ENDPOINTS = [
+    "/api/upload-inference-chunk",
+    "/api/finalize-upload",
+    "/api/upload-dicom-slice",
+    "/api/finalize-dicom",
+]
+
+
+def test_upload_endpoints_refuse_guests(client):
+    for endpoint in UPLOAD_ENDPOINTS:
+        r = client.post(endpoint, data={})
+        assert r.status_code == 401, endpoint
+
+
+def test_signed_in_chunk_upload_still_works(client):
+    _register(client, email="u1@h.com")
+    r = client.post("/api/upload-inference-chunk", data={
+        "session_id": "123456",
+        "chunk_index": "0",
+        "total_chunks": "1",
+        "file": (io.BytesIO(b"chunk-bytes"), "chunk"),
+    })
+    assert r.status_code == 200
+    assert r.get_json()["status"] == "ok"
+
+
+def test_assistant_refuses_guests(client):
+    for endpoint in ("/api/ai-command", "/api/ai-command-stream"):
+        r = client.post(endpoint, json={"message": "hi"})
+        assert r.status_code == 401, endpoint
+        assert "Sign in" in (r.get_json() or {}).get("error", "")
+
+
+def test_assistant_enforces_the_daily_allowance(client):
+    import services.plan_store as plan_store
+
+    user_id = _register(client, email="u2@h.com")
+    limit = plan_store.PLAN_LIMITS["free"]["daily_ai_messages"]
+    for _ in range(limit):
+        plan_store.record_ai_message(user_id)
+    r = client.post("/api/ai-command", json={"message": "hi"})
+    assert r.status_code == 402
+    body = r.get_json()
+    assert body["code"] == "plan_limit"
+    assert body["reason"] == "daily_ai_messages"

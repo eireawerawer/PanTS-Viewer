@@ -71,7 +71,9 @@ const PlanSettings: React.FC = () => {
 
 	if (!user) return null;
 
-	const current = user.plan;
+	// The effective plan: /me/usage reports the verified-researcher promotion,
+	// which the stored column deliberately never records.
+	const current = ((usage?.plan as PlanId | undefined) ?? user.plan);
 	const currentPlan = PLANS.find((p) => p.id === current);
 	const canChange = canChangePlan(user);
 
@@ -158,7 +160,10 @@ const PlanSettings: React.FC = () => {
 						const isCurrent = p.id === current;
 						// Free stays pickable for everyone — it's the one plan that is
 						// open, and nobody should be stranded above it.
-						const soon = !canChange && p.id !== "free";
+						const soon = !canChange && p.id !== "free" && p.id !== "pro";
+						// Pro is earned (verified email + complete profile), never
+						// clicked into - except by admins moving accounts for testing.
+						const lockedPro = p.id === "pro" && !canChange && !isCurrent;
 						return (
 							<div
 								key={p.id}
@@ -176,10 +181,16 @@ const PlanSettings: React.FC = () => {
 								<button
 									type="button"
 									className={`set-plan-cta${isCurrent ? " set-plan-cta--current" : ""}`}
-									disabled={isCurrent || soon || busy}
+									disabled={isCurrent || soon || busy || lockedPro}
 									onClick={() => choose(p.id)}
 								>
-									{isCurrent ? "Current plan" : soon ? "Coming soon" : p.cta}
+									{isCurrent
+										? "Current plan"
+										: soon
+											? "Coming soon"
+											: lockedPro
+												? "Verify to unlock"
+												: p.cta}
 								</button>
 								<ul className="set-plan-points">
 									{/* Every card gets a lead line, including the one that

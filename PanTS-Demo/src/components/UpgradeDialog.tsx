@@ -68,9 +68,12 @@ const detail = (b: UpgradeBlock): string => {
 	const reset = resetPhrase(b.resetsAt);
 	switch (b.reason) {
 		case "daily_scans":
-			return reset
-				? `The ${planLabel(b.plan)} plan runs ${b.limit} scans a day. Your next one is available ${reset}.`
-				: `The ${planLabel(b.plan)} plan runs ${b.limit} scans a day.`;
+			{
+				const perDay = b.limit === 1 ? "one scan" : `${b.limit} scans`;
+				return reset
+					? `The ${planLabel(b.plan)} plan runs ${perDay} a day. Your next one is available ${reset}.`
+					: `The ${planLabel(b.plan)} plan runs ${perDay} a day.`;
+			}
 		case "daily_ai_messages":
 			return reset
 				? `The ${planLabel(b.plan)} plan includes ${b.limit} messages a day. More ${reset}.`

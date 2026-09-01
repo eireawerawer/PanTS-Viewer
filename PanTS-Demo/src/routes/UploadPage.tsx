@@ -916,7 +916,7 @@ const UploadPage: React.FC = () => {
         formData.append("file", chunk);
         const res = await postWithRetry(
           `${API_BASE}/api/upload-inference-chunk`,
-          { method: "POST", body: formData, signal: controller.signal },
+          { method: "POST", body: formData, credentials: "include", signal: controller.signal },
         );
         if (res.status === 413)
           throw new Error(
@@ -943,6 +943,7 @@ const UploadPage: React.FC = () => {
 
       const finalizeRes = await fetch(`${API_BASE}/api/finalize-upload`, {
         method: "POST",
+        credentials: "include",
         signal: controller.signal,
         body: new URLSearchParams({
           session_id: sid,
@@ -1010,12 +1011,17 @@ const UploadPage: React.FC = () => {
   // means nothing pre-uploads; Run's existing check still explains why and
   // blocks the batch exactly as before.
   useEffect(() => {
+    // Guests never pre-upload. Every setSelectedItems writer already sits
+    // behind ensureAccount, but that is an invariant a refactor can break -
+    // the server now refuses unauthenticated uploads, so failing closed here
+    // just avoids a doomed request.
+    if (!isAuthenticated) return;
     const slots = maxConcurrentScans(plan as PlanId);
     const running = recentUploads.filter((u) => u.status === "Processing").length;
     if (selectedItems.length + running > slots) return;
     selectedItems.forEach(preStartUpload);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedItems, plan, recentUploads]);
+  }, [isAuthenticated, selectedItems, plan, recentUploads]);
 
   // Uploads the file described by `p`, finalizes, then starts inference.
   // Resumable: the file lives in IndexedDB and the chunk cursor is persisted, so
@@ -1132,6 +1138,7 @@ const UploadPage: React.FC = () => {
           {
             method: "POST",
             body: formData,
+            credentials: "include",
             signal: controller.signal,
           },
         );
@@ -1175,6 +1182,7 @@ const UploadPage: React.FC = () => {
       if (foreground) setMessage("Finalizing upload...");
       const finalizeRes = await fetch(`${API_BASE}/api/finalize-upload`, {
         method: "POST",
+        credentials: "include",
         signal: controller.signal,
         body: new URLSearchParams({
           session_id: sid,
@@ -1250,6 +1258,7 @@ const UploadPage: React.FC = () => {
         // the folder and starting over.
         const res = await postWithRetry(`${API_BASE}/api/upload-dicom-slice`, {
           method: "POST",
+          credentials: "include",
           body: formData,
           signal: controller.signal,
         });
@@ -1269,6 +1278,7 @@ const UploadPage: React.FC = () => {
       setMessage("Converting DICOM series to NIfTI...");
       const finalizeRes = await fetch(`${API_BASE}/api/finalize-dicom`, {
         method: "POST",
+        credentials: "include",
         signal: controller.signal,
         body: new URLSearchParams({ session_id: sid }),
       });

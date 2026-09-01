@@ -40,8 +40,11 @@ WINDOW = timedelta(hours=24)
 DEFAULT_PLAN = "free"
 
 PLAN_LIMITS: dict[str, dict] = {
+    # Tier story: free = any signed-up account (T1), pro = the verified tier
+    # (T2: email verified + profile complete; see limits_for_user), granted
+    # automatically - the ids stay the two the UI already knows.
     "free": {
-        "daily_scans": 3,
+        "daily_scans": 1,
         "concurrent_scans": 1,
         # Model ids the plan may run. LesionSegmenter is the free model; "None"
         # (view-only) never reaches the server, so it isn't listed.
@@ -53,7 +56,7 @@ PLAN_LIMITS: dict[str, dict] = {
         "priority_queue": False,
     },
     "pro": {
-        "daily_scans": 50,
+        "daily_scans": 10,
         "concurrent_scans": 5,
         "models": None,
         "postprocessing": True,
@@ -65,7 +68,7 @@ PLAN_LIMITS: dict[str, dict] = {
     # Team is Pro for each member; the pooling and shared-library half of the
     # plan copy is not built, so per-member limits are what it grants today.
     "team": {
-        "daily_scans": 50,
+        "daily_scans": 10,
         "concurrent_scans": 5,
         "models": None,
         "postprocessing": True,
@@ -112,19 +115,47 @@ def limits_for(plan: str | None) -> dict:
     return PLAN_LIMITS.get(plan or DEFAULT_PLAN, PLAN_LIMITS[DEFAULT_PLAN])
 
 
-def limits_for_user(user_id: str) -> tuple[str, dict]:
-    """The plan an account is on, and the limits actually applied to it.
+# The tier a free account is lifted to once its email is verified and its
+# profile is filled in. Computed on the fly, never written to the plan column:
+# no trigger to miss, no backfill, and clearing the profile drops the account
+# back on its own.
+VERIFIED_PLAN = "pro"
 
-    The two come apart for admins, who bypass their plan's limits entirely. The
-    plan id is still the real stored one — it is what the UI names on the
-    settings page, and reporting an admin as "Enterprise" because they happen to
-    hold the role would be a lie about their account.
+
+def _qualifies_as_verified(user) -> bool:
+    """T2: a verified email plus every profile field filled in."""
+    return (
+        user is not None
+        and user.email_verified_at is not None
+        and bool((user.organization or "").strip())
+        and bool((user.occupation or "").strip())
+        and bool((user.role_description or "").strip())
+    )
+
+
+def limits_for_user(user_id: str) -> tuple[str, dict]:
+    """The effective plan of an account, and the limits actually applied.
+
+    Two things can lift an account above its stored plan column:
+
+    - An admin bypasses limits entirely. The reported plan id stays the stored
+      one — the role is not a plan, and naming an admin "Enterprise" would be a
+      lie about their account.
+    - A free account whose email is verified and whose profile is complete IS
+      on the verified tier: that promotion is the account's real plan story,
+      so it is reported as ``VERIFIED_PLAN`` and every consumer (usage page,
+      402 bodies, the upgrade dialog) names it consistently.
 
     Mirrored in the frontend by helpers/accountProfile.ts (``gatingPlan``).
     """
-    plan = get_plan(user_id)
+    with session_scope() as s:
+        user = s.get(User, user_id)
+        plan = (user.plan if user else None) or DEFAULT_PLAN
+        promoted = plan == DEFAULT_PLAN and _qualifies_as_verified(user)
     if role_store.has_role(user_id, role_store.ROLE_ADMIN):
         return plan, UNLIMITED
+    if promoted:
+        return VERIFIED_PLAN, limits_for(VERIFIED_PLAN)
     return plan, limits_for(plan)
 
 
@@ -237,7 +268,11 @@ def check_inference(user_id: str, model: str) -> dict | None:
                 return {
                     "reason": "daily_scans", "plan": plan, "limit": daily, "used": used,
                     "resets_at": _resets_at(s, user_id, KIND_INFERENCE),
-                    "message": f"You've used your {daily} scans for today.",
+                    "message": (
+                        "You've used your scan for today."
+                        if daily == 1
+                        else f"You've used your {daily} scans for today."
+                    ),
                 }
     return None
 

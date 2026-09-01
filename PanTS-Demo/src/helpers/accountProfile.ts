@@ -30,7 +30,7 @@ export type PlanLimits = {
 
 export const PLAN_LIMITS: Record<PlanId, PlanLimits> = {
 	free: {
-		dailyScans: 3,
+		dailyScans: 1,
 		concurrentScans: 1,
 		models: ["LesionSegmenter"],
 		postprocessing: false,
@@ -40,7 +40,7 @@ export const PLAN_LIMITS: Record<PlanId, PlanLimits> = {
 		priorityQueue: false,
 	},
 	pro: {
-		dailyScans: 50,
+		dailyScans: 10,
 		concurrentScans: 5,
 		models: null,
 		postprocessing: true,
@@ -50,7 +50,7 @@ export const PLAN_LIMITS: Record<PlanId, PlanLimits> = {
 		priorityQueue: true,
 	},
 	team: {
-		dailyScans: 50,
+		dailyScans: 10,
 		concurrentScans: 5,
 		models: null,
 		postprocessing: true,
@@ -83,11 +83,26 @@ export const limitsFor = (plan: PlanId | undefined): PlanLimits =>
  * For gating only, never for display: the plan an admin's account is *on* is
  * still `user.plan`, and that's what the settings page names.
  */
+export const profileComplete = (profile: AccountProfile): boolean =>
+	!!(profile.organization && profile.occupation && profile.roleDescription);
+
+/** T2: verified email + complete profile. Server-side twin: plan_store. */
+export const isVerifiedResearcher = (
+	user: { emailVerified?: boolean; profile?: AccountProfile } | null | undefined,
+): boolean => !!user?.emailVerified && !!user.profile && profileComplete(user.profile);
+
 export const gatingPlan = (
-	user: { plan: PlanId; roles: string[] } | null | undefined,
+	user: {
+		plan: PlanId;
+		roles: string[];
+		emailVerified?: boolean;
+		profile?: AccountProfile;
+	} | null | undefined,
 ): PlanId => {
 	if (!user) return "free";
-	return user.roles.includes("admin") ? "enterprise" : user.plan;
+	if (user.roles.includes("admin")) return "enterprise";
+	if (user.plan === "free" && isVerifiedResearcher(user)) return "pro";
+	return user.plan;
 };
 
 /** Whether the paid plans are pickable. They aren't open yet, so everyone but
@@ -135,7 +150,7 @@ export const PLANS: Plan[] = [
 		priceNote: "always free",
 		pointsLead: "Includes:",
 		points: [
-			"3 scans a day",
+			"1 scan a day",
 			"LesionSegmenter model",
 			"Full viewer and 3D reconstruction",
 			"10 assistant messages a day",
@@ -150,12 +165,12 @@ export const PLANS: Plan[] = [
 		id: "pro",
 		label: "Pro",
 		group: "individual",
-		blurb: "For everyday research work",
-		price: "Coming soon",
-		priceNote: "pricing not yet set",
+		blurb: "For verified researchers",
+		price: "Free",
+		priceNote: "verify email + complete profile",
 		inherits: "free",
 		points: [
-			"Higher daily scan limit",
+			"10 scans a day",
 			"Every model",
 			"Several scans at once",
 			"Research summaries and annotations",
@@ -239,4 +254,9 @@ export const accountTypeLabel = (id: AccountType | null): string =>
 export type AccountProfile = {
 	/** null until the user picks one in settings. Nothing depends on it. */
 	accountType: AccountType | null;
+	/** Verified-researcher profile. Filled in + a verified email unlocks the
+	 *  10-scans-a-day tier; the check itself is server-side. */
+	organization: string | null;
+	occupation: string | null;
+	roleDescription: string | null;
 };

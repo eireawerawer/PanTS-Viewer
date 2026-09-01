@@ -40,7 +40,7 @@ beforeEach(() => {
     if (u.includes("/api/me/usage")) {
       return json({
         plan: "free",
-        limits: { daily_scans: 3 },
+        limits: { daily_scans: 1 },
         scans: { used: 3, limit: 3, in_flight: 0, resets_at: null },
         ai_messages: { used: 0, limit: 10, resets_at: null },
       });
@@ -205,12 +205,12 @@ describe("running several scans at once", () => {
 describe("the server's own refusal", () => {
   it("turns a 402 into the same dialog, with the server's numbers", async () => {
     inferenceRefusal = {
-      error: "You've used your 3 scans for today",
+      error: "You've used your scan for today.",
       code: "plan_limit",
       reason: "daily_scans",
       plan: "free",
-      limit: 3,
-      used: 3,
+      limit: 1,
+      used: 1,
       resets_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
     };
 
@@ -233,8 +233,8 @@ describe("the server's own refusal", () => {
 
   it("marks the refused scan cancelled, not failed — nothing broke", async () => {
     inferenceRefusal = {
-      error: "You've used your 3 scans for today",
-      code: "plan_limit", reason: "daily_scans", plan: "free", limit: 3, used: 3,
+      error: "You've used your scan for today.",
+      code: "plan_limit", reason: "daily_scans", plan: "free", limit: 1, used: 1,
     };
 
     const user = userEvent.setup();

@@ -134,7 +134,7 @@ import threading
 # directory before it touches os.path; secure_filename is the barrier at each
 # path-construction site.
 from .path_safety import is_safe_id as _is_safe_id
-from .auth import current_user
+from .auth import current_user, require_auth
 from services import plan_store
 
 
@@ -3080,6 +3080,7 @@ CHUNK_DIR = "/tmp/uploads"  # Temporary folder for chunked uploads
 os.makedirs(CHUNK_DIR, exist_ok=True)
 
 @api_blueprint.route("/upload-inference-chunk", methods=["POST"])
+@require_auth
 def upload_inference_chunk():
     """
     Receives a chunk of a file.
@@ -3123,6 +3124,7 @@ def upload_inference_chunk():
 
 
 @api_blueprint.route("/finalize-upload", methods=["POST"])
+@require_auth
 def finalize_upload():
     """
     Combines all chunks into the final file in the proper sessions folder.
@@ -3205,6 +3207,7 @@ def finalize_upload():
         return jsonify({"error": str(e)}), 500
 
 @api_blueprint.route("/upload-dicom-slice", methods=["POST"])
+@require_auth
 def upload_dicom_slice():
     """Save a single DICOM slice to a session-specific temp directory."""
     try:
@@ -3231,6 +3234,7 @@ def upload_dicom_slice():
 
 
 @api_blueprint.route("/finalize-dicom", methods=["POST"])
+@require_auth
 def finalize_dicom():
     """Convert an uploaded DICOM series to NIfTI using SimpleITK."""
     try:
@@ -5821,11 +5825,19 @@ def ai_models():
 def _ai_gate():
     """Whether this caller may send an assistant message. None means yes.
 
-    The assistant is open to everyone: no sign-in requirement and no daily
-    allowance. Usage is still recorded for signed-in users (see the guarded
-    record_ai_message calls at both endpoints).
+    Delegates to plan_store.check_assistant: signed out is a 401 (the
+    assistant costs real compute, and an open endpoint made the per-account
+    daily allowance meaningless), a spent allowance is a 402 with the same
+    body shape /run-inference uses, so the sidebar's existing 401/402
+    handling applies unchanged.
     """
-    return None
+    user = current_user()
+    blocked = plan_store.check_assistant(user["id"] if user else None)
+    if blocked is None:
+        return None
+    if blocked.get("reason") == "auth_required":
+        return jsonify({"error": blocked["message"], "reply": blocked["message"]}), 401
+    return jsonify({"error": blocked["message"], "code": "plan_limit", **blocked}), 402
 
 
 def _ai_normalize_conversation(raw, limit=12, chars=2000):

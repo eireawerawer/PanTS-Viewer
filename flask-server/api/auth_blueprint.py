@@ -42,6 +42,10 @@ RESET_MAX_PER_WINDOW = 10
 
 _reset_limiter = Limiter(RESET_WINDOW_S)
 
+# Verification mail has the same abuse profile as reset mail: a deliberate,
+# rare act per person, a spam vector without a ceiling.
+_verify_limiter = Limiter(RESET_WINDOW_S)
+
 
 def _json():
     body = request.get_json(silent=True)
@@ -82,6 +86,9 @@ def register():
         return jsonify({"error": "An account with that email already exists"}), 409
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+    # Best effort: the account exists either way, and the Settings page can
+    # re-send. An unconfigured mailer prints the link to the log (dev flow).
+    _send_verification_email(user)
     return _logged_in_response(user, status=201)
 
 
@@ -99,6 +106,83 @@ def logout():
     auth_store.revoke_session(request.cookies.get(COOKIE_NAME))
     resp = make_response(jsonify({"ok": True}), 200)
     return clear_session_cookie(resp)
+
+
+# ---- email verification ---------------------------------------------------
+#
+# Password signups start unverified (OAuth arrives verified when the provider
+# says so). Verifying is what, with a complete profile, lifts the account to
+# the verified-researcher limits - see services.plan_store.
+
+def _verification_link(raw_token: str) -> str:
+    base = (os.environ.get("PUBLIC_BASE_URL") or request.url_root).rstrip("/")
+    return f"{base}/verify-email?token={raw_token}"
+
+
+def _verification_email(name: str | None, link: str) -> tuple[str, str, str]:
+    """(subject, text, html) for the verification message."""
+    greeting = f"Hi {name}," if name else "Hi,"
+    hours = auth_store.VERIFY_TTL_MINUTES // 60
+    text = (
+        f"{greeting}\n\n"
+        "Confirm this is your email address to finish setting up your BodyMaps "
+        "account:\n\n"
+        f"{link}\n\n"
+        f"The link works once and expires in {hours} hours.\n\n"
+        "If you didn't create a BodyMaps account, you can ignore this email.\n\n"
+        "— BodyMaps\n"
+    )
+    html = (
+        f"<p>{greeting}</p>"
+        "<p>Confirm this is your email address to finish setting up your "
+        "BodyMaps account:</p>"
+        f'<p><a href="{link}">Verify your email</a></p>'
+        f"<p>The link works once and expires in {hours} hours.</p>"
+        "<p>If you didn't create a BodyMaps account, you can ignore this "
+        "email.</p>"
+        "<p>— BodyMaps</p>"
+    )
+    return "Verify your BodyMaps email", text, html
+
+
+def _send_verification_email(user: dict) -> bool:
+    """Issue a token for the account and mail the link. False when there was
+    nothing to send (already verified) or the mailer refused."""
+    result = auth_store.create_email_verification(user["id"])
+    if result is None:
+        return False
+    issued, raw_token = result
+    subject, text, html = _verification_email(issued.get("name"), _verification_link(raw_token))
+    return mailer.send(issued["email"], subject, text, html)
+
+
+@auth_blueprint.route("/auth/send-verification", methods=["POST"])
+@require_auth
+def send_verification():
+    """(Re)send the verification link for the signed-in account."""
+    if _verify_limiter.over(request.remote_addr or "unknown", RESET_MAX_PER_WINDOW):
+        return jsonify({"error": "Too many requests. Try again later."}), 429
+    user = current_user()
+    if user.get("email_verified"):
+        return jsonify({"ok": True, "already_verified": True, "sent": False}), 200
+    sent = _send_verification_email(user)
+    # sent=False with SMTP unconfigured still logged the link server-side; the
+    # client copy treats it as "sent" either way, but reports the truth here.
+    return jsonify({"ok": True, "already_verified": False, "sent": bool(sent)}), 200
+
+
+@auth_blueprint.route("/auth/verify-email", methods=["POST"])
+def verify_email():
+    """Redeem a verification token. Unauthenticated: the link may be opened in
+    a browser that has never seen the site - the token itself is the proof."""
+    if _verify_limiter.over(request.remote_addr or "unknown", RESET_MAX_PER_WINDOW):
+        return jsonify({"error": "Too many requests. Try again later."}), 429
+    user = auth_store.verify_email((_json().get("token") or "").strip())
+    if user is None:
+        return jsonify({
+            "error": "This link has expired or has already been used. Ask for a new one from Settings."
+        }), 400
+    return jsonify({"ok": True, "user": _with_roles(user)}), 200
 
 
 # ---- password reset -------------------------------------------------------
@@ -206,15 +290,28 @@ def me():
 @auth_blueprint.route("/auth/me", methods=["PATCH"])
 @require_auth
 def update_me():
-    """Update the display name and/or the self-reported account type. Either
-    may be sent alone. An empty name clears it and the client falls back to
-    deriving one from the email; an empty account_type clears it to "not set"."""
+    """Update the display name, the self-reported account type, and/or the
+    verified-researcher profile fields (organization, occupation,
+    role_description). Any subset may be sent. An empty string clears a field:
+    the name falls back to one derived from the email, everything else goes
+    back to "not provided"."""
     data = _json()
-    if "name" not in data and "account_type" not in data:
+    profile_patch = {
+        key: data.get(key)
+        for key in auth_store.PROFILE_FIELD_LIMITS
+        if key in data
+    }
+    if "name" not in data and "account_type" not in data and not profile_patch:
         return jsonify({"error": "Nothing to update"}), 400
 
     user_id = current_user()["id"]
     user = None
+
+    for key, value in profile_patch.items():
+        if value is not None and not isinstance(value, str):
+            return jsonify({"error": f"{key} must be text"}), 400
+    if profile_patch:
+        user = auth_store.update_profile_fields(user_id, profile_patch)
 
     if "name" in data:
         name = data.get("name")
@@ -281,7 +378,10 @@ def my_jobs():
 # The account fields a signed-in user can already see in Settings. Nothing
 # internal: no ids, no session or role rows, no job records (real runs never
 # write the job table, and its rows carry server paths).
-EXPORT_ACCOUNT_FIELDS = ("email", "name", "account_type", "plan", "created_at")
+EXPORT_ACCOUNT_FIELDS = (
+    "email", "name", "account_type", "plan", "created_at",
+    "organization", "occupation", "role_description",
+)
 
 
 @auth_blueprint.route("/me/export", methods=["GET"])

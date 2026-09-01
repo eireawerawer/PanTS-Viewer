@@ -50,6 +50,8 @@ export type AuthUser = {
 	/** True when `name` is the user's own rather than derived from the email. */
 	hasCustomName: boolean;
 	emailNotifications: boolean; // client-only preference until B3
+	/** Whether the account's email address has been verified. */
+	emailVerified: boolean;
 	/** Billing plan, from user_account.plan. Its limits are enforced server-side. */
 	plan: PlanId;
 	/** Self-reported account type, from user_account.account_type. Gates nothing. */
@@ -90,6 +92,12 @@ type AuthContextValue = {
 	requestPasswordReset: (email: string) => Promise<void>;
 	/** Redeem a reset token. On success the user is signed in. */
 	resetPassword: (token: string, password: string) => Promise<AuthUser>;
+	/** (Re)send the verification link for the signed-in account. `sent` is the
+	 *  truth from the server — false means SMTP is off and the link only went
+	 *  to the server log. */
+	sendVerification: () => Promise<{ sent: boolean; alreadyVerified: boolean }>;
+	/** Redeem an emailed verification token. Public: works signed out too. */
+	verifyEmail: (token: string) => Promise<void>;
 	/** Which providers the server has credentials for (null until loaded). */
 	oauthProviders: Record<AuthProvider2, boolean> | null;
 	signOut: () => Promise<void>;
@@ -163,6 +171,10 @@ type ApiUser = {
 	name?: string | null;
 	plan?: string | null;
 	account_type?: string | null;
+	organization?: string | null;
+	occupation?: string | null;
+	role_description?: string | null;
+	email_verified?: boolean;
 	roles?: string[] | null;
 };
 const mapApiUser = (u: ApiUser): AuthUser => {
@@ -174,8 +186,14 @@ const mapApiUser = (u: ApiUser): AuthUser => {
 		name: custom || nameFromEmail(u.email),
 		hasCustomName: custom.length > 0,
 		emailNotifications: loadPref(u.id),
+		emailVerified: u.email_verified === true,
 		plan: (u.plan as PlanId) || "free",
-		profile: { accountType: (u.account_type as AccountType) || null },
+		profile: {
+			accountType: (u.account_type as AccountType) || null,
+			organization: u.organization || null,
+			occupation: u.occupation || null,
+			roleDescription: u.role_description || null,
+		},
 		// Defaulted, never invented: an endpoint that forgets to send roles
 		// leaves you with none, which fails closed.
 		roles: u.roles ?? [],
@@ -288,6 +306,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		},
 		[]
 	);
+
+	const sendVerification = useCallback(async () => {
+		const res = await authFetch("/api/auth/send-verification", { method: "POST" });
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(data.error || "Couldn't send the link. Try again.");
+		return { sent: data.sent === true, alreadyVerified: data.already_verified === true };
+	}, []);
+
+	const verifyEmail = useCallback(async (token: string) => {
+		const res = await authFetch("/api/auth/verify-email", {
+			method: "POST",
+			body: JSON.stringify({ token }),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(data.error || "This link has expired or has already been used.");
+		// If this browser is signed in as the account that just verified,
+		// reflect it immediately — the tier check reads it.
+		setUser((current) =>
+			current && data.user && current.id === data.user.id ? mapApiUser(data.user) : current
+		);
+	}, []);
 
 	const signIn = useCallback(
 		(email: string, password: string) => authAction("/api/auth/login", email, password),
@@ -418,11 +457,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	const updateAccountProfile = useCallback(async (patch: Partial<AccountProfile>) => {
-		if (!("accountType" in patch)) return;
+		// "" clears a field: the server reads an empty string as "not provided".
+		const body: Record<string, string> = {};
+		if ("accountType" in patch) body.account_type = patch.accountType ?? "";
+		if ("organization" in patch) body.organization = patch.organization ?? "";
+		if ("occupation" in patch) body.occupation = patch.occupation ?? "";
+		if ("roleDescription" in patch) body.role_description = patch.roleDescription ?? "";
+		if (Object.keys(body).length === 0) return;
 		const res = await authFetch("/api/auth/me", {
 			method: "PATCH",
-			// "" clears it: the server reads an empty string as "not set".
-			body: JSON.stringify({ account_type: patch.accountType ?? "" }),
+			body: JSON.stringify(body),
 		});
 		const data = await res.json().catch(() => ({}));
 		if (!res.ok) throw new Error(data.error || "Couldn't save your role. Try again.");
@@ -470,6 +514,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			signInWithProvider,
 			requestPasswordReset,
 			resetPassword,
+			sendVerification,
+			verifyEmail,
 			oauthProviders,
 			signOut,
 			updatePreferences,
@@ -488,7 +534,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			clearOauthError,
 		}),
 		[user, loading, signIn, signUp, signInWithProvider, requestPasswordReset,
-		 resetPassword, oauthProviders, signOut,
+		 resetPassword, sendVerification, verifyEmail, oauthProviders, signOut,
 		 updatePreferences, updateName, exportData, deleteScanHistory, deleteAccount,
 		 updateAccountProfile, setPlan, usage, refreshUsage, authPrompt, promptAuth,
 		 closeAuthPrompt, oauthError, clearOauthError]
