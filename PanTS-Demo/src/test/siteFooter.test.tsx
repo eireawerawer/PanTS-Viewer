@@ -4,15 +4,15 @@ import SiteFooter from "../components/SiteFooter";
 import {
   CONTACT_LINK_TEXT,
   CONTACT_URL,
-  FOOTER_TAGLINE,
   NONCLINICAL_WARNING,
 } from "../helpers/copy";
 
 describe("site footer", () => {
-  it("shows the tagline, the nonclinical notice, and the inquiry link", () => {
+  it("shows the nonclinical notice and the inquiry link, nothing else", () => {
     render(<SiteFooter />);
-    expect(screen.getByText(FOOTER_TAGLINE)).toBeInTheDocument();
     expect(screen.getByText(NONCLINICAL_WARNING)).toBeInTheDocument();
+    // The mission line moved to the landing subtitle; one-line footer.
+    expect(screen.queryByText(/intelligence layer/)).not.toBeInTheDocument();
     const link = screen.getByRole("link", { name: CONTACT_LINK_TEXT });
     expect(link).toHaveAttribute("href", CONTACT_URL);
     expect(link).toHaveAttribute("target", "_blank");

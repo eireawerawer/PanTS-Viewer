@@ -47,6 +47,7 @@ const RETIRED_PHRASES = [
   "permanently deletes every scan",
   "30 days to change your mind",
   "open library of labeled body CT scans",
+  "BodyMaps — the intelligence layer",
 ];
 
 describe("site copy guard", () => {
