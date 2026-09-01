@@ -169,6 +169,8 @@ again (every step is safe to re-run) or continue by hand from that numbered
 step below. `bash flask-server/deploy/deploy.sh check` runs the preflight only
 and changes nothing.
 
+#### The materials below are NOT useful anymore!
+
 #### 1. Back up the database
 Accounts, sessions and job state live in SQLite, so take a copy before any deploy that might run migrations.
 ```
