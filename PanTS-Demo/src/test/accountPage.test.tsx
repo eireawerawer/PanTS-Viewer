@@ -37,6 +37,9 @@ const USAGE = {
 };
 
 let calls: { method: string; url: string; body?: unknown }[] = [];
+// The server reports the *effective* plan (verified-researcher promotion);
+// tests set this to model it, since USER.plan deliberately stays "free".
+let USAGE_PLAN_OVERRIDE: string | null = null;
 
 const json = (body: unknown, ok = true, status = 200) => ({
 	ok,
@@ -53,7 +56,14 @@ beforeEach(() => {
 	USER.name = null;
 	USER.plan = "free";
 	USER.account_type = null;
+	USER.organization = null;
+	USER.occupation = null;
+	USER.role_description = null;
+	USER.email_verified = false;
 	USER.roles = [];
+	USAGE_PLAN_OVERRIDE = null;
+	USAGE.limits.daily_scans = 1;
+	USAGE.scans.limit = 1;
 	URL.createObjectURL = vi.fn(() => "blob:stub");
 	URL.revokeObjectURL = vi.fn();
 
@@ -82,7 +92,9 @@ beforeEach(() => {
 			USER.plan = (JSON.parse(String(init?.body)) as { plan: string }).plan;
 			return json({ user: { ...USER } });
 		}
-		if (u.includes("/api/me/usage")) return json({ ...USAGE, plan: USER.plan });
+		if (u.includes("/api/me/usage")) {
+			return json({ ...USAGE, plan: USAGE_PLAN_OVERRIDE ?? USER.plan });
+		}
 		if (u.includes("/api/me/export")) {
 			return json({
 				exported_at: "2026-08-29T00:00:00",
@@ -297,14 +309,24 @@ describe("plan", () => {
 		expect(screen.getByRole("button", { name: "Current plan" })).toBeDisabled();
 	});
 
-	it("offers the paid plans as coming soon, and won't send anything", async () => {
+	it("locks Pro behind verification, and won't send anything", async () => {
 		const user = userEvent.setup();
 		renderAt("/account/plan");
 
-		const cta = await screen.findByRole("button", { name: "Coming soon" });
+		const cta = await screen.findByRole("button", { name: "Verify to unlock" });
 		expect(cta).toBeDisabled();
 		await user.click(cta);
 		expect(lastCall("POST", "/api/me/plan")).toBeUndefined();
+	});
+
+	it("names the promoted tier once verification and the profile are done", async () => {
+		USAGE_PLAN_OVERRIDE = "pro";
+		USAGE.limits.daily_scans = 10;
+		USAGE.scans.limit = 10;
+		renderAt("/account/plan");
+
+		expect(await screen.findByRole("heading", { name: "Pro plan" })).toBeInTheDocument();
+		expect(await screen.findByRole("button", { name: "Current plan" })).toBeInTheDocument();
 	});
 
 	it("upgrades through the server, not local state", async () => {
@@ -323,8 +345,9 @@ describe("plan", () => {
 		await screen.findByRole("heading", { name: "Change plan" });
 		expect(screen.getByText("$0")).toBeInTheDocument();
 		expect(screen.getByText("always free")).toBeInTheDocument();
-		// The picker shows one group at a time; "individual" = Free + Pro.
-		expect(screen.getByText("pricing not yet set")).toBeInTheDocument();
+		// The picker shows one group at a time; "individual" = Free + Pro. Pro
+		// costs nothing - it is earned, not bought.
+		expect(screen.getByText("verify email + complete profile")).toBeInTheDocument();
 		// "$0" is real; no invented $x.xx prices anywhere.
 		expect(screen.queryByText(/\$\d+\.\d{2}/)).toBeNull();
 	});

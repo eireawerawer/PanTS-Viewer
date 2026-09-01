@@ -72,10 +72,10 @@ describe("plan cards", () => {
 		}
 	});
 
-	it("shows Free as free, the future tiers as coming soon, and leaves Enterprise open", () => {
+	it("prices Free at nothing, Pro as earned, Team as coming, Enterprise as open", () => {
 		const byId = Object.fromEntries(PLANS.map((p) => [p.id, p]));
 		expect(byId.free.price).toBe("$0");
-		expect(byId.pro.price).toBe("Coming soon");
+		expect(byId.pro.price).toBe("Free"); // earned by verification, not bought
 		expect(byId.team.price).toBe("Coming soon");
 		expect(byId.enterprise.price).toBe("Custom");
 		// A bare figure means nothing without a period attached to it.

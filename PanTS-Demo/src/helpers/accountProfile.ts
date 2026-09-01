@@ -83,11 +83,26 @@ export const limitsFor = (plan: PlanId | undefined): PlanLimits =>
  * For gating only, never for display: the plan an admin's account is *on* is
  * still `user.plan`, and that's what the settings page names.
  */
+export const profileComplete = (profile: AccountProfile): boolean =>
+	!!(profile.organization && profile.occupation && profile.roleDescription);
+
+/** T2: verified email + complete profile. Server-side twin: plan_store. */
+export const isVerifiedResearcher = (
+	user: { emailVerified?: boolean; profile?: AccountProfile } | null | undefined,
+): boolean => !!user?.emailVerified && !!user.profile && profileComplete(user.profile);
+
 export const gatingPlan = (
-	user: { plan: PlanId; roles: string[] } | null | undefined,
+	user: {
+		plan: PlanId;
+		roles: string[];
+		emailVerified?: boolean;
+		profile?: AccountProfile;
+	} | null | undefined,
 ): PlanId => {
 	if (!user) return "free";
-	return user.roles.includes("admin") ? "enterprise" : user.plan;
+	if (user.roles.includes("admin")) return "enterprise";
+	if (user.plan === "free" && isVerifiedResearcher(user)) return "pro";
+	return user.plan;
 };
 
 /** Whether the paid plans are pickable. They aren't open yet, so everyone but
@@ -150,9 +165,9 @@ export const PLANS: Plan[] = [
 		id: "pro",
 		label: "Pro",
 		group: "individual",
-		blurb: "For everyday research work",
-		price: "Coming soon",
-		priceNote: "pricing not yet set",
+		blurb: "For verified researchers",
+		price: "Free",
+		priceNote: "verify email + complete profile",
 		inherits: "free",
 		points: [
 			"10 scans a day",

@@ -173,6 +173,56 @@ def test_usage_summary_reports_the_plan_limits(plans):
     }
 
 
+def _make_verified_researcher(user_id, **overrides):
+    """Verified email + full profile, straight onto the row - the flows that
+    set these for real are covered by their own test files."""
+    from models.engine import session_scope
+    from models.user import User
+    with session_scope() as s:
+        u = s.get(User, user_id)
+        u.email_verified_at = u.created_at
+        u.organization = overrides.get("organization", "Example University")
+        u.occupation = overrides.get("occupation", "Radiologist")
+        u.role_description = overrides.get("role_description", "Research annotation")
+
+
+def test_a_verified_complete_profile_is_promoted_to_pro(plans):
+    plan_store, user_id = plans
+    _make_verified_researcher(user_id)
+    plan, limits = plan_store.limits_for_user(user_id)
+    assert plan == "pro"
+    assert limits["daily_scans"] == 10
+    # The stored column is untouched: the promotion is computed and reversible.
+    assert plan_store.get_plan(user_id) == "free"
+    assert plan_store.usage_summary(user_id)["plan"] == "pro"
+
+
+def test_promotion_needs_every_ingredient(plans):
+    plan_store, user_id = plans
+    from models.engine import session_scope
+    from models.user import User
+    _make_verified_researcher(user_id)
+    with session_scope() as s:
+        s.get(User, user_id).occupation = "   "
+    plan, limits = plan_store.limits_for_user(user_id)
+    assert plan == "free"
+    assert limits["daily_scans"] == 1
+
+
+def test_a_complete_profile_without_a_verified_email_stays_free(plans):
+    plan_store, user_id = plans
+    from models.engine import session_scope
+    from models.user import User
+    with session_scope() as s:
+        u = s.get(User, user_id)
+        u.organization = "Example University"
+        u.occupation = "Radiologist"
+        u.role_description = "Research annotation"
+    plan, limits = plan_store.limits_for_user(user_id)
+    assert plan == "free"
+    assert limits["daily_scans"] == 1
+
+
 def test_an_admin_is_not_metered(plans):
     """Admins run everything on whatever plan they're on — the site's operators
     have to be able to exercise the parts they're gating everyone else out of."""

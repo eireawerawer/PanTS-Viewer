@@ -137,6 +137,33 @@ def test_patch_me_rejects_an_empty_body_and_a_non_string(client):
     assert client.patch("/api/auth/me", json={"name": 42}).status_code == 400
 
 
+def test_the_verified_researcher_journey_promotes_to_pro(client):
+    from services import auth_store
+
+    client.post("/api/auth/register", json={"email": "vr@x.com", "password": "password1"})
+    body = client.get("/api/me/usage").get_json()
+    assert body["plan"] == "free" and body["limits"]["daily_scans"] == 1
+
+    client.patch("/api/auth/me", json={
+        "organization": "Example University",
+        "occupation": "Radiologist",
+        "role_description": "Annotating CTs for a research project",
+    })
+    # A complete profile alone is not enough.
+    assert client.get("/api/me/usage").get_json()["plan"] == "free"
+
+    user_id = client.get("/api/auth/me").get_json()["user"]["id"]
+    _, raw = auth_store.create_email_verification(user_id)
+    assert client.post("/api/auth/verify-email", json={"token": raw}).status_code == 200
+
+    body = client.get("/api/me/usage").get_json()
+    assert body["plan"] == "pro"
+    assert body["limits"]["daily_scans"] == 10
+    # The stored column is untouched, and self-service plan writes stay closed.
+    assert client.get("/api/auth/me").get_json()["user"]["plan"] == "free"
+    assert client.post("/api/me/plan", json={"plan": "team"}).status_code == 403
+
+
 def test_send_verification_requires_auth_and_verify_rejects_garbage(client):
     assert client.post("/api/auth/send-verification").status_code == 401
     r = client.post("/api/auth/verify-email", json={"token": "nope"})
