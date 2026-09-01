@@ -65,9 +65,9 @@ def test_unknown_plan_is_refused(plans):
         plan_store.set_plan(user_id, "platinum")
 
 
-def test_daily_quota_blocks_the_fourth_scan(plans):
+def test_daily_quota_blocks_the_second_scan(plans):
     plan_store, user_id = plans
-    for i in range(3):
+    for i in range(1):
         assert plan_store.check_inference(user_id, "LesionSegmenter") is None
         plan_store.record_inference(user_id, f"session-{i}", "LesionSegmenter")
         plan_store.finish_inference(f"session-{i}")  # free the concurrency slot
@@ -75,8 +75,9 @@ def test_daily_quota_blocks_the_fourth_scan(plans):
     blocked = plan_store.check_inference(user_id, "LesionSegmenter")
     assert blocked is not None
     assert blocked["reason"] == "daily_scans"
-    assert blocked["limit"] == 3
-    assert blocked["used"] == 3
+    assert blocked["limit"] == 1
+    assert blocked["used"] == 1
+    assert blocked["message"] == "You've used your scan for today."
     assert blocked["resets_at"]
 
 
@@ -88,10 +89,15 @@ def test_concurrency_blocks_a_second_run_still_in_flight(plans):
     assert blocked is not None
     assert blocked["reason"] == "concurrent_scans"
 
-    # Finishing the run frees the slot without refunding the quota.
+    # Finishing the run frees the slot without refunding the quota: with the
+    # 1/day Free limit the next refusal is the daily quota, not the slot.
     plan_store.finish_inference("session-a")
-    assert plan_store.check_inference(user_id, "LesionSegmenter") is None
-    assert plan_store.usage_summary(user_id)["scans"]["used"] == 1
+    blocked = plan_store.check_inference(user_id, "LesionSegmenter")
+    assert blocked is not None
+    assert blocked["reason"] == "daily_scans"
+    summary = plan_store.usage_summary(user_id)
+    assert summary["scans"]["used"] == 1
+    assert summary["scans"]["in_flight"] == 0
 
 
 def test_rerunning_a_session_id_does_not_charge_twice(plans):
@@ -161,9 +167,9 @@ def test_usage_summary_reports_the_plan_limits(plans):
     plan_store, user_id = plans
     summary = plan_store.usage_summary(user_id)
     assert summary["plan"] == "free"
-    assert summary["limits"]["daily_scans"] == 3
+    assert summary["limits"]["daily_scans"] == 1
     assert summary["scans"] == {
-        "used": 0, "limit": 3, "in_flight": 0, "resets_at": None
+        "used": 0, "limit": 1, "in_flight": 0, "resets_at": None
     }
 
 

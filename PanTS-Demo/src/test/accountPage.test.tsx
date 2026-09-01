@@ -27,8 +27,8 @@ const USER = {
 
 const USAGE = {
 	plan: "free",
-	limits: { daily_scans: 3, daily_ai_messages: 10 },
-	scans: { used: 2, limit: 3, in_flight: 0, resets_at: null },
+	limits: { daily_scans: 1, daily_ai_messages: 10 },
+	scans: { used: 0, limit: 1, in_flight: 0, resets_at: null },
 	ai_messages: { used: 0, limit: 10, resets_at: null },
 };
 
@@ -222,7 +222,7 @@ describe("plan", () => {
 	it("shows the current plan and what's been used of it", async () => {
 		renderAt("/account/plan");
 		expect(await screen.findByRole("heading", { name: "Free plan" })).toBeInTheDocument();
-		expect(await screen.findByText("2 of 3")).toBeInTheDocument();
+		expect(await screen.findByText("0 of 1")).toBeInTheDocument();
 		expect(screen.getByText("0 of 10")).toBeInTheDocument();
 	});
 

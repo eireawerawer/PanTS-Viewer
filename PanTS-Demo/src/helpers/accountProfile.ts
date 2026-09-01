@@ -30,7 +30,7 @@ export type PlanLimits = {
 
 export const PLAN_LIMITS: Record<PlanId, PlanLimits> = {
 	free: {
-		dailyScans: 3,
+		dailyScans: 1,
 		concurrentScans: 1,
 		models: ["LesionSegmenter"],
 		postprocessing: false,
@@ -40,7 +40,7 @@ export const PLAN_LIMITS: Record<PlanId, PlanLimits> = {
 		priorityQueue: false,
 	},
 	pro: {
-		dailyScans: 50,
+		dailyScans: 10,
 		concurrentScans: 5,
 		models: null,
 		postprocessing: true,
@@ -50,7 +50,7 @@ export const PLAN_LIMITS: Record<PlanId, PlanLimits> = {
 		priorityQueue: true,
 	},
 	team: {
-		dailyScans: 50,
+		dailyScans: 10,
 		concurrentScans: 5,
 		models: null,
 		postprocessing: true,
@@ -135,7 +135,7 @@ export const PLANS: Plan[] = [
 		priceNote: "always free",
 		pointsLead: "Includes:",
 		points: [
-			"3 scans a day",
+			"1 scan a day",
 			"LesionSegmenter model",
 			"Full viewer and 3D reconstruction",
 			"10 assistant messages a day",
@@ -155,7 +155,7 @@ export const PLANS: Plan[] = [
 		priceNote: "pricing not yet set",
 		inherits: "free",
 		points: [
-			"Higher daily scan limit",
+			"10 scans a day",
 			"Every model",
 			"Several scans at once",
 			"Research summaries and annotations",

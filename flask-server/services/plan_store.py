@@ -40,8 +40,11 @@ WINDOW = timedelta(hours=24)
 DEFAULT_PLAN = "free"
 
 PLAN_LIMITS: dict[str, dict] = {
+    # Tier story: free = any signed-up account (T1), pro = the verified tier
+    # (T2: email verified + profile complete; see limits_for_user), granted
+    # automatically - the ids stay the two the UI already knows.
     "free": {
-        "daily_scans": 3,
+        "daily_scans": 1,
         "concurrent_scans": 1,
         # Model ids the plan may run. LesionSegmenter is the free model; "None"
         # (view-only) never reaches the server, so it isn't listed.
@@ -53,7 +56,7 @@ PLAN_LIMITS: dict[str, dict] = {
         "priority_queue": False,
     },
     "pro": {
-        "daily_scans": 50,
+        "daily_scans": 10,
         "concurrent_scans": 5,
         "models": None,
         "postprocessing": True,
@@ -65,7 +68,7 @@ PLAN_LIMITS: dict[str, dict] = {
     # Team is Pro for each member; the pooling and shared-library half of the
     # plan copy is not built, so per-member limits are what it grants today.
     "team": {
-        "daily_scans": 50,
+        "daily_scans": 10,
         "concurrent_scans": 5,
         "models": None,
         "postprocessing": True,
@@ -237,7 +240,11 @@ def check_inference(user_id: str, model: str) -> dict | None:
                 return {
                     "reason": "daily_scans", "plan": plan, "limit": daily, "used": used,
                     "resets_at": _resets_at(s, user_id, KIND_INFERENCE),
-                    "message": f"You've used your {daily} scans for today.",
+                    "message": (
+                        "You've used your scan for today."
+                        if daily == 1
+                        else f"You've used your {daily} scans for today."
+                    ),
                 }
     return None
 
