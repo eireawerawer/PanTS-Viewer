@@ -153,6 +153,22 @@ After pushing changes, SSH into the server and run the following.
 ssh visitor@bdmap1.wse.jhu.edu
 ```
 
+#### One-paste deploy (recommended)
+
+Paste this single line; it pulls the latest `main` and runs the tracked deploy
+script, which performs every numbered step below - backup, pull, build,
+migrations, restart - with waits and health checks built in:
+
+```
+cd /home/visitor/PanTS-Viewer && git fetch && git checkout main && git pull --ff-only && bash flask-server/deploy/deploy.sh
+```
+
+If anything goes wrong it stops immediately, **names the step that failed**,
+and touches nothing after it - fix the problem and either paste the same line
+again (every step is safe to re-run) or continue by hand from that numbered
+step below. `bash flask-server/deploy/deploy.sh check` runs the preflight only
+and changes nothing.
+
 #### 1. Back up the database
 Accounts, sessions and job state live in SQLite, so take a copy before any deploy that might run migrations.
 ```
