@@ -52,18 +52,6 @@ export default function Homepage() {
             />
           )}
 
-          {/* Match count sits at the bottom-left of the library card — below the
-              filters (Study Year / Any) when they're open — rather than floating. */}
-          {!dash.showSaved && dash.matchTotal !== null && (
-            <div
-              aria-live="polite"
-              className="mt-4 text-sm font-medium text-gray-500"
-            >
-              {`${dash.matchTotal.toLocaleString()} ${
-                dash.matchTotal === 1 ? "case matches" : "cases match"
-              }`}
-            </div>
-          )}
         </div>
 
         {!dash.showSaved && dash.resultCount !== null && (
