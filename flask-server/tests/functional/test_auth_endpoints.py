@@ -109,6 +109,28 @@ def test_patch_me_updates_the_name(client):
     assert client.get("/api/auth/me").get_json()["user"]["name"] == "Grace Hopper"
 
 
+def test_patch_me_updates_the_profile_fields(client):
+    client.post("/api/auth/register", json={"email": "p2@q.com", "password": "password1"})
+    r = client.patch("/api/auth/me", json={
+        "organization": "  Example University  ",
+        "occupation": "Radiology resident",
+        "role_description": "Annotating pancreas CTs for a research project",
+    })
+    assert r.status_code == 200
+    u = r.get_json()["user"]
+    assert u["organization"] == "Example University"     # trimmed
+    assert u["occupation"] == "Radiology resident"
+    assert u["role_description"].startswith("Annotating")
+
+    # Blank clears back to "not provided"; other fields are untouched.
+    r = client.patch("/api/auth/me", json={"organization": ""})
+    assert r.get_json()["user"]["organization"] is None
+    assert r.get_json()["user"]["occupation"] == "Radiology resident"
+
+    # Wrong type is refused.
+    assert client.patch("/api/auth/me", json={"occupation": 7}).status_code == 400
+
+
 def test_patch_me_rejects_an_empty_body_and_a_non_string(client):
     client.post("/api/auth/register", json={"email": "r@s.com", "password": "password1"})
     assert client.patch("/api/auth/me", json={}).status_code == 400
@@ -133,7 +155,10 @@ def test_export_returns_only_the_account_basics(client):
 
     body = r.get_json()
     assert set(body) == {"exported_at", "account"}
-    assert set(body["account"]) == {"email", "name", "account_type", "plan", "created_at"}
+    assert set(body["account"]) == {
+        "email", "name", "account_type", "plan", "created_at",
+        "organization", "occupation", "role_description",
+    }
     assert body["account"]["email"] == "t@u.com"
     assert body["account"]["name"] == "Ada"
     assert body["account"]["plan"] == "free"

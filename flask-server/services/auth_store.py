@@ -131,6 +131,32 @@ def update_name(user_id: str, name: str | None) -> dict | None:
         return user.to_public_dict()
 
 
+# Free-text profile fields behind the verified-researcher tier. Length caps
+# mirror the column sizes; blank clears back to NULL ("not provided").
+PROFILE_FIELD_LIMITS = {
+    "organization": 200,
+    "occupation": 120,
+    "role_description": 2000,
+}
+
+
+def update_profile_fields(user_id: str, fields: dict) -> dict | None:
+    """Set any subset of the profile fields. Unknown keys are a programming
+    error (KeyError), not user input - the endpoint filters first."""
+    with session_scope() as s:
+        user = s.get(User, user_id)
+        if user is None or user.is_system:
+            return None
+        for key, value in fields.items():
+            limit = PROFILE_FIELD_LIMITS[key]
+            cleaned = (value or "").strip() or None
+            if cleaned is not None:
+                cleaned = cleaned[:limit]
+            setattr(user, key, cleaned)
+        s.flush()
+        return user.to_public_dict()
+
+
 ACCOUNT_TYPES = ("patient", "clinician", "researcher", "student")
 
 

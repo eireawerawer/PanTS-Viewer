@@ -45,6 +45,13 @@ class User(db.Model):
     # here so activity can be grouped by it. Nullable because "not set" is the
     # honest answer for anyone who never picked one.
     account_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Verified-researcher profile: organization/institution, occupation, and a
+    # line about their work. Free text, filled in by the user; with a verified
+    # email these qualify the account for the higher scan limit (the check
+    # lives in services.plan_store). NULL = not provided.
+    organization: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    occupation: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    role_description: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     # Set when the user asks to delete their account. Non-null means the account
     # is scheduled for removal: it can't be used, but signing back in within the
     # grace window clears this and restores it.
@@ -65,6 +72,9 @@ class User(db.Model):
             "name": self.name,
             "plan": self.plan or "free",
             "account_type": self.account_type,
+            "organization": self.organization,
+            "occupation": self.occupation,
+            "role_description": self.role_description,
             "email_verified": self.email_verified_at is not None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

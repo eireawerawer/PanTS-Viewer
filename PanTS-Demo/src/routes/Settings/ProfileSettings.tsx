@@ -14,6 +14,49 @@ import { useSettings } from "./context";
 // The account type used to be a required signup step with four descriptive
 // cards. It's an optional select here: it still gates nothing, it's just
 // reported on. It lives on the account, so it follows the user between browsers.
+// Commit-on-blur text row, same interaction pattern as the name field: the
+// draft belongs to the input while it's being edited, the account value is
+// authoritative otherwise, and nothing fires unless the value changed.
+const ProfileFieldRow: React.FC<{
+	id: string;
+	label: string;
+	note?: string;
+	value: string | null;
+	maxLength: number;
+	onCommit: (next: string) => void;
+}> = ({ id, label, note, value, maxLength, onCommit }) => {
+	const committed = value ?? "";
+	const [draft, setDraft] = useState(committed);
+	useEffect(() => {
+		setDraft(committed);
+	}, [committed]);
+	const commit = () => {
+		const next = draft.trim();
+		if (next === committed) return;
+		onCommit(next);
+	};
+	return (
+		<div className="set-row">
+			<label className="set-row-label" htmlFor={id}>
+				{label}
+				{note && <span className="set-row-note">{note}</span>}
+			</label>
+			<input
+				id={id}
+				className="set-input"
+				value={draft}
+				maxLength={maxLength}
+				onChange={(e) => setDraft(e.target.value)}
+				onBlur={commit}
+				onKeyDown={(e) => {
+					if (e.key === "Enter") e.currentTarget.blur();
+					if (e.key === "Escape") setDraft(committed);
+				}}
+			/>
+		</div>
+	);
+};
+
 const ProfileSettings: React.FC = () => {
 	const navigate = useNavigate();
 	const {
@@ -107,6 +150,51 @@ const ProfileSettings: React.FC = () => {
 						))}
 					</select>
 				</div>
+			</div>
+
+			<div className="set-group">
+				<h2 className="set-heading">Verified researcher profile</h2>
+
+				<ProfileFieldRow
+					id="set-organization"
+					label="Organization"
+					note="With a verified email, a complete profile unlocks 10 scans a day."
+					value={user.profile.organization}
+					maxLength={200}
+					onCommit={(next) =>
+						run(async () => {
+							await updateAccountProfile({ organization: next || null });
+							notify(next ? "Your organization has been saved." : "Your organization has been cleared.");
+						})
+					}
+				/>
+
+				<ProfileFieldRow
+					id="set-occupation"
+					label="Occupation"
+					value={user.profile.occupation}
+					maxLength={120}
+					onCommit={(next) =>
+						run(async () => {
+							await updateAccountProfile({ occupation: next || null });
+							notify(next ? "Your occupation has been saved." : "Your occupation has been cleared.");
+						})
+					}
+				/>
+
+				<ProfileFieldRow
+					id="set-role-description"
+					label="About your work"
+					note="A line on what you do and what you'd use BodyMaps for."
+					value={user.profile.roleDescription}
+					maxLength={2000}
+					onCommit={(next) =>
+						run(async () => {
+							await updateAccountProfile({ roleDescription: next || null });
+							notify(next ? "Saved." : "Cleared.");
+						})
+					}
+				/>
 			</div>
 
 			<div className="set-group">

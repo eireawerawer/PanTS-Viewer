@@ -239,4 +239,9 @@ export const accountTypeLabel = (id: AccountType | null): string =>
 export type AccountProfile = {
 	/** null until the user picks one in settings. Nothing depends on it. */
 	accountType: AccountType | null;
+	/** Verified-researcher profile. Filled in + a verified email unlocks the
+	 *  10-scans-a-day tier; the check itself is server-side. */
+	organization: string | null;
+	occupation: string | null;
+	roleDescription: string | null;
 };

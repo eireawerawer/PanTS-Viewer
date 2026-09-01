@@ -163,6 +163,9 @@ type ApiUser = {
 	name?: string | null;
 	plan?: string | null;
 	account_type?: string | null;
+	organization?: string | null;
+	occupation?: string | null;
+	role_description?: string | null;
 	roles?: string[] | null;
 };
 const mapApiUser = (u: ApiUser): AuthUser => {
@@ -175,7 +178,12 @@ const mapApiUser = (u: ApiUser): AuthUser => {
 		hasCustomName: custom.length > 0,
 		emailNotifications: loadPref(u.id),
 		plan: (u.plan as PlanId) || "free",
-		profile: { accountType: (u.account_type as AccountType) || null },
+		profile: {
+			accountType: (u.account_type as AccountType) || null,
+			organization: u.organization || null,
+			occupation: u.occupation || null,
+			roleDescription: u.role_description || null,
+		},
 		// Defaulted, never invented: an endpoint that forgets to send roles
 		// leaves you with none, which fails closed.
 		roles: u.roles ?? [],
@@ -418,11 +426,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	const updateAccountProfile = useCallback(async (patch: Partial<AccountProfile>) => {
-		if (!("accountType" in patch)) return;
+		// "" clears a field: the server reads an empty string as "not provided".
+		const body: Record<string, string> = {};
+		if ("accountType" in patch) body.account_type = patch.accountType ?? "";
+		if ("organization" in patch) body.organization = patch.organization ?? "";
+		if ("occupation" in patch) body.occupation = patch.occupation ?? "";
+		if ("roleDescription" in patch) body.role_description = patch.roleDescription ?? "";
+		if (Object.keys(body).length === 0) return;
 		const res = await authFetch("/api/auth/me", {
 			method: "PATCH",
-			// "" clears it: the server reads an empty string as "not set".
-			body: JSON.stringify({ account_type: patch.accountType ?? "" }),
+			body: JSON.stringify(body),
 		});
 		const data = await res.json().catch(() => ({}));
 		if (!res.ok) throw new Error(data.error || "Couldn't save your role. Try again.");

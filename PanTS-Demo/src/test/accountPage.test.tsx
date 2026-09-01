@@ -22,6 +22,9 @@ const USER = {
 	name: null as string | null,
 	plan: "free",
 	account_type: null as string | null,
+	organization: null as string | null,
+	occupation: null as string | null,
+	role_description: null as string | null,
 	roles: [] as string[],
 };
 
@@ -61,9 +64,13 @@ beforeEach(() => {
 		if (u.includes("/api/auth/me") && method === "PATCH") {
 			const patch = JSON.parse(String(init?.body)) as {
 				name?: string; account_type?: string;
+				organization?: string; occupation?: string; role_description?: string;
 			};
 			if ("name" in patch) USER.name = patch.name || null;
 			if ("account_type" in patch) USER.account_type = patch.account_type || null;
+			if ("organization" in patch) USER.organization = patch.organization || null;
+			if ("occupation" in patch) USER.occupation = patch.occupation || null;
+			if ("role_description" in patch) USER.role_description = patch.role_description || null;
 			return json({ user: { ...USER } });
 		}
 		if (u.includes("/api/auth/me")) return json({ user: { ...USER } });
@@ -215,6 +222,35 @@ describe("display name", () => {
 		renderAt();
 		expect(await screen.findByText("Email me when a scan finishes")).toBeInTheDocument();
 		expect(screen.queryByRole("link", { name: "Notifications" })).not.toBeInTheDocument();
+	});
+});
+
+describe("verified researcher profile", () => {
+	it("saves each field on blur with the server's field names", async () => {
+		const user = userEvent.setup();
+		renderAt();
+
+		const org = await screen.findByLabelText(/Organization/);
+		await user.type(org, "Duke University");
+		await user.tab();
+		await waitFor(() =>
+			expect(lastCall("PATCH", "/api/auth/me")?.body).toEqual({ organization: "Duke University" })
+		);
+		expect(await screen.findByText("Your organization has been saved.")).toBeInTheDocument();
+
+		const occ = screen.getByLabelText(/Occupation/);
+		await user.type(occ, "Radiologist");
+		await user.tab();
+		await waitFor(() =>
+			expect(lastCall("PATCH", "/api/auth/me")?.body).toEqual({ occupation: "Radiologist" })
+		);
+	});
+
+	it("explains what the profile unlocks", async () => {
+		renderAt();
+		expect(
+			await screen.findByText(/complete profile unlocks 10 scans a day/)
+		).toBeInTheDocument();
 	});
 });
 

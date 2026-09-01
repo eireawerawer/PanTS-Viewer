@@ -206,15 +206,28 @@ def me():
 @auth_blueprint.route("/auth/me", methods=["PATCH"])
 @require_auth
 def update_me():
-    """Update the display name and/or the self-reported account type. Either
-    may be sent alone. An empty name clears it and the client falls back to
-    deriving one from the email; an empty account_type clears it to "not set"."""
+    """Update the display name, the self-reported account type, and/or the
+    verified-researcher profile fields (organization, occupation,
+    role_description). Any subset may be sent. An empty string clears a field:
+    the name falls back to one derived from the email, everything else goes
+    back to "not provided"."""
     data = _json()
-    if "name" not in data and "account_type" not in data:
+    profile_patch = {
+        key: data.get(key)
+        for key in auth_store.PROFILE_FIELD_LIMITS
+        if key in data
+    }
+    if "name" not in data and "account_type" not in data and not profile_patch:
         return jsonify({"error": "Nothing to update"}), 400
 
     user_id = current_user()["id"]
     user = None
+
+    for key, value in profile_patch.items():
+        if value is not None and not isinstance(value, str):
+            return jsonify({"error": f"{key} must be text"}), 400
+    if profile_patch:
+        user = auth_store.update_profile_fields(user_id, profile_patch)
 
     if "name" in data:
         name = data.get("name")
@@ -281,7 +294,10 @@ def my_jobs():
 # The account fields a signed-in user can already see in Settings. Nothing
 # internal: no ids, no session or role rows, no job records (real runs never
 # write the job table, and its rows carry server paths).
-EXPORT_ACCOUNT_FIELDS = ("email", "name", "account_type", "plan", "created_at")
+EXPORT_ACCOUNT_FIELDS = (
+    "email", "name", "account_type", "plan", "created_at",
+    "organization", "occupation", "role_description",
+)
 
 
 @auth_blueprint.route("/me/export", methods=["GET"])
