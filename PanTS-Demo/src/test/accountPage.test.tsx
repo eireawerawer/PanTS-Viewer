@@ -25,6 +25,7 @@ const USER = {
 	organization: null as string | null,
 	occupation: null as string | null,
 	role_description: null as string | null,
+	email_verified: false,
 	roles: [] as string[],
 };
 
@@ -61,6 +62,9 @@ beforeEach(() => {
 		const method = init?.method ?? "GET";
 		calls.push({ method, url: u, body: init?.body ? JSON.parse(String(init.body)) : undefined });
 
+		if (u.includes("/api/auth/send-verification")) {
+			return json({ ok: true, already_verified: false, sent: true });
+		}
 		if (u.includes("/api/auth/me") && method === "PATCH") {
 			const patch = JSON.parse(String(init?.body)) as {
 				name?: string; account_type?: string;
@@ -222,6 +226,16 @@ describe("display name", () => {
 		renderAt();
 		expect(await screen.findByText("Email me when a scan finishes")).toBeInTheDocument();
 		expect(screen.queryByRole("link", { name: "Notifications" })).not.toBeInTheDocument();
+	});
+});
+
+describe("email verification", () => {
+	it("offers to resend the link until the address is verified", async () => {
+		const user = userEvent.setup();
+		renderAt();
+		await user.click(await screen.findByRole("button", { name: "Resend" }));
+		await waitFor(() => expect(lastCall("POST", "/api/auth/send-verification")).toBeTruthy());
+		expect(await screen.findByText(/Verification email sent/)).toBeInTheDocument();
 	});
 });
 

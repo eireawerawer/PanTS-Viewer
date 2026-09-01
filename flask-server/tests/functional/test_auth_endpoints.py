@@ -137,6 +137,20 @@ def test_patch_me_rejects_an_empty_body_and_a_non_string(client):
     assert client.patch("/api/auth/me", json={"name": 42}).status_code == 400
 
 
+def test_send_verification_requires_auth_and_verify_rejects_garbage(client):
+    assert client.post("/api/auth/send-verification").status_code == 401
+    r = client.post("/api/auth/verify-email", json={"token": "nope"})
+    assert r.status_code == 400
+
+    # Signed in and unverified: the endpoint reports honestly whether mail
+    # left the building (unconfigured SMTP logs the link and says sent=False).
+    client.post("/api/auth/register", json={"email": "v@w.com", "password": "password1"})
+    r = client.post("/api/auth/send-verification")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True and body["already_verified"] is False
+
+
 def test_account_endpoints_require_auth(client):
     assert client.patch("/api/auth/me", json={"name": "x"}).status_code == 401
     assert client.get("/api/me/export").status_code == 401

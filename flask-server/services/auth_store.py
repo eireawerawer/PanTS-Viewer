@@ -19,6 +19,7 @@ from models.auth_session import AuthSession
 from models.engine import session_scope
 from models.job import utcnow
 from models.oauth_identity import OAuthIdentity
+from models.email_verification import EmailVerificationToken
 from models.password_reset import PasswordResetToken
 from models.user import SYSTEM_USER_EMAIL, SYSTEM_USER_ID, User
 
@@ -30,6 +31,11 @@ SESSION_TTL_DAYS = 14
 # session this is sitting unattended in a mailbox; long enough that finding the
 # mail in a spam folder ten minutes later still works.
 RESET_TTL_MINUTES = 60
+
+# A verification link only proves the mailbox it was sent to; a day-long window
+# beats making people re-request it, and the worst a stale link can do is
+# verify the email it was for.
+VERIFY_TTL_MINUTES = 60 * 24
 
 # How long a deleted account stays restorable. Until this elapses the row is
 # still there and signing in brings the account back; after it, the account is
@@ -370,6 +376,85 @@ def revoke_all_sessions(user_id: str) -> int:
 
 
 # ---- password reset -------------------------------------------------------
+
+def create_email_verification(user_id: str) -> tuple[dict, str] | None:
+    """Issue a verification token for the account, returning (user, RAW token).
+
+    None means there is nothing to verify: no such account, the system user, an
+    account past its deletion grace, or an email that is already verified. Any
+    earlier unredeemed token is superseded, same as password resets.
+    """
+    raw = secrets.token_urlsafe(32)
+    now = utcnow()
+    with session_scope() as s:
+        user = s.get(User, user_id)
+        if user is None or user.is_system or user.email_verified_at is not None:
+            return None
+        if user.deletion_requested_at is not None and _grace_expired(user):
+            return None
+
+        superseded = s.execute(
+            select(EmailVerificationToken).where(
+                EmailVerificationToken.user_id == user.id,
+                EmailVerificationToken.used_at.is_(None),
+            )
+        ).scalars().all()
+        for token in superseded:
+            token.used_at = now
+
+        s.add(EmailVerificationToken(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            token_hash=_hash_token(raw),
+            created_at=now,
+            expires_at=now + timedelta(minutes=VERIFY_TTL_MINUTES),
+        ))
+        s.flush()
+        return user.to_public_dict(), raw
+
+
+def verify_email(raw_token: str) -> dict | None:
+    """Redeem a verification token: mark the email verified, burn the token.
+
+    None for a token that is unknown, expired, or already used. Verifying an
+    address that became verified some other way in the meantime still succeeds
+    - the goal state is reached either way.
+    """
+    if not raw_token:
+        return None
+    now = utcnow()
+    with session_scope() as s:
+        token = s.execute(
+            select(EmailVerificationToken).where(
+                EmailVerificationToken.token_hash == _hash_token(raw_token)
+            )
+        ).scalar_one_or_none()
+        if token is None or not token.is_redeemable(now):
+            return None
+        user = s.get(User, token.user_id)
+        if user is None or user.is_system:
+            return None
+        token.used_at = now
+        if user.email_verified_at is None:
+            user.email_verified_at = now
+        s.flush()
+        return user.to_public_dict()
+
+
+def purge_expired_verification_tokens() -> int:
+    """Housekeeping twin of purge_expired_reset_tokens."""
+    now = utcnow()
+    with session_scope() as s:
+        spent = s.execute(
+            select(EmailVerificationToken).where(
+                (EmailVerificationToken.used_at.is_not(None))
+                | (EmailVerificationToken.expires_at <= now)
+            )
+        ).scalars().all()
+        for token in spent:
+            s.delete(token)
+        return len(spent)
+
 
 def create_password_reset(email: str) -> tuple[dict, str] | None:
     """Start a reset for an email, returning (user, RAW token) or None.

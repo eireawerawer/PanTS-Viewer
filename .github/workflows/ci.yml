@@ -98,7 +98,7 @@ jobs:
       # Accounts: argon2 hashing, sessions (create/resolve/expire/revoke), and the
       # register -> cookie -> me -> logout endpoint flow + require_auth guard.
       - name: Auth unit + endpoint tests
-        run: python -m pytest tests/unit/test_auth_store.py tests/functional/test_auth_endpoints.py -v
+        run: python -m pytest tests/unit/test_auth_store.py tests/unit/test_email_verification.py tests/functional/test_auth_endpoints.py -v
 
       # OAuth: account linking rules (incl. refusing to link an unverified
       # provider email to an existing account) and the provider/start/callback routes.

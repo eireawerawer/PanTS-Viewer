@@ -61,6 +61,7 @@ const ProfileSettings: React.FC = () => {
 	const navigate = useNavigate();
 	const {
 		user, updateName, updateAccountProfile, updatePreferences, signOut,
+		sendVerification,
 	} = useAuth();
 	const { run, notify } = useSettings();
 
@@ -118,8 +119,35 @@ const ProfileSettings: React.FC = () => {
 				</div>
 
 				<div className="set-row">
-					<span className="set-row-label">Email</span>
+					<span className="set-row-label">
+						Email
+						<span className="set-row-note">
+							{user.emailVerified
+								? "Verified."
+								: "Not verified — check your inbox, or resend the link."}
+						</span>
+					</span>
 					<span className="set-row-value">{user.email}</span>
+					{!user.emailVerified && (
+						<button
+							type="button"
+							className="set-btn"
+							onClick={() =>
+								run(async () => {
+									const r = await sendVerification();
+									notify(
+										r.alreadyVerified
+											? "Your email is already verified."
+											: r.sent
+												? "Verification email sent. Check your inbox."
+												: "Couldn't send the email. Try again in a minute."
+									);
+								})
+							}
+						>
+							Resend
+						</button>
+					)}
 				</div>
 
 				<div className="set-row">

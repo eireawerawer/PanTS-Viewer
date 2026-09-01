@@ -33,6 +33,7 @@ const AnalyticsSettings = lazy(() => import("./routes/Settings/AnalyticsSettings
 const PeopleSettings = lazy(() => import("./routes/Settings/PeopleSettings"));
 const SignupRedirect = lazy(() => import("./routes/SignupRedirect"));
 const ResetPassword = lazy(() => import("./routes/ResetPassword"));
+const VerifyEmail = lazy(() => import("./routes/VerifyEmail"));
 const LegalPage = lazy(() => import("./routes/LegalPage"));
 const SharePatientCard = lazy(() => import("./routes/SharePatientCard"));
 const RotatingHeartLoader = lazy(() => import("./components/Loading"));
@@ -127,6 +128,9 @@ function App() {
                   {/* Where the emailed reset link lands. Public by necessity —
                       the person following it can't sign in. */}
                   <Route path="/reset-password" element={<ResetPassword />} />
+                  {/* Where the emailed verification link lands. Public for the
+                      same reason. */}
+                  <Route path="/verify-email" element={<VerifyEmail />} />
                   {/* Settings is a shell with a left nav; each section is its
                       own URL so a link can point straight at one. */}
                   <Route path="/account" element={<SettingsPage />}>

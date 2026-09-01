@@ -122,6 +122,7 @@ def create_app():
         # Same deal for spent reset tokens: housekeeping, not security — they
         # are already refused on redemption, this just stops the table growing.
         dropped = auth_store.purge_expired_reset_tokens()
+        dropped += auth_store.purge_expired_verification_tokens()
         if dropped:
             print(f"[boot] dropped {dropped} spent password reset token(s)")
     except Exception as e:
