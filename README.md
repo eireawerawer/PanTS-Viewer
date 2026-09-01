@@ -28,25 +28,35 @@ PANTS_PATH=/folder/where/PanTS
 USE_SSL=false
 ```
 
-Password reset emails (`/api/auth/forgot-password`) go out over SMTP:
+Password reset emails (`/api/auth/forgot-password`) and account verification
+emails (`/api/auth/send-verification` — verifying is what, with a complete
+profile, lifts an account to the 10-scans/day tier) go out over SMTP:
 
 ```
-SMTP_HOST=smtp.gmail.com
+# Amazon SES (the production setup — the credential is a send-only SMTP key,
+# handed to the deployer privately; it never lives in this repository)
+SMTP_HOST=email-smtp.us-east-1.amazonaws.com
 SMTP_PORT=587
-SMTP_USER=bodymaps.official@gmail.com
-SMTP_PASSWORD=<16-character Gmail App Password>
+SMTP_STARTTLS=true
+SMTP_USER=<SES SMTP username>
+SMTP_PASSWORD=<SES SMTP password>
+SMTP_FROM=no-reply@thebodymaps.com
 PUBLIC_BASE_URL=https://bodymaps.wse.jhu.edu
 ```
 
-**`SMTP_PASSWORD` must be a Gmail App Password, not the account password** —
-Google stopped accepting account passwords for SMTP, and the failure shows up as
-`SMTPAuthenticationError` when someone tries to reset. Generate one at Google
-Account > Security > 2-Step Verification > App passwords. `PUBLIC_BASE_URL` is
-what the emailed link points at, so it must be the address users actually visit.
+`PUBLIC_BASE_URL` is what the emailed links point at, so it must be the address
+users actually visit. `SMTP_FROM` must be an address on a domain the SES
+identity covers. (Gmail SMTP also works for low volume — `smtp.gmail.com`,
+port 587, a 16-character App Password rather than the account password — but
+its ~500 recipients/day cap and suspension behaviour make it unsuitable once
+signups carry verification mail.)
 
-Leave `SMTP_USER`/`SMTP_PASSWORD` unset and the flow still works end to end: the
-message, reset link and all, is printed to the server log instead of being sent.
-That is the intended local-dev path — no mailbox needed.
+Leave `SMTP_USER`/`SMTP_PASSWORD` unset and both flows still work end to end:
+the message — reset or verification link and all — is printed to the server log
+instead of being sent, and password-signup users simply stay on the 1-scan/day
+tier until mail is configured. That is the intended local-dev path — no mailbox
+needed. OAuth (Google/GitHub) accounts arrive already verified and are
+unaffected either way.
 
 Optional dataset vars:
 ```
@@ -192,9 +202,21 @@ Required whenever a PR adds an Alembic revision; a fast no-op otherwise. Skippin
 ```
 cd /home/visitor/PanTS-Viewer/flask-server && /home/visitor/.conda/envs/PanTS_backend/bin/alembic upgrade head
 ```
-This step is **mandatory** for the account-recovery release: it carries two
-revisions (`password_reset_token`, and the location/device columns on
-`analytics_event`). Without it, asking for a password reset returns a 500.
+This step is **mandatory** for the tiered-access release: it carries two
+revisions (`7d4f8c2a9b1e` profile fields on `user_account`, and
+`9e6a1b5d4c2f` the `email_verification_token` table). Without it, signing up
+and editing the profile return 500s. (The earlier account-recovery release's
+two revisions run in the same command if the server ever skipped them.)
+
+#### 4b. One-time for the tiered-access release: email credentials (optional)
+Verification emails need the SES SMTP block in
+`/home/visitor/PanTS-Viewer/flask-server/.env` (the variables are listed in
+the email section near the top of this file). **The credential is not in this
+repository and never will be** — get the six-line block privately from the
+maintainer and paste it in with `nano .env`. Skipping this is safe: the site
+runs, verification links go to the gunicorn log instead of inboxes, and
+password-signup users simply stay on the 1-scan/day tier until it is added.
+OAuth sign-ins are unaffected either way.
 
 #### 5. Restart the backend
 ```
@@ -237,10 +259,32 @@ curl -s -X POST http://127.0.0.1:8000/api/auth/forgot-password \
 grep -i "\[mail\]" /tmp/gunicorn.log | tail -5
 ```
 Expect `{"ok":true}` and **no** `[mail]` lines. A line saying "SMTP is not
-configured" means `SMTP_USER`/`SMTP_PASSWORD` are unset and reset links are
+configured" means `SMTP_USER`/`SMTP_PASSWORD` are unset and emailed links are
 going to the log instead of to users. "SMTP rejected the credentials" means
-`SMTP_PASSWORD` is an account password rather than a Gmail App Password.
+the password is wrong for the host: for SES it must be the derived SMTP
+password (not the raw secret key); for Gmail, an App Password (not the
+account password).
 
-Finally, load `https://bodymaps.wse.jhu.edu/upload` in a browser and confirm a signed-out visitor can still start a run.
+Then check the access tiers landed (all three lines matter):
+```
+# Guests may browse but not upload or use the assistant - expect 401 twice
+curl -s -o /dev/null -w "guest upload: %{http_code} (expect 401)\n" -X POST http://127.0.0.1:8000/api/upload-inference-chunk
+curl -s -o /dev/null -w "guest assistant: %{http_code} (expect 401)\n" -X POST -H 'Content-Type: application/json' -d '{"message":"hi"}' http://127.0.0.1:8000/api/ai-command
+
+# A fresh account starts on 1 scan/day and gets a verification email
+curl -s -c /tmp/tiercheck.txt -X POST -H 'Content-Type: application/json' \
+  -d '{"email":"tier-check@example.com","password":"delete-me-123"}' \
+  http://127.0.0.1:8000/api/auth/register > /dev/null
+curl -s -b /tmp/tiercheck.txt http://127.0.0.1:8000/api/me/usage | head -c 120; echo
+```
+Expect `"plan": "free"` with `"daily_scans": 1`, and (with SMTP configured) a
+verification mail in the inbox — without SMTP, the link is in
+`/tmp/gunicorn.log`. Delete the throwaway account afterwards from
+Settings → People as an admin, or leave it; it can do nothing but browse.
+
+Finally, load `https://bodymaps.wse.jhu.edu/upload` in a browser: a
+signed-out visitor is asked to sign in before uploading (this changed in the
+tiered-access release - guests browse, accounts upload), and a signed-in
+account can select a file and run.
 
 Logs are written to `/tmp/gunicorn.log`.
