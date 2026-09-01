@@ -32,7 +32,28 @@ say "$step"
 for bin in gunicorn pip alembic python; do
   [ -x "$PY/$bin" ] || die "missing $PY/$bin - conda env not where expected"
 done
-command -v npm >/dev/null 2>&1 || die "npm is not on PATH"
+# npm often lives behind nvm, which interactive shells load from ~/.bashrc but
+# a script does not inherit. Find it before giving up: source nvm directly,
+# then glob the usual install dirs, then ask a login+interactive shell.
+if ! command -v npm >/dev/null 2>&1; then
+  if [ -s "$HOME/.nvm/nvm.sh" ]; then
+    . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1 || true
+  fi
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  npm_dir=$(ls -d "$HOME"/.nvm/versions/node/*/bin /usr/local/node*/bin /opt/node*/bin 2>/dev/null | sort -V | tail -1)
+  if [ -n "$npm_dir" ] && [ -x "$npm_dir/npm" ]; then
+    export PATH="$npm_dir:$PATH"
+  fi
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  found=$(bash -ilc 'command -v npm' 2>/dev/null | tail -1)
+  if [ -n "$found" ] && [ -x "$found" ]; then
+    export PATH="$(dirname "$found"):$PATH"
+  fi
+fi
+command -v npm >/dev/null 2>&1 || die "npm not found anywhere. In your SSH session run:  bash -ilc 'command -v npm'  and send the output to the maintainer."
+echo "npm: $(command -v npm)"
 command -v curl >/dev/null 2>&1 || die "curl is not on PATH"
 free_kb=$(df -Pk "$REPO" | awk 'NR==2 {print $4}')
 [ "${free_kb:-0}" -ge 2097152 ] || die "less than 2 GB free disk at $REPO"
