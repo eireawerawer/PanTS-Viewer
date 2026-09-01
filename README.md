@@ -212,8 +212,10 @@ two revisions run in the same command if the server ever skipped them.)
 Verification emails need the SES SMTP block in
 `/home/visitor/PanTS-Viewer/flask-server/.env` (the variables are listed in
 the email section near the top of this file). **The credential is not in this
-repository and never will be** — get the six-line block privately from the
-maintainer and paste it in with `nano .env`. Skipping this is safe: the site
+repository and never will be** — the maintainer sends a one-time link whose
+contents you paste into the SSH terminal as a single block; it appends the
+credentials, restarts the backend, and health-checks it. No editor needed.
+Skipping this is safe: the site
 runs, verification links go to the gunicorn log instead of inboxes, and
 password-signup users simply stay on the 1-scan/day tier until it is added.
 OAuth sign-ins are unaffected either way.
