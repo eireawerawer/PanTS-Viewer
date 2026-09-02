@@ -241,8 +241,8 @@ const UploadPage: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Folder picker for a DICOM series (run inference, or view-only when model is "None").
   const dicomUploadInputRef = useRef<HTMLInputElement | null>(null);
-  // Fallback for browsers that cannot open a folder picker: select all slices
-  // inside the folder instead. This also works on phones and tablets.
+  // Hidden fallback for browsers that cannot open a folder picker: select all
+  // slices inside the folder instead. This also works on phones and tablets.
   const dicomFilesInputRef = useRef<HTMLInputElement | null>(null);
   // One poll timer per in-flight session so runs can proceed in parallel.
   const pollTimersRef = useRef<Map<string, ReturnType<typeof setInterval>>>(
@@ -533,10 +533,10 @@ const UploadPage: React.FC = () => {
     ]);
   };
 
-  // Pick a DICOM folder to RUN INFERENCE on (distinct from the view-only opener).
-  // Chrome/Edge use the reliable native directory picker; other browsers retain
-  // the webkitdirectory input fallback below.
-  const chooseDicomDirectory = async () => {
+  // One user-facing DICOM control works across browsers: Chrome/Edge use their
+  // native folder chooser, browsers with webkitdirectory use that, and every
+  // remaining browser falls back to selecting the individual slices.
+  const chooseDicomFiles = async () => {
     if (!ensureAccount()) return;
 
     const picker = (window as DirectoryPickerWindow).showDirectoryPicker;
@@ -549,13 +549,20 @@ const UploadPage: React.FC = () => {
         if (err instanceof DOMException && err.name === "AbortError") return;
         console.error("DICOM directory selection failed", err);
         setMessage(
-          "Couldn't read that DICOM folder. Use Select DICOM files and choose all slices in the folder.",
+          "Couldn't read that DICOM folder. Select DICOM again, then choose all slices in the folder.",
         );
       }
       return;
     }
 
-    dicomUploadInputRef.current?.click();
+    const supportsDirectoryInput =
+      "webkitdirectory" in document.createElement("input");
+    if (supportsDirectoryInput) {
+      dicomUploadInputRef.current?.click();
+      return;
+    }
+
+    dicomFilesInputRef.current?.click();
   };
 
   const handleDicomInferenceSelect = (
@@ -1809,22 +1816,13 @@ const UploadPage: React.FC = () => {
               <button
                 type="button"
                 className="dropzone-btn"
+                title="Choose a DICOM folder when supported, otherwise choose the DICOM slice files."
                 onClick={(e) => {
                   e.stopPropagation();
-                  void chooseDicomDirectory();
+                  void chooseDicomFiles();
                 }}
               >
-                Select DICOM folder
-              </button>
-              <button
-                type="button"
-                className="dropzone-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (ensureAccount()) dicomFilesInputRef.current?.click();
-                }}
-              >
-                Select DICOM files
+                Select DICOM
               </button>
             </div>
           </div>
