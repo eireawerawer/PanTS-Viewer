@@ -179,6 +179,44 @@ type SelectedItem =
   | { id: string; kind: "nifti"; file: File }
   | { id: string; kind: "dicom"; files: File[]; label: string };
 
+// The File System Access API is available in desktop Chrome and Edge, but it
+// is not yet part of TypeScript's DOM declarations. Keep the small read-only
+// surface we use here explicit so browsers without it retain the input fallback.
+type DirectoryPickerFileHandle = {
+  kind: "file";
+  getFile: () => Promise<File>;
+};
+
+type DirectoryPickerDirectoryHandle = {
+  kind: "directory";
+  values: () => AsyncIterableIterator<
+    DirectoryPickerFileHandle | DirectoryPickerDirectoryHandle
+  >;
+};
+
+type DirectoryPickerWindow = Window & {
+  showDirectoryPicker?: () => Promise<DirectoryPickerDirectoryHandle>;
+};
+
+const readDirectoryFiles = async (
+  root: DirectoryPickerDirectoryHandle,
+): Promise<File[]> => {
+  const files: File[] = [];
+
+  const visit = async (directory: DirectoryPickerDirectoryHandle) => {
+    for await (const entry of directory.values()) {
+      if (entry.kind === "file") {
+        files.push(await entry.getFile());
+      } else {
+        await visit(entry);
+      }
+    }
+  };
+
+  await visit(root);
+  return files;
+};
+
 const UploadPage: React.FC = () => {
   const navigate = useNavigate();
   // Running inference requires an account, so any upload action while signed
@@ -203,6 +241,9 @@ const UploadPage: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Folder picker for a DICOM series (run inference, or view-only when model is "None").
   const dicomUploadInputRef = useRef<HTMLInputElement | null>(null);
+  // Fallback for browsers that cannot open a folder picker: select all slices
+  // inside the folder instead. This also works on phones and tablets.
+  const dicomFilesInputRef = useRef<HTMLInputElement | null>(null);
   // One poll timer per in-flight session so runs can proceed in parallel.
   const pollTimersRef = useRef<Map<string, ReturnType<typeof setInterval>>>(
     new Map(),
@@ -470,17 +511,10 @@ const UploadPage: React.FC = () => {
     });
   };
 
-  // Pick a DICOM folder to RUN INFERENCE on (distinct from the view-only opener):
-  // the raw slices are added as one selectable item, previewable and runnable.
-  const handleDicomInferenceSelect = (
-    e: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    if (!ensureAccount()) {
-      e.target.value = "";
-      return;
-    }
-    const files = Array.from(e.target.files ?? []);
-    e.target.value = ""; // allow re-picking the same folder later
+  // Treat folder and manual multi-file selection identically after the browser
+  // gives us File objects. Folder support differs among browsers, but the upload
+  // pipeline itself must not.
+  const addDicomFiles = (files: File[]) => {
     const candidates = files.filter(looksLikeDicom);
     if (!candidates.length) {
       alert(
@@ -497,6 +531,43 @@ const UploadPage: React.FC = () => {
         label: `DICOM series (${candidates.length} slices)`,
       },
     ]);
+  };
+
+  // Pick a DICOM folder to RUN INFERENCE on (distinct from the view-only opener).
+  // Chrome/Edge use the reliable native directory picker; other browsers retain
+  // the webkitdirectory input fallback below.
+  const chooseDicomDirectory = async () => {
+    if (!ensureAccount()) return;
+
+    const picker = (window as DirectoryPickerWindow).showDirectoryPicker;
+    if (picker) {
+      try {
+        const directory = await picker();
+        addDicomFiles(await readDirectoryFiles(directory));
+      } catch (err) {
+        // Cancelling the native chooser is a normal no-op, not an upload error.
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        console.error("DICOM directory selection failed", err);
+        setMessage(
+          "Couldn't read that DICOM folder. Use Select DICOM files and choose all slices in the folder.",
+        );
+      }
+      return;
+    }
+
+    dicomUploadInputRef.current?.click();
+  };
+
+  const handleDicomInferenceSelect = (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    if (!ensureAccount()) {
+      e.target.value = "";
+      return;
+    }
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // allow re-picking the same folder later
+    addDicomFiles(files);
   };
 
   /* ── Inference polling (one timer per session) ── */
@@ -1252,6 +1323,9 @@ const UploadPage: React.FC = () => {
       for (let i = 0; i < files.length; i++) {
         const formData = new FormData();
         formData.append("session_id", sid);
+        // A retry keeps the same server-side filename, so it replaces only the
+        // interrupted slice instead of creating a duplicate in the DICOM series.
+        formData.append("slice_index", String(i));
         formData.append("file", files[i]);
         // Retried like NIfTI chunks, and it matters more here: a DICOM folder
         // has no IndexedDB copy, so a blip on any one slice means re-picking
@@ -1300,8 +1374,8 @@ const UploadPage: React.FC = () => {
       foregroundUploadSidRef.current = null;
       setIsUploading(false);
       setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
-      // Card already shows "Failed"; don't duplicate it in the status line.
-      setMessage("");
+      const reason = err instanceof Error ? err.message : "Unknown upload error";
+      setMessage(`DICOM upload failed: ${reason}`);
     } finally {
       uploadRemainingRef.current.delete(sid);
       if (uploadAbortRef.current.get(sid) === controller) {
@@ -1624,6 +1698,15 @@ const UploadPage: React.FC = () => {
               style={{ display: "none" }}
               onChange={handleDicomInferenceSelect}
             />
+            <input
+              ref={dicomFilesInputRef}
+              type="file"
+              multiple
+              // Do not restrict this picker by extension: many valid DICOM
+              // slices have no extension at all. addDicomFiles filters them.
+              style={{ display: "none" }}
+              onChange={handleDicomInferenceSelect}
+            />
             {selectedItems.length === 0 ? (
               <>
                 <svg
@@ -1728,10 +1811,20 @@ const UploadPage: React.FC = () => {
                 className="dropzone-btn"
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (ensureAccount()) dicomUploadInputRef.current?.click();
+                  void chooseDicomDirectory();
                 }}
               >
                 Select DICOM folder
+              </button>
+              <button
+                type="button"
+                className="dropzone-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (ensureAccount()) dicomFilesInputRef.current?.click();
+                }}
+              >
+                Select DICOM files
               </button>
             </div>
           </div>

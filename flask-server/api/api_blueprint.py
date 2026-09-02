@@ -3222,9 +3222,24 @@ def upload_dicom_slice():
         if not slice_file:
             return jsonify({"error": "file required"}), 400
 
+        # New clients send a stable index for every file. That makes a retry
+        # idempotent: a lost response replaces the same staged slice rather
+        # than adding a duplicate that corrupts the reconstructed series.
+        raw_slice_index = request.form.get("slice_index")
+        slice_index = None
+        if raw_slice_index is not None:
+            try:
+                slice_index = int(raw_slice_index)
+            except (TypeError, ValueError):
+                return jsonify({"error": "slice_index must be a non-negative integer"}), 400
+            if slice_index < 0 or slice_index > 999999:
+                return jsonify({"error": "slice_index is outside upload bounds"}), 400
+
         dicom_dir = os.path.join(CHUNK_DIR, safe_session_id, "dicom")
         os.makedirs(dicom_dir, exist_ok=True)
-        safe_name = secure_filename(slice_file.filename or "") or f"{uuid.uuid4()}.dcm"
+        safe_name = secure_filename(slice_file.filename or "") or "slice.dcm"
+        if slice_index is not None:
+            safe_name = f"slice-{slice_index:06d}-{safe_name}"
         save_path = os.path.join(dicom_dir, safe_name)
         slice_file.save(save_path)
         return jsonify({"status": "ok", "filename": os.path.basename(save_path)})

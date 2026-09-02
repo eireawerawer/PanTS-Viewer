@@ -25,6 +25,7 @@ def app(tmp_path_factory):
         ("PANTS_PATH", "data"),
         ("PANTS_LOWRES_PATH", "lowres"),
         ("PERMISSIONS_DIR", "perm"),
+        ("BODYMAPS_UPLOAD_CHUNK_DIR", "chunks"),
     ]:
         value = f"sqlite:///{base / 'gg.db'}" if sub is None else str(base / sub)
         os.environ[var] = value
@@ -97,6 +98,30 @@ def test_signed_in_chunk_upload_still_works(client):
     })
     assert r.status_code == 200
     assert r.get_json()["status"] == "ok"
+
+
+def test_dicom_slice_retry_replaces_the_same_staged_file(client, app):
+    _register(client, email="dicom@h.com")
+    request_data = {
+        "session_id": "dicom-session",
+        "slice_index": "7",
+    }
+    first = client.post("/api/upload-dicom-slice", data={
+        **request_data,
+        "file": (io.BytesIO(b"first"), "image.dcm"),
+    })
+    assert first.status_code == 200
+
+    retry = client.post("/api/upload-dicom-slice", data={
+        **request_data,
+        "file": (io.BytesIO(b"replacement"), "image.dcm"),
+    })
+    assert retry.status_code == 200
+
+    chunk_root = os.environ["BODYMAPS_UPLOAD_CHUNK_DIR"]
+    staged = os.path.join(chunk_root, "dicom-session", "dicom", "slice-000007-image.dcm")
+    with open(staged, "rb") as stream:
+        assert stream.read() == b"replacement"
 
 
 def test_assistant_refuses_guests(client):
