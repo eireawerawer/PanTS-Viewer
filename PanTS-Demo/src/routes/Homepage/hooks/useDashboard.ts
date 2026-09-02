@@ -61,7 +61,6 @@ export function useDashboard() {
   const [searchId, setSearchId] = useState<number>(0);
   const [showFilters, setShowFilters] = useState(false);
   const [facetData, setFacetData] = useState<FacetData | null>(null);
-  const [matchTotal, setMatchTotal] = useState<number | null>(null);
   const [page, setPage] = useState(1);
   const [pageInput, setPageInput] = useState("");
   const [resultCount, setResultCount] = useState<number | null>(null);
@@ -188,17 +187,6 @@ export function useDashboard() {
     }
   };
 
-  const loadMatchTotal = async (f: Filters) => {
-    try {
-      const params = buildSearchParams(f, { perPage: 1 });
-      const res = await fetch(`${API_BASE}/api/search?${params.toString()}`);
-      const data = await res.json();
-      setMatchTotal(data.total ?? 0);
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
   // On mount: restore URL filters if present, otherwise show curated grid.
   useEffect(() => {
     const urlFilters = parseFiltersFromParams(searchParams);
@@ -216,12 +204,6 @@ export function useDashboard() {
     if (showFilters && !facetData) loadFacetOptions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showFilters]);
-
-  // Keep the "cases match" total in sync with the current filters (debounced).
-  useEffect(() => {
-    const t = setTimeout(() => loadMatchTotal(filters), 200);
-    return () => clearTimeout(t);
-  }, [filters]);
 
   // Warm the code-split viewer chunk while idle so the first case-open is instant.
   useEffect(() => {
@@ -327,7 +309,6 @@ export function useDashboard() {
     filters,
     setFilters,
     facetData,
-    matchTotal,
     activeFilterCount,
     page,
     pageInput,
