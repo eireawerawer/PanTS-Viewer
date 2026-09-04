@@ -3,6 +3,7 @@ import {
 	addRecentUpload,
 	formatRelativeTime,
 	loadRecentUploads,
+	markRecentUploadViewed,
 	MAX_RECENT_UPLOADS,
 	RECENT_WINDOW_MS,
 	recentStatusColor,
@@ -132,5 +133,51 @@ describe("splitByAge", () => {
 
 	it("returns both sides empty for an empty list", () => {
 		expect(splitByAge([], now)).toEqual({ recent: [], older: [] });
+	});
+
+	it("sends a recently-finished but already-viewed scan to history early", () => {
+		const groups = groupUploads([
+			makeEntry({ sessionId: "seen", timestamp: agoMs(2 * 60 * 60 * 1000), viewed: true }),
+		]);
+		const { recent, older } = splitByAge(groups, now);
+		expect(recent).toHaveLength(0);
+		expect(older).toHaveLength(1);
+	});
+
+	it("keeps a recent, unviewed scan on the upload page", () => {
+		const groups = groupUploads([
+			makeEntry({ sessionId: "unseen", timestamp: agoMs(2 * 60 * 60 * 1000) }),
+		]);
+		const { recent, older } = splitByAge(groups, now);
+		expect(recent).toHaveLength(1);
+		expect(older).toHaveLength(0);
+	});
+
+	it("keeps a batch on the upload page until every scan in it has been viewed", () => {
+		const groups = groupUploads([
+			makeEntry({ sessionId: "a", batchId: "b1", batchLabel: "2 scans", timestamp: agoMs(60 * 1000), viewed: true }),
+			makeEntry({ sessionId: "b", batchId: "b1", batchLabel: "2 scans", timestamp: agoMs(60 * 1000) }),
+		]);
+		const { recent, older } = splitByAge(groups, now);
+		expect(recent).toHaveLength(1);
+		expect(older).toHaveLength(0);
+	});
+});
+
+describe("markRecentUploadViewed", () => {
+	it("sets viewed on the matching entry only", () => {
+		localStorage.setItem(
+			"recentUploads",
+			JSON.stringify([makeEntry({ sessionId: "a" }), makeEntry({ sessionId: "b" })]),
+		);
+		const result = markRecentUploadViewed("a");
+		expect(result.find((u) => u.sessionId === "a")?.viewed).toBe(true);
+		expect(result.find((u) => u.sessionId === "b")?.viewed).toBeUndefined();
+	});
+
+	it("is a no-op for an unknown session id", () => {
+		localStorage.setItem("recentUploads", JSON.stringify([makeEntry({ sessionId: "a" })]));
+		const result = markRecentUploadViewed("nonexistent");
+		expect(result.find((u) => u.sessionId === "a")?.viewed).toBeUndefined();
 	});
 });
