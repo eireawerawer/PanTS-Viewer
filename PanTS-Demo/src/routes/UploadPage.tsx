@@ -2652,41 +2652,84 @@ const UploadPage: React.FC = () => {
             m.id === (selectedModel === "" ? "None" : selectedModel),
           );
 
+          // Steps the card to the previous/next entry in MODEL_OPTIONS (same
+          // list + same order the dropdown uses), wrapping at both ends. A
+          // locked target mirrors the dropdown's own click behavior - it opens
+          // the upgrade dialog instead of switching, rather than silently
+          // skipping past it.
+          const cycleModel = (dir: 1 | -1) => {
+            const currentId = selectedModel === "" ? "None" : selectedModel;
+            const idx = MODEL_OPTIONS.findIndex((m) => m.id === currentId);
+            const next =
+              MODEL_OPTIONS[
+                ((idx === -1 ? 0 : idx) + dir + MODEL_OPTIONS.length) % MODEL_OPTIONS.length
+              ];
+            if (modelLocked(next.id)) {
+              setUpgradeBlock({ reason: "model_locked", feature: next.label, plan: plan as PlanId });
+              return;
+            }
+            track("upload_select_model");
+            modelTouchedRef.current = true;
+            setSelectedModel(next.id as typeof selectedModel);
+          };
+          const modelArrowBtn = {
+            width: "26px", height: "26px", borderRadius: "50%", flexShrink: 0,
+            background: "#ffffff", border: "1px solid rgba(0,0,0,0.14)", color: "#111111",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            cursor: "pointer", padding: 0,
+          } as const;
+
           const modelCard = selectedModelInfo && (
             <div style={{
               background: "#f5f5f5", border: "1px solid rgba(0,0,0,0.08)", borderRadius: "12px",
-              padding: "20px", display: "flex", gap: "16px",
+              padding: "20px", display: "flex", flexDirection: "column", gap: "14px",
             }}>
-              <div style={{
-                width: "40px", height: "40px", borderRadius: "8px", flexShrink: 0,
-                background: "rgba(0,0,0,0.06)", border: "1px solid rgba(0,0,0,0.12)",
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#111111" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M9.5 2h5l.5 4.5 3.5 2-1 5-3 2.5-.5 4.5h-5l-.5-4.5-3-2.5-1-5 3.5-2z" />
-                  <circle cx="12" cy="12" r="2.5" />
-                </svg>
+              <div style={{ display: "flex", gap: "16px" }}>
+                <div style={{
+                  width: "40px", height: "40px", borderRadius: "8px", flexShrink: 0,
+                  background: "rgba(0,0,0,0.06)", border: "1px solid rgba(0,0,0,0.12)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#111111" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M9.5 2h5l.5 4.5 3.5 2-1 5-3 2.5-.5 4.5h-5l-.5-4.5-3-2.5-1-5 3.5-2z" />
+                    <circle cx="12" cy="12" r="2.5" />
+                  </svg>
+                </div>
+                <div style={{ minWidth: 0, textAlign: "left" }}>
+                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "13px", fontWeight: 600, color: "#111111" }}>
+                    {selectedModelLabel}
+                  </div>
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#8f8f8f", marginTop: "3px" }}>
+                    {selectedModelInfo.desc}
+                  </div>
+                  {selectedModelInfo.details && (
+                    <ul style={{ margin: "10px 0 0", padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: "4px" }}>
+                      {selectedModelInfo.details.map((line, i) => (
+                        <li key={i} style={{
+                          fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a",
+                          lineHeight: 1.5, paddingLeft: "12px", position: "relative",
+                        }}>
+                          <span style={{ position: "absolute", left: 0 }}>·</span>
+                          {line}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </div>
-              <div style={{ minWidth: 0, textAlign: "left" }}>
-                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "13px", fontWeight: 600, color: "#111111" }}>
-                  {selectedModelLabel}
-                </div>
-                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#8f8f8f", marginTop: "3px" }}>
-                  {selectedModelInfo.desc}
-                </div>
-                {selectedModelInfo.details && (
-                  <ul style={{ margin: "10px 0 0", padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: "4px" }}>
-                    {selectedModelInfo.details.map((line, i) => (
-                      <li key={i} style={{
-                        fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a",
-                        lineHeight: 1.5, paddingLeft: "12px", position: "relative",
-                      }}>
-                        <span style={{ position: "absolute", left: 0 }}>·</span>
-                        {line}
-                      </li>
-                    ))}
-                  </ul>
-                )}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+                <button type="button" aria-label="Previous model" title="Previous model"
+                  onClick={() => cycleModel(-1)} style={modelArrowBtn}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M15 18l-6-6 6-6" />
+                  </svg>
+                </button>
+                <button type="button" aria-label="Next model" title="Next model"
+                  onClick={() => cycleModel(1)} style={modelArrowBtn}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M9 18l6-6-6-6" />
+                  </svg>
+                </button>
               </div>
             </div>
           );
