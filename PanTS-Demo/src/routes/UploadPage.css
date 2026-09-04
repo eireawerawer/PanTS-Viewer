@@ -85,8 +85,15 @@
    icon/text - the tall centered padding made sense for that icon, not for a
    list of rows, so it collapses to match the content instead of leaving a big
    gap above/below the file-chips list. */
-.dropzone:has(.file-chips) {
+.dropzone:has(.file-chips),
+.dropzone:has(.dropzone-inflight) {
   padding: 20px 24px;
+}
+/* An in-flight run isn't something to "drop a file onto" - drop the dashed
+   affordance so the box reads as a status card, not an active picker. */
+.dropzone:has(.dropzone-inflight) {
+  border-style: solid;
+  cursor: default;
 }
 .dropzone:hover {
   border-color: rgba(0,0,0,.25);
