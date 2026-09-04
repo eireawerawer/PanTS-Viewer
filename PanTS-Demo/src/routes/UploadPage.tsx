@@ -8,42 +8,68 @@ import React, {
 } from "react";
 
 // LesionSegmenter's four lesions, offered as a macOS-style submenu off the model
-// item. Only pancreatic is GT-validated; the rest are flagged experimental.
+// item.
 const LESION_OPTIONS: {
   id: "pancreatic" | "liver" | "kidney" | "colon";
   label: string;
-  experimental?: boolean;
 }[] = [
   { id: "pancreatic", label: "Pancreatic lesion" },
-  { id: "liver", label: "Liver lesion", experimental: true },
-  { id: "kidney", label: "Kidney lesion", experimental: true },
-  { id: "colon", label: "Colon lesion", experimental: true },
+  { id: "liver", label: "Liver lesion" },
+  { id: "kidney", label: "Kidney lesion" },
+  { id: "colon", label: "Colon lesion" },
 ];
 
 // SuPreM, MedFormer, and R-Super are deliberately not offered here - the
 // models themselves are untouched (backend dispatch, existing runs of them
 // in Completed Uploads, etc. all still work), this just hides them from the
 // picker.
-const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
+//
+// `details` backs the always-visible model info card next to the picker -
+// kept short and concrete (what it actually segments, what it's for) rather
+// than marketing language, and left off where nothing more specific than
+// `desc` is known.
+const MODEL_OPTIONS: {
+  id: string;
+  label: string;
+  desc: string;
+  details?: string[];
+}[] = [
   {
     id: "None",
     label: "None",
     desc: "View only — files never leave your browser",
+    details: [
+      "Nothing is uploaded - the scan opens straight in the local viewer from your browser's memory.",
+      "No inference runs, so there's nothing to download or share afterward.",
+    ],
   },
   {
     id: "ePAI",
     label: "ePAI",
     desc: "Full abdominal organ segmentation, with detailed pancreas and tumor analysis",
+    details: [
+      "Segments 25 structures in one pass: major abdominal organs (liver, spleen, kidneys, stomach, etc.), the surrounding vasculature, and the pancreas region in particular.",
+      "Within the pancreas, it separately identifies the gland, duct, and three tumor subtypes (PDAC, cyst, PNET) - this is its main focus, not an afterthought.",
+      "Best suited to a standard abdominal CT; not a whole-body scanner.",
+    ],
   },
   {
     id: "Atlas-Net",
     label: "Atlas-Net",
     desc: "For anatomically consistent results",
+    details: [
+      "Segments organs against an anatomical atlas, favoring shapes and positions that are physically plausible over raw per-voxel accuracy.",
+    ],
   },
   {
     id: "LesionSegmenter",
     label: "LesionSegmenter",
     desc: "For fast pancreatic lesion detection",
+    details: [
+      "Computes lesions in four organs in one pass - pancreatic, liver, kidney, and colon - you pick which one to feature as the primary result.",
+      "Pancreatic lesion detection is validated against ground truth; the other three are not yet.",
+      "Optimized for speed over the broader organ coverage ePAI or Atlas-Net provide.",
+    ],
   },
 ];
 import { useNavigate } from "react-router-dom";
@@ -57,6 +83,7 @@ import { API_BASE } from "../helpers/constants";
 import {
   addRecentUpload,
   friendlyScanName,
+  markRecentUploadViewed,
   renameRecentUpload,
   formatRelativeTime,
   groupUploads,
@@ -286,6 +313,13 @@ const UploadPage: React.FC = () => {
   const [itemUploadStatus, setItemUploadStatus] = useState<
     Record<string, "uploading" | "done" | "failed">
   >({});
+  // 0-100 percent for the file chip's own progress bar while uploading -
+  // real chunk-completion progress, not a simulated sweep. Only meaningful
+  // while itemUploadStatus[id] === "uploading"; left stale (harmless) once
+  // an item leaves the dropzone rather than cleaned up eagerly.
+  const [itemUploadProgress, setItemUploadProgress] = useState<
+    Record<string, number>
+  >({});
   // Server-measured median duration for a session's (model, file size), once
   // fetched - see fetchDurationEstimate. Keyed by session id so each in-flight
   // run's card can prefer a real number over the size-formula guess as soon
@@ -322,8 +356,7 @@ const UploadPage: React.FC = () => {
   const modelTouchedRef = useRef(false);
   const [modelDropOpen, setModelDropOpen] = useState(false);
   // LesionSegmenter computes liver/pancreatic/kidney/colon lesions in one pass;
-  // this selects which lesion to feature. Only pancreatic is GT-validated; the
-  // other three are surfaced as experimental.
+  // this selects which lesion to feature.
   const [lesionTarget, setLesionTarget] = useState<
     "pancreatic" | "liver" | "kidney" | "colon"
   >("pancreatic");
@@ -509,6 +542,11 @@ const UploadPage: React.FC = () => {
       const { [id]: _dropped, ...rest } = prev;
       return rest;
     });
+    setItemUploadProgress((prev) => {
+      if (!(id in prev)) return prev;
+      const { [id]: _dropped, ...rest } = prev;
+      return rest;
+    });
   };
 
   // Treat folder and manual multi-file selection identically after the browser
@@ -624,21 +662,17 @@ const UploadPage: React.FC = () => {
     });
   };
 
-  const finishSession = (sid: string, model: string) => {
+  const finishSession = (sid: string) => {
     stopPolling(sid);
     setPhase(sid);
-    const uploads = updateRecentUploadStatus(sid, "Completed");
-    setRecentUploads(uploads);
+    setRecentUploads(updateRecentUploadStatus(sid, "Completed"));
     setSessionId(sid);
     setInferenceCompleted(true);
-    // Only auto-open the viewer when no other run is still in flight.
-    if (!uploads.some((u) => u.status === "Processing")) {
-      setTimeout(() => {
-        navigate(
-          model === "OpenVAE" ? `/reconstruction/${sid}` : `/session/${sid}`,
-        );
-      }, 600);
-    }
+    // Deliberately does NOT navigate to the viewer - a finished run just sits
+    // in Completed Uploads until the user clicks View, same as any other
+    // completed scan. Auto-opening the viewer the moment a run finished used
+    // to yank people into it even when they weren't looking at this tab
+    // anymore (e.g. running several scans back to back).
   };
 
   const startInferencePolling = (sid: string, model: string) => {
@@ -675,7 +709,7 @@ const UploadPage: React.FC = () => {
         if (status === "completed") {
           setQueuePosition(sid);
           clearEtaTracking(sid);
-          finishSession(sid, model);
+          finishSession(sid);
         } else if (status === "failed") {
           stopPolling(sid);
           setPhase(sid);
@@ -969,6 +1003,7 @@ const UploadPage: React.FC = () => {
   const preUploadOnly = async (
     sid: string,
     file: File,
+    onProgress?: (pct: number) => void,
   ): Promise<string | null> => {
     const controller = new AbortController();
     uploadAbortRef.current.set(sid, controller);
@@ -982,6 +1017,7 @@ const UploadPage: React.FC = () => {
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
       const CONCURRENCY = 6;
       let nextIndexToStart = 0;
+      let completedChunks = 0;
       const uploadOneChunk = async (i: number) => {
         const chunk = file.slice(
           i * CHUNK_SIZE,
@@ -1007,6 +1043,8 @@ const UploadPage: React.FC = () => {
           sid,
           Math.max(0, (uploadRemainingRef.current.get(sid) ?? 0) - chunk.size),
         );
+        completedChunks++;
+        onProgress?.(Math.round((completedChunks / totalChunks) * 100));
       };
       const worker = async () => {
         while (true) {
@@ -1061,9 +1099,12 @@ const UploadPage: React.FC = () => {
     });
     itemUploadRef.current.set(item.id, { sid, uploadDone });
     setItemUploadStatus((prev) => ({ ...prev, [item.id]: "uploading" }));
+    setItemUploadProgress((prev) => ({ ...prev, [item.id]: 0 }));
     const file = item.file;
     enqueueUpload(async () => {
-      const uploadedName = await preUploadOnly(sid, file);
+      const uploadedName = await preUploadOnly(sid, file, (pct) => {
+        setItemUploadProgress((prev) => ({ ...prev, [item.id]: pct }));
+      });
       setItemUploadStatus((prev) => ({
         ...prev,
         [item.id]: uploadedName ? "done" : "failed",
@@ -1439,6 +1480,11 @@ const UploadPage: React.FC = () => {
         const { [item.id]: _dropped, ...rest } = prevStatus;
         return rest;
       });
+      setItemUploadProgress((prevProgress) => {
+        if (!(item.id in prevProgress)) return prevProgress;
+        const { [item.id]: _dropped, ...rest } = prevProgress;
+        return rest;
+      });
       setPhase(sid, "uploading"); // harmless if the background upload already finished
       (async () => {
         const uploadedName = await pre.uploadDone;
@@ -1752,51 +1798,62 @@ const UploadPage: React.FC = () => {
                   const isOpen = previewItemId === item.id;
                   const uploadStatus =
                     item.kind === "nifti" ? itemUploadStatus[item.id] : undefined;
+                  const uploadPct = itemUploadProgress[item.id] ?? 0;
                   return (
                     <div
                       key={item.id}
                       className={`file-chip${isOpen ? " file-chip--active" : ""}${uploadStatus ? ` file-chip--${uploadStatus}` : ""}`}
                     >
-                      <span className="file-chip-icon" aria-hidden="true">
-                        {uploadStatus === "uploading" ? (
-                          <span className="file-chip-spinner" />
-                        ) : uploadStatus === "done" ? (
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M20 6L9 17l-5-5" />
-                          </svg>
-                        ) : (
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                            <polyline points="14 2 14 8 20 8" />
-                          </svg>
-                        )}
-                      </span>
-                      <span className="file-chip-text">
-                        <span className="file-chip-name">{name}</span>
-                        <span className="file-chip-sub">
-                          {subtext}
-                          {uploadStatus === "uploading" && " · uploading…"}
-                          {uploadStatus === "done" && " · ready"}
-                          {uploadStatus === "failed" && " · upload failed"}
+                      <div className="file-chip-row">
+                        <span className="file-chip-icon" aria-hidden="true">
+                          {uploadStatus === "uploading" ? (
+                            <span className="file-chip-spinner" />
+                          ) : uploadStatus === "done" ? (
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M20 6L9 17l-5-5" />
+                            </svg>
+                          ) : (
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                              <polyline points="14 2 14 8 20 8" />
+                            </svg>
+                          )}
                         </span>
-                      </span>
-                      <button
-                        className="file-chip-preview"
-                        onClick={() =>
-                          setPreviewItemId((prev) =>
-                            prev === item.id ? null : item.id,
-                          )
-                        }
-                      >
-                        {isOpen ? "Hide" : "Preview"}
-                      </button>
-                      <button
-                        className="file-chip-remove"
-                        onClick={() => removeItem(item.id)}
-                        aria-label={`Remove ${name}`}
-                      >
-                        ×
-                      </button>
+                        <span className="file-chip-text">
+                          <span className="file-chip-name">{name}</span>
+                          <span className="file-chip-sub">
+                            {subtext}
+                            {uploadStatus === "uploading" && ` · uploading ${uploadPct}%`}
+                            {uploadStatus === "done" && " · ready"}
+                            {uploadStatus === "failed" && " · upload failed"}
+                          </span>
+                        </span>
+                        <button
+                          className="file-chip-preview"
+                          onClick={() =>
+                            setPreviewItemId((prev) =>
+                              prev === item.id ? null : item.id,
+                            )
+                          }
+                        >
+                          {isOpen ? "Hide" : "Preview"}
+                        </button>
+                        <button
+                          className="file-chip-remove"
+                          onClick={() => removeItem(item.id)}
+                          aria-label={`Remove ${name}`}
+                        >
+                          ×
+                        </button>
+                      </div>
+                      {uploadStatus === "uploading" && (
+                        <div className="file-chip-progress-track">
+                          <div
+                            className="file-chip-progress-fill"
+                            style={{ width: `${uploadPct}%` }}
+                          />
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -2055,12 +2112,23 @@ const UploadPage: React.FC = () => {
                         </div>
                         {hasSubmenu && (
                           <div className="model-submenu" role="menu">
-                            {LESION_OPTIONS.map((l) => (
+                            {LESION_OPTIONS.map((l) => {
+                              // lesionTarget keeps whatever it was last set to even
+                              // when a different model is active (it defaults to
+                              // "pancreatic" and there's no reason to clear it just
+                              // because the user picked ePAI) - so the checkmark
+                              // must also confirm LesionSegmenter is the SELECTED
+                              // model, not just that this is the remembered target.
+                              // Without the first half, "Pancreatic lesion" showed
+                              // checked here even while ePAI was the active model.
+                              const isChecked =
+                                selectedModel === "LesionSegmenter" && lesionTarget === l.id;
+                              return (
                               <div
                                 key={l.id}
                                 role="menuitemradio"
-                                aria-checked={lesionTarget === l.id}
-                                className={`model-submenu-item${lesionTarget === l.id ? " selected" : ""}`}
+                                aria-checked={isChecked}
+                                className={`model-submenu-item${isChecked ? " selected" : ""}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   modelTouchedRef.current = true;
@@ -2070,7 +2138,7 @@ const UploadPage: React.FC = () => {
                                 }}
                               >
                                 <span className="model-submenu-check">
-                                  {lesionTarget === l.id && (
+                                  {isChecked && (
                                     <svg
                                       width="12"
                                       height="12"
@@ -2089,14 +2157,10 @@ const UploadPage: React.FC = () => {
                                 </span>
                                 <span className="model-submenu-label">
                                   {l.label}
-                                  {l.experimental && (
-                                    <span className="model-submenu-exp">
-                                      experimental
-                                    </span>
-                                  )}
                                 </span>
                               </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         )}
                       </div>
@@ -2239,7 +2303,10 @@ const UploadPage: React.FC = () => {
                   <>
                     <button
                       className="result-btn"
-                      onClick={() => navigate(`/reconstruction/${sessionId}`)}
+                      onClick={() => {
+                        setRecentUploads(markRecentUploadViewed(sessionId));
+                        navigate(`/reconstruction/${sessionId}`);
+                      }}
                     >
                       View Reconstruction
                     </button>
@@ -2260,7 +2327,10 @@ const UploadPage: React.FC = () => {
                   <>
                     <button
                       className="result-btn result-btn-primary"
-                      onClick={() => navigate(`/session/${sessionId}`)}
+                      onClick={() => {
+                        setRecentUploads(markRecentUploadViewed(sessionId));
+                        navigate(`/session/${sessionId}`);
+                      }}
                     >
                       View Visualization
                     </button>
@@ -2315,6 +2385,7 @@ const UploadPage: React.FC = () => {
           const canView = (u: RecentUpload) => u.status !== "Failed" && u.status !== "Cancelled";
           const openSession = (u: RecentUpload) => {
             if (!canView(u)) return;
+            if (!u.viewed) setRecentUploads(markRecentUploadViewed(u.sessionId));
             navigate(`/${u.isReconstruction ? "reconstruction" : "session"}/${u.sessionId}`);
           };
           const removeBatch = (uploads: RecentUpload[]) => {
@@ -2527,10 +2598,10 @@ const UploadPage: React.FC = () => {
             );
           };
 
-          // ── Model card: replaces the old placeholder text with a preview of what
-          // will actually run, using the same name the "Run" button will use. An
-          // empty state that just says "nothing here yet" wastes the space; showing
-          // the selected model gives the user something to check before they run it. ──
+          // ── Model info card: always visible, describes whichever model is
+          // currently selected in the picker - not just an empty-state filler
+          // for when there are no completed scans yet. Sits above Completed
+          // Uploads regardless of upload state. ──
           const selectedModelLabel =
             selectedModel === "None"
               ? "None (view scan)"
@@ -2540,17 +2611,14 @@ const UploadPage: React.FC = () => {
                     "Pancreatic lesion"
                   }`
                 : MODEL_OPTIONS.find((m) => m.id === selectedModel)?.label ?? null;
-          const selectedModelDesc =
-            selectedModel === "LesionSegmenter"
-              ? LESION_OPTIONS.find((l) => l.id === lesionTarget)?.experimental
-                ? "Experimental — not yet validated against ground truth"
-                : MODEL_OPTIONS.find((m) => m.id === "LesionSegmenter")?.desc
-              : MODEL_OPTIONS.find((m) => m.id === selectedModel)?.desc;
+          const selectedModelInfo = MODEL_OPTIONS.find((m) =>
+            m.id === (selectedModel === "" ? "None" : selectedModel),
+          );
 
-          const emptyBox = (
+          const modelCard = selectedModelInfo && (
             <div style={{
-              background: "#f5f5f5", border: "1px dashed rgba(0,0,0,0.12)", borderRadius: "12px",
-              padding: "20px", display: "flex", alignItems: "center", gap: "16px",
+              background: "#f5f5f5", border: "1px solid rgba(0,0,0,0.08)", borderRadius: "12px",
+              padding: "20px", display: "flex", gap: "16px",
             }}>
               <div style={{
                 width: "40px", height: "40px", borderRadius: "8px", flexShrink: 0,
@@ -2563,24 +2631,24 @@ const UploadPage: React.FC = () => {
                 </svg>
               </div>
               <div style={{ minWidth: 0, textAlign: "left" }}>
-                {selectedModelLabel ? (
-                  <>
-                    <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "13px", fontWeight: 600, color: "#111111" }}>
-                      {selectedModelLabel}
-                    </div>
-                    {selectedModelDesc && (
-                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#8f8f8f", marginTop: "3px" }}>
-                        {selectedModelDesc}
-                      </div>
-                    )}
-                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#8f8f8f", marginTop: "6px" }}>
-                      Select a file above and run to see results here.
-                    </div>
-                  </>
-                ) : (
-                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "12px", color: "#8f8f8f" }}>
-                    No uploads yet - run a model above and your results will appear here.
-                  </div>
+                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "13px", fontWeight: 600, color: "#111111" }}>
+                  {selectedModelLabel}
+                </div>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#8f8f8f", marginTop: "3px" }}>
+                  {selectedModelInfo.desc}
+                </div>
+                {selectedModelInfo.details && (
+                  <ul style={{ margin: "10px 0 0", padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: "4px" }}>
+                    {selectedModelInfo.details.map((line, i) => (
+                      <li key={i} style={{
+                        fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a",
+                        lineHeight: 1.5, paddingLeft: "12px", position: "relative",
+                      }}>
+                        <span style={{ position: "absolute", left: 0 }}>·</span>
+                        {line}
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </div>
             </div>
@@ -2610,21 +2678,33 @@ const UploadPage: React.FC = () => {
               )}
 
               <div style={{ marginTop: "32px" }}>
-                <SectionLabel>Completed Uploads</SectionLabel>
-                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                  {finished.length === 0 ? emptyBox : finished.map(g =>
-                    g.kind === "single"
-                      ? <CompletedCard key={g.upload.sessionId} u={g.upload} />
-                      : <CompletedBatchBar key={g.batchId} batchId={g.batchId} label={g.label} uploads={g.uploads} />
-                  )}
-                </div>
-                {older.length > 0 && (
-                  <button type="button" className="upload-history-link"
-                    onClick={() => navigate("/account/history")}>
-                    {older.length} older {older.length === 1 ? "scan" : "scans"} in History →
-                  </button>
-                )}
+                <SectionLabel>Model</SectionLabel>
+                {modelCard}
               </div>
+
+              {finished.length > 0 && (
+                <div style={{ marginTop: "32px" }}>
+                  <SectionLabel>Completed Uploads</SectionLabel>
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#8f8f8f", marginTop: "-8px", marginBottom: "12px" }}>
+                    Scans waiting for you to look at them - once viewed, they move to History.
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                    {finished.map(g =>
+                      g.kind === "single"
+                        ? <CompletedCard key={g.upload.sessionId} u={g.upload} />
+                        : <CompletedBatchBar key={g.batchId} batchId={g.batchId} label={g.label} uploads={g.uploads} />
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {older.length > 0 && (
+                <button type="button" className="upload-history-link"
+                  onClick={() => navigate("/account/history")}
+                  style={{ marginTop: finished.length > 0 ? undefined : "32px" }}>
+                  {older.length} {older.length === 1 ? "scan" : "scans"} in History →
+                </button>
+              )}
             </>
           );
         })()}
@@ -2642,7 +2722,10 @@ const UploadPage: React.FC = () => {
               label={label}
               uploads={uploads}
               onClose={() => setDetailsBatchId(null)}
-              onView={(u) => navigate(`/${u.isReconstruction ? "reconstruction" : "session"}/${u.sessionId}`)}
+              onView={(u) => {
+                if (!u.viewed) setRecentUploads(markRecentUploadViewed(u.sessionId));
+                navigate(`/${u.isReconstruction ? "reconstruction" : "session"}/${u.sessionId}`);
+              }}
               onDownloadScan={(u) => downloadResult(u.sessionId)}
               onDownloadAll={() => downloadBatch(uploads)}
             />

@@ -19,6 +19,13 @@ export type RecentUpload = {
 	// on its own has neither and is treated as an individual entry.
 	batchId?: string;
 	batchLabel?: string;
+	// Has the user opened this scan's result yet? Drives the Upload page's
+	// completed-uploads list: an unviewed finished scan stays there regardless
+	// of age (that's the whole point - it's still waiting to be looked at),
+	// while a viewed one is done being "new" and behaves like any other
+	// finished scan for the age-based History split. Optional/undefined for
+	// older localStorage entries and for anything still Processing.
+	viewed?: boolean;
 };
 
 export const RECENT_UPLOADS_KEY = "recentUploads";
@@ -75,22 +82,31 @@ export const isGroupInFlight = (g: UploadGroup): boolean =>
 		? g.upload.status === "Processing"
 		: g.uploads.some((u) => u.status === "Processing");
 
-// How long a finished scan stays on the Upload page before it belongs to
-// history. A day is the window in which you're still working with a result;
-// past that the Upload page is showing you a filing cabinet.
+// Longest a finished scan stays on the Upload page if it's never opened - a
+// day is generous enough to notice it finished, but the page still shouldn't
+// accumulate scans someone genuinely walked away from forever.
 export const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+// A group counts as "viewed" once every scan in it has been opened - a batch
+// with one scan still unlooked-at is still something to come back to.
+const isGroupViewed = (g: UploadGroup): boolean =>
+	g.kind === "single" ? Boolean(g.upload.viewed) : g.uploads.every((u) => Boolean(u.viewed));
+
 /** Split finished groups into what the Upload page shows and what History gets.
- *  A batch is judged by its most recent scan, so a batch straddling the
- *  boundary stays whole rather than being torn in half. */
+ *  A group belongs to History once it's been viewed (its job here is done -
+ *  see markRecentUploadViewed) OR once RECENT_WINDOW_MS has passed unviewed,
+ *  whichever comes first. A batch is judged by its most recent scan for the
+ *  age check, so a batch straddling the age boundary stays whole rather than
+ *  being torn in half. */
 export const splitByAge = (
 	groups: UploadGroup[],
 	now: number = Date.now()
 ): { recent: UploadGroup[]; older: UploadGroup[] } => {
 	const cutoff = now - RECENT_WINDOW_MS;
+	const belongsToHistory = (g: UploadGroup) => isGroupViewed(g) || g.timestamp < cutoff;
 	return {
-		recent: groups.filter((g) => g.timestamp >= cutoff),
-		older: groups.filter((g) => g.timestamp < cutoff),
+		recent: groups.filter((g) => !belongsToHistory(g)),
+		older: groups.filter(belongsToHistory),
 	};
 };
 
@@ -129,6 +145,17 @@ export const updateRecentUploadStatus = (
 	status: RecentUploadStatus
 ): RecentUpload[] => {
 	const list = loadRecentUploads().map((u) => (u.sessionId === sessionId ? { ...u, status } : u));
+	persistRecentUploads(list);
+	return list;
+};
+
+// Marks a scan opened - called wherever the viewer is actually navigated to
+// (View button, clicking the card, a batch's per-scan view). Idempotent: once
+// true it stays true, so re-viewing a scan doesn't need to re-write storage.
+export const markRecentUploadViewed = (sessionId: string): RecentUpload[] => {
+	const list = loadRecentUploads().map((u) =>
+		u.sessionId === sessionId && !u.viewed ? { ...u, viewed: true } : u
+	);
 	persistRecentUploads(list);
 	return list;
 };

@@ -11,9 +11,10 @@ import {
 	type UploadGroup,
 } from "../../helpers/recentUploads";
 
-// History: every scan older than a day. The Upload page keeps the last 24 hours
-// so it stays a workbench rather than a filing cabinet; everything before that
-// lives here.
+// History: every scan that's either already been viewed, or has sat unviewed
+// for more than a day. The Upload page only keeps unviewed, recent scans so
+// it stays a workbench rather than a filing cabinet; everything else lives
+// here (see splitByAge).
 //
 // Reads the same localStorage list the Upload page does, so labels and batch
 // grouping carry over. That means history is per-browser — the server's own
