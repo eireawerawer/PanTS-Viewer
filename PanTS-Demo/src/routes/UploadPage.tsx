@@ -580,7 +580,10 @@ const UploadPage: React.FC = () => {
     const picker = (window as DirectoryPickerWindow).showDirectoryPicker;
     if (picker) {
       try {
-        const directory = await picker();
+        // File System Access methods are Web-IDL methods and must be invoked
+        // with Window as their receiver. Calling the detached function throws
+        // "Illegal invocation" in Chromium, making this button appear inert.
+        const directory = await picker.call(window);
         addDicomFiles(await readDirectoryFiles(directory));
       } catch (err) {
         // Cancelling the native chooser is a normal no-op, not an upload error.
