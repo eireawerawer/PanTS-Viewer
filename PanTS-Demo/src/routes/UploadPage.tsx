@@ -1700,6 +1700,100 @@ const UploadPage: React.FC = () => {
     niftiItems.length > 0 &&
     niftiItems.every((i) => itemUploadStatus[i.id] === "done");
 
+  // Hoisted above the JSX (rather than computed further down where these were
+  // originally rendered) so the dropzone can show in-flight runs itself once
+  // Run has been clicked, instead of a separate card appearing lower on the
+  // page - the same box that took the upload keeps showing its status.
+  const groups = groupUploads(recentUploads);
+  const inFlight = groups.filter(isGroupInFlight);
+  const { recent: finished, older } = splitByAge(groups.filter(g => !isGroupInFlight(g)));
+  const closeNote = closeInfo.active
+    ? closeInfo.eta === null
+      ? "keep tab open"
+      : `safe to close in ${formatEta(closeInfo.eta)}`
+    : "safe to close";
+
+  // ── A single in-flight scan (not part of a batch) ──
+  const ProcessingCard = ({ u }: { u: RecentUpload }) => {
+    const phase = sessionPhases[u.sessionId];
+    const queuePos = queuePositions[u.sessionId];
+    const phaseLabel =
+      phase === "waiting" ? "Waiting to upload…" :
+      phase === "uploading" ? "Uploading…" :
+      phase === "queued" ? (queuePos ? `#${queuePos} in queue` : "Queued for GPU") :
+      "Running…";
+    return (
+      <div style={{
+        background: "#f5f5f5", border: "1px solid rgba(0, 45, 114, 0.14)", borderRadius: "12px",
+        padding: "16px 20px", display: "flex", flexDirection: "column", gap: "12px",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+            <div style={{
+              width: "36px", height: "36px", borderRadius: "8px", flexShrink: 0,
+              background: "rgba(0, 45, 114, 0.04)", border: "1px solid rgba(0, 45, 114, 0.12)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>{/* A static pulsing dot per scan instead of a spinning wheel:
+                 multiple in-flight scans shouldn't each spin. The single
+                 spinner lives in the batch ProcessingSummaryBar. */}
+              <span className="animate-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: "#002d72", display: "block" }} />
+            </div>
+            <div>
+              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
+                {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}
+                <span className={`proc-close-note${closeInfo.active ? "" : " proc-close-note--ready"}`}>
+                  {" "}· {closeNote}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: phase === "queued" ? "#6a6a6a" : "#002d72" }}>{phaseLabel}</span>
+            <button className="active-cancel-btn" onClick={() => cancelRun(u)}>Cancel</button>
+          </div>
+        </div>
+        {/* No real percent-complete exists for inference (nnU-Net doesn't
+            report progress mid-run), so instead of an indeterminate sweep
+            that told the user nothing, this shows how long the run has
+            left based on how this model's runs typically take. Only shown
+            once actually running: during "queued" there's no dispatch-time
+            signal to build an estimate from. */}
+        {phase === "running" && (
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a" }}>
+            {estimateRemaining(
+              u.model || "",
+              runningStartedAtRef.current.get(u.sessionId) ?? Date.now(),
+              sessionFileSizeRef.current.get(u.sessionId),
+              durationEstimates[u.sessionId],
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const inFlightCards = inFlight.length > 0 && (
+    <div className="dropzone-inflight" onClick={(e) => e.stopPropagation()} style={{ display: "flex", flexDirection: "column", gap: "8px", width: "100%" }}>
+      {inFlight.map(g => {
+        if (g.kind === "single") return <ProcessingCard key={g.upload.sessionId} u={g.upload} />;
+        const running = g.uploads.filter(u => u.status === "Processing");
+        const done = g.uploads.filter(u => u.status === "Completed").length;
+        const phases = running.map(u => sessionPhases[u.sessionId]);
+        const statusLabel =
+          phases.some(p => p === undefined || p === "running") ? "Running…" :
+          phases.some(p => p === "queued") ? "Queued for GPU" : "Uploading…";
+        return (
+          <ProcessingSummaryBar key={g.batchId} title={g.label} running={running.length}
+            done={done} statusLabel={statusLabel}
+            closeNote={closeNote} closeReady={!closeInfo.active}
+            onViewDetails={() => { track("upload_open_batch_details"); setDetailsBatchId(g.batchId); }}
+            onCancelAll={() => running.forEach(u => cancelRun(u))} />
+        );
+      })}
+    </div>
+  );
+
   return (
     <div className="upload-page-wrapper">
       {/* Ambient glow */}
@@ -1716,6 +1810,10 @@ const UploadPage: React.FC = () => {
           <div
             className={`dropzone${isDragOver ? " drag-over" : ""}${allUploadsDone ? " dropzone--all-done" : ""}`}
             onClick={() => {
+              // While a run is in-flight and nothing new is selected yet, this
+              // box is showing status, not the picker - a stray click on the
+              // card's own padding shouldn't pop the file dialog.
+              if (selectedItems.length === 0 && inFlight.length > 0) return;
               if (ensureAccount()) fileInputRef.current?.click();
             }}
             onDrop={handleDrop}
@@ -1760,7 +1858,12 @@ const UploadPage: React.FC = () => {
               style={{ display: "none" }}
               onChange={handleDicomInferenceSelect}
             />
-            {selectedItems.length === 0 ? (
+            {selectedItems.length === 0 && inFlight.length > 0 ? (
+              // A run is already going - this box stays the single place to
+              // watch it instead of reverting to the empty picker while a
+              // separate card appears elsewhere on the page.
+              inFlightCards
+            ) : selectedItems.length === 0 ? (
               <>
                 <svg
                   className="dropzone-icon"
@@ -2367,21 +2470,9 @@ const UploadPage: React.FC = () => {
             render as their own card. In-flight groups show above; finished ones
             drop into Completed Uploads, batches staying grouped. */}
         {(() => {
-          const groups = groupUploads(recentUploads);
-          const inFlight = groups.filter(isGroupInFlight);
-          // Only the last day stays here. Anything older is history, and lives
-          // in settings — this page is for the work in front of you.
-          const { recent: finished, older } = splitByAge(groups.filter(g => !isGroupInFlight(g)));
-
-          // Only the upload needs this tab open; past that the job lives in the
-          // server's queue. Rides along on each card's status line rather than as
-          // its own banner - it's reassurance, not a state the user must act on.
-          const closeNote = closeInfo.active
-            ? closeInfo.eta === null
-              ? "keep tab open"
-              : `safe to close in ${formatEta(closeInfo.eta)}`
-            : "safe to close";
-
+          // groups/inFlight/finished/older/closeNote are computed above (near
+          // the top of render) so the dropzone can show the in-flight card
+          // itself; reused here rather than recomputed.
           const canView = (u: RecentUpload) => u.status !== "Failed" && u.status !== "Cancelled";
           const openSession = (u: RecentUpload) => {
             if (!canView(u)) return;
@@ -2459,65 +2550,8 @@ const UploadPage: React.FC = () => {
             fontSize: "11px", cursor: "pointer",
           } as const;
 
-          // ── A single in-flight scan (not part of a batch) ──
-          const ProcessingCard = ({ u }: { u: RecentUpload }) => {
-            const phase = sessionPhases[u.sessionId];
-            const queuePos = queuePositions[u.sessionId];
-            const phaseLabel =
-              phase === "waiting" ? "Waiting to upload…" :
-              phase === "uploading" ? "Uploading…" :
-              phase === "queued" ? (queuePos ? `#${queuePos} in queue` : "Queued for GPU") :
-              "Running…";
-            return (
-              <div style={{
-                background: "#f5f5f5", border: "1px solid rgba(0, 45, 114, 0.14)", borderRadius: "12px",
-                padding: "16px 20px", display: "flex", flexDirection: "column", gap: "12px",
-              }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-                    <div style={{
-                      width: "36px", height: "36px", borderRadius: "8px", flexShrink: 0,
-                      background: "rgba(0, 45, 114, 0.04)", border: "1px solid rgba(0, 45, 114, 0.12)",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                    }}>{/* A static pulsing dot per scan instead of a spinning wheel:
-                         multiple in-flight scans shouldn't each spin. The single
-                         spinner lives in the batch ProcessingSummaryBar. */}
-                      <span className="animate-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: "#002d72", display: "block" }} />
-                    </div>
-                    <div>
-                      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
-                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
-                        {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}
-                        <span className={`proc-close-note${closeInfo.active ? "" : " proc-close-note--ready"}`}>
-                          {" "}· {closeNote}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                    <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: phase === "queued" ? "#6a6a6a" : "#002d72" }}>{phaseLabel}</span>
-                    <button className="active-cancel-btn" onClick={() => cancelRun(u)}>Cancel</button>
-                  </div>
-                </div>
-                {/* No real percent-complete exists for inference (nnU-Net doesn't
-                    report progress mid-run), so instead of an indeterminate sweep
-                    that told the user nothing, this shows how long the run has
-                    left based on how this model's runs typically take. Only shown
-                    once actually running: during "queued" there's no dispatch-time
-                    signal to build an estimate from. */}
-                {phase === "running" && (
-                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a" }}>
-                    {estimateRemaining(
-                      u.model || "",
-                      runningStartedAtRef.current.get(u.sessionId) ?? Date.now(),
-                      sessionFileSizeRef.current.get(u.sessionId),
-                      durationEstimates[u.sessionId],
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          };
+          // ProcessingCard is hoisted above (near the top of render) since the
+          // dropzone now needs it too.
 
           // ── A finished individual scan: status, View, Download, remove ──
           const CompletedCard = ({ u }: { u: RecentUpload }) => (
@@ -2656,27 +2690,6 @@ const UploadPage: React.FC = () => {
 
           return (
             <>
-              {inFlight.length > 0 && (
-                <div style={{ marginTop: "32px", display: "flex", flexDirection: "column", gap: "8px" }}>
-                  {inFlight.map(g => {
-                    if (g.kind === "single") return <ProcessingCard key={g.upload.sessionId} u={g.upload} />;
-                    const running = g.uploads.filter(u => u.status === "Processing");
-                    const done = g.uploads.filter(u => u.status === "Completed").length;
-                    const phases = running.map(u => sessionPhases[u.sessionId]);
-                    const statusLabel =
-                      phases.some(p => p === undefined || p === "running") ? "Running…" :
-                      phases.some(p => p === "queued") ? "Queued for GPU" : "Uploading…";
-                    return (
-                      <ProcessingSummaryBar key={g.batchId} title={g.label} running={running.length}
-                        done={done} statusLabel={statusLabel}
-                        closeNote={closeNote} closeReady={!closeInfo.active}
-                        onViewDetails={() => { track("upload_open_batch_details"); setDetailsBatchId(g.batchId); }}
-                        onCancelAll={() => running.forEach(u => cancelRun(u))} />
-                    );
-                  })}
-                </div>
-              )}
-
               <div style={{ marginTop: "32px" }}>
                 <SectionLabel>Model</SectionLabel>
                 {modelCard}
